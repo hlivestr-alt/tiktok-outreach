@@ -192,14 +192,15 @@ export function buildPreview(input: {
 }
 
 export type SafetyLimits = {
-  maxSendsPerCampaign: number;
+  maxRecipientsPerCampaign: number;
+  maxDispatchAttemptsPerCampaign: number;
   maxSendsPerDay: number;
   maxDispatchesPerMinute: number;
 };
 
 export function assertCampaignWithinLimit(requested: number, limits: SafetyLimits): void {
   if (!Number.isInteger(requested) || requested < 1) throw new Error("Target count must be a positive integer");
-  if (requested > limits.maxSendsPerCampaign) throw new Error(`Target exceeds the campaign ceiling of ${limits.maxSendsPerCampaign}`);
+  if (requested > limits.maxRecipientsPerCampaign) throw new Error(`Target exceeds the campaign recipient ceiling of ${limits.maxRecipientsPerCampaign}`);
 }
 
 export type ReconciliationMessage = {

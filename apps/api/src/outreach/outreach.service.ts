@@ -4,7 +4,7 @@ import { Prisma } from "@affiliate/db";
 import type { CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
-import { ensureMockShop, PrismaService, QueueService } from "../shared";
+import { ensureMockShop, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 
 @Injectable()
 export class OutreachService {
@@ -12,6 +12,7 @@ export class OutreachService {
   constructor(private readonly prisma: PrismaService, private readonly queues: QueueService) {}
 
   async list() {
+    await expireFrozenCampaigns(this.prisma);
     return this.prisma.campaign.findMany({ orderBy: { createdAt: "desc" }, include: { _count: { select: { recipients: true, deliveries: true } } } });
   }
 
@@ -20,7 +21,9 @@ export class OutreachService {
     const rankingMetrics = new Set(["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]);
     try {
       assertCampaignWithinLimit(input.targetCount, {
-        maxSendsPerCampaign: shop.maxSendsPerCampaign, maxSendsPerDay: shop.maxSendsPerDay, maxDispatchesPerMinute: shop.maxDispatchesPerMinute
+        maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign,
+        maxDispatchAttemptsPerCampaign: shop.maxDispatchAttemptsPerCampaign,
+        maxSendsPerDay: shop.maxSendsPerDay, maxDispatchesPerMinute: shop.maxDispatchesPerMinute
       });
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
@@ -59,8 +62,9 @@ export class OutreachService {
   }
 
   async discover(id: string) {
+    await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
-    if (!["DRAFT", "PREVIEW_READY"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
+    if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
     await this.prisma.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
     const creators: CreatorCandidate[] = [];
     let pageToken: string | undefined;
@@ -126,6 +130,7 @@ export class OutreachService {
   }
 
   async preview(id: string) {
+    await expireFrozenCampaigns(this.prisma);
     return this.prisma.campaign.findUnique({ where: { id }, include: {
       recipients: { orderBy: [{ selected: "desc" }, { rankingValue: "desc" }], take: 250, include: { creator: true, snapshot: true } }
     }});
@@ -140,6 +145,7 @@ export class OutreachService {
   }
 
   async get(id: string) {
+    await expireFrozenCampaigns(this.prisma);
     const campaign = await this.prisma.campaign.findUnique({ where: { id }, include: {
       shop: true, recipients: { include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 250 },
       _count: { select: { recipients: true, deliveries: true } }
@@ -149,13 +155,47 @@ export class OutreachService {
   }
 
   async freeze(id: string, version: number) {
+    await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
-    const selected = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true }, include: { creator: true } });
-    if (!selected.length) throw new BadRequestException("No eligible recipients to freeze");
     const expiresAt = new Date(Date.now() + 30 * 60_000);
     await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`freeze:${campaign.shopId}`}))`;
+      const current = await tx.campaign.findUniqueOrThrow({ where: { id }, include: { shop: true } });
+      if (current.state !== "PREVIEW_READY" || current.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
+      await tx.outreachReservation.deleteMany({ where: { shopId: current.shopId, expiresAt: { lte: new Date() } } });
+      const selected = await tx.campaignRecipient.findMany({
+        where: { campaignId: id, selected: true },
+        include: {
+          creator: { include: { contacts: { where: { shopId: current.shopId }, take: 1 } } },
+          reservation: true
+        }, orderBy: { rankingValue: current.rankingDirection === "ASC" ? "asc" : "desc" }
+      });
+      if (!selected.length) throw new BadRequestException("No eligible recipients to freeze");
+      const cutoff = new Date(Date.now() - current.cooldownDays * 86_400_000);
+      const exclusionCounts: Record<string, number> = {};
+      let finalSelected = 0;
       for (const recipient of selected) {
+        const contact = recipient.creator.contacts[0];
+        const activeReservation = await tx.outreachReservation.findFirst({
+          where: { shopId: current.shopId, creatorId: recipient.creatorId, expiresAt: { gt: new Date() } }
+        });
+        let skipReason: "DO_NOT_CONTACT" | "DELIVERY_UNKNOWN" | "COOLDOWN" | "ACTIVE_RESERVATION" | undefined;
+        let skipDetail: string | undefined;
+        if (contact?.doNotContact) skipReason = "DO_NOT_CONTACT";
+        else if (contact?.unresolvedDelivery) skipReason = "DELIVERY_UNKNOWN";
+        else if (contact?.lastContactedAt && contact.lastContactedAt > cutoff) {
+          skipReason = "COOLDOWN";
+          skipDetail = `Contact appeared after preview at ${contact.lastContactedAt.toISOString()}`;
+        } else if (activeReservation) skipReason = "ACTIVE_RESERVATION";
+        if (skipReason) {
+          exclusionCounts[skipReason] = (exclusionCounts[skipReason] ?? 0) + 1;
+          await tx.campaignRecipient.update({ where: { id: recipient.id }, data: {
+            selected: false, eligibility: "EXCLUDED", skipReason, skipDetail, state: "DISCOVERED",
+            frozenMessage: null, contentHash: null
+          } });
+          continue;
+        }
         const frozenMessage = renderMessage(campaign.messageTemplate, {
           creatorDisplayName: recipient.creator.nickname ?? recipient.creator.username ?? "there",
           productName: campaign.productName, campaignName: campaign.name
@@ -163,38 +203,63 @@ export class OutreachService {
         const contentHash = createHash("sha256").update(frozenMessage).digest("hex");
         await tx.outreachReservation.create({ data: { shopId: campaign.shopId, creatorId: recipient.creatorId, campaignRecipientId: recipient.id, expiresAt } });
         await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { frozenMessage, contentHash, state: "RESERVED" } });
+        finalSelected++;
       }
+      const previousSummary = current.summary && typeof current.summary === "object" && !Array.isArray(current.summary)
+        ? current.summary as Record<string, unknown> : {};
+      const numberValue = (key: string) => Number(previousSummary[key] ?? 0);
+      const finalSummary = {
+        ...previousSummary,
+        selected: finalSelected,
+        eligible: Math.max(0, numberValue("eligible") - Object.values(exclusionCounts).reduce((sum, count) => sum + count, 0)),
+        shortfall: Math.max(0, current.targetCount - finalSelected),
+        skippedDoNotContact: numberValue("skippedDoNotContact") + (exclusionCounts.DO_NOT_CONTACT ?? 0),
+        skippedUnknownDelivery: numberValue("skippedUnknownDelivery") + (exclusionCounts.DELIVERY_UNKNOWN ?? 0),
+        skippedCooldown: numberValue("skippedCooldown") + (exclusionCounts.COOLDOWN ?? 0),
+        skippedActiveReservation: numberValue("skippedActiveReservation") + (exclusionCounts.ACTIVE_RESERVATION ?? 0),
+        freezeAdjustment: selected.length - finalSelected
+      };
       await tx.campaign.update({ where: { id }, data: { state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt, version: { increment: 1 } } });
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: { selected: selected.length, expiresAt: expiresAt.toISOString() } } });
-    });
+      await tx.campaign.update({ where: { id }, data: { summary: finalSummary as Prisma.InputJsonValue } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: {
+        previewSelected: selected.length, finalSelected, exclusions: exclusionCounts, expiresAt: expiresAt.toISOString()
+      } } });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 20_000 });
     return this.get(id);
   }
 
   async start(id: string, input: { version: number; confirmationName: string; confirmationCount: number }) {
+    await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
-    const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true } });
+    const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true, state: "RESERVED" } });
     if (campaign.state !== "FROZEN" || campaign.version !== input.version || !campaign.freezeExpiresAt || campaign.freezeExpiresAt <= new Date()) throw new BadRequestException("Frozen preview is stale or expired");
     if (input.confirmationName !== campaign.name || input.confirmationCount !== selectedCount) throw new BadRequestException("Typed campaign name and selected count must match exactly");
-    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true } });
+    if (!selectedCount) throw new BadRequestException("No frozen recipients remain; rediscover and freeze again");
+    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true, state: "RESERVED" } });
     await this.prisma.$transaction(async (tx) => {
       await tx.outreachReservation.updateMany({
         where: { recipient: { campaignId: id, selected: true } },
         data: { expiresAt: new Date("9999-12-31T23:59:59.999Z") }
       });
       for (const recipient of recipients) {
-        await tx.outreachDelivery.upsert({
+        const delivery = await tx.outreachDelivery.upsert({
           where: { campaignRecipientId: recipient.id },
           update: {},
           create: { campaignId: id, campaignRecipientId: recipient.id, deterministicKey: `${id}:${recipient.creatorId}`, contentHash: recipient.contentHash! }
+        });
+        await tx.queueOutbox.upsert({
+          where: { recipientId: recipient.id }, update: { state: "PENDING", availableAt: new Date(), lastError: null },
+          create: {
+            campaignId: id, deliveryId: delivery.id, recipientId: recipient.id,
+            deterministicJobId: `send-${recipient.id}`
+          }
         });
         await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } });
       }
       await tx.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
       await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_CONFIRMED", payload: { selectedCount } } });
     });
-    for (const recipient of recipients) await this.queues.outreach.add("send", { recipientId: recipient.id }, {
-      jobId: `send-${recipient.id}`, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000
-    });
+    await this.queues.reconcile();
     return this.get(id);
   }
 
@@ -209,9 +274,7 @@ export class OutreachService {
     if (!["PAUSED", "PAUSE_REQUESTED"].includes(campaign.state)) throw new BadRequestException("Campaign is not paused");
     const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, state: { in: ["QUEUED", "RESERVED"] } } });
     await this.prisma.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
-    for (const recipient of recipients) await this.queues.outreach.add("send", { recipientId: recipient.id }, {
-      jobId: `send-${recipient.id}`, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000
-    });
+    await this.queues.reconcile();
     return this.get(id);
   }
 }

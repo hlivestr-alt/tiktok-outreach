@@ -29,11 +29,17 @@ The domain package owns filtering, ranking, cooldown decisions, deduplication, t
 8. Require the current campaign version, exact campaign name, and exact selected count before enqueueing.
 9. Dispatch through BullMQ. PostgreSQL records a dispatch slot before every provider attempt.
 
-Frozen previews expire after 30 minutes. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection. A deterministic delivery key and BullMQ job ID make restarts idempotent.
+Frozen previews expire after 30 minutes, move to `PREVIEW_EXPIRED`, and release reservations idempotently. Freeze re-checks current contact state, cooldown, unknown deliveries, do-not-contact, and active reservations under a shop-scoped transaction lock. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection.
+
+Campaign recipient capacity (`maxRecipientsPerCampaign`) and provider dispatch-attempt capacity (`maxDispatchAttemptsPerCampaign`) are independent. Daily and rolling-minute claims remain separate. Reaching the campaign attempt ceiling moves the campaign to `SAFETY_PAUSED`; it does not create an infinite delayed-job loop.
+
+PostgreSQL is the queue source of truth. Campaign start commits each delivery and its `QueueOutbox` intent atomically. API and worker sweepers reconcile every safe `QUEUED` recipient to a deterministic BullMQ job after partial Redis failures or restarts. Queue presence never marks a delivery sent.
 
 ## Persistent data
 
-The Prisma schema separates shops and integration modes, creator identity, metric snapshots, shop-specific contact state, conversations and messages, history sync/import runs, campaigns and frozen recipients, reservations, deliveries and attempts, reconciliation evidence, dispatch events, daily usage, and audit events.
+The Prisma schema separates shops and integration modes, creator identity, metric snapshots, shop-specific contact state, conversations and messages, resumable paged history sync/import runs, cross-file historical contact facts, campaigns and frozen recipients, reservations, durable queue intents, deliveries and attempts, reconciliation evidence, dispatch events, daily usage, and audit events.
+
+Safety values from environment variables are used only when the mock Shop is first created. Persistent Shop columns are authoritative at runtime thereafter, and `SafetySettingsAudit` records initialization and provides the audit trail required for future setting changes.
 
 PostgreSQL stores the exact frozen outbound message and content hash. Runtime logs include only operational IDs, provider-safe error codes, and error summaries; they do not log message bodies, access tokens, app secrets, or request signatures.
 

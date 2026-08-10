@@ -4,6 +4,8 @@ import { Prisma, PrismaClient } from "@affiliate/db";
 import { loadConfig } from "@affiliate/config";
 import { reconcileUnknownDelivery } from "@affiliate/domain";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
+import { reserveDispatchSlot, SafetyDelay } from "./dispatch-safety";
+import { deliveryAction, recoverDispatchingDelivery } from "./delivery-policy";
 
 const config = loadConfig();
 const redisUrl = new URL(config.REDIS_URL);
@@ -14,45 +16,48 @@ const queue = new Queue("outreach", { connection });
 const reconciliationDelays = config.MOCK_RECONCILIATION_DELAYS_MS.split(",").map(Number);
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
-class SafetyDelay extends Error {
-  constructor(readonly delayMs: number, message: string) { super(message); }
-}
+async function maintenanceSweep(): Promise<void> {
+  const now = new Date();
+  await prisma.$transaction(async (tx) => {
+    const expired = await tx.campaign.findMany({ where: { state: "FROZEN", freezeExpiresAt: { lte: now } }, select: { id: true, shopId: true } });
+    for (const campaign of expired) {
+      const changed = await tx.campaign.updateMany({ where: { id: campaign.id, state: "FROZEN", freezeExpiresAt: { lte: now } }, data: { state: "PREVIEW_EXPIRED", version: { increment: 1 } } });
+      if (!changed.count) continue;
+      await tx.outreachReservation.deleteMany({ where: { recipient: { campaignId: campaign.id } } });
+      await tx.campaignRecipient.updateMany({ where: { campaignId: campaign.id, state: "RESERVED" }, data: { state: "SELECTED", frozenMessage: null, contentHash: null } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: campaign.id, eventType: "CAMPAIGN_FREEZE_EXPIRED", payload: { expiredAt: now.toISOString(), reservationsReleased: true } } });
+    }
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
-const shopDate = (date: Date, timezone: string): Date => {
-  const formatted = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
-  return new Date(`${formatted}T00:00:00.000Z`);
-};
+  const recipients = await prisma.campaignRecipient.findMany({
+    where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED"] } } },
+    include: { delivery: true }, take: 250
+  });
+  for (const recipient of recipients) {
+    if (!recipient.delivery) continue;
+    const entry = await prisma.queueOutbox.upsert({
+      where: { recipientId: recipient.id }, update: {},
+      create: { campaignId: recipient.campaignId, deliveryId: recipient.delivery.id, recipientId: recipient.id, deterministicJobId: `send-${recipient.id}` }
+    });
+    try {
+      const existing = await queue.getJob(entry.deterministicJobId);
+      if (existing) {
+        const state = await existing.getState();
+        if (state === "completed" || state === "failed") await existing.remove();
+        else continue;
+      }
+      await queue.add("send", { recipientId: recipient.id }, { jobId: entry.deterministicJobId, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000 });
+      await prisma.queueOutbox.update({ where: { id: entry.id }, data: { state: "ENQUEUED", enqueuedAt: new Date(), enqueueAttempts: { increment: 1 }, lastError: null } });
+    } catch (error) {
+      await prisma.queueOutbox.update({ where: { id: entry.id }, data: { state: "PENDING", enqueueAttempts: { increment: 1 }, lastError: error instanceof Error ? error.message : "Queue reconciliation failed" } });
+    }
+  }
+}
 
 async function delayJob(job: Job, delayMs: number): Promise<never> {
   if (!job.token) throw new Error("Active job has no token");
   await job.moveToDelayed(Date.now() + delayMs, job.token);
   throw new DelayedError();
-}
-
-async function reserveDispatchSlot(recipient: any): Promise<void> {
-  const now = new Date();
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`outbound:${recipient.campaign.shopId}`}))`;
-    const campaign = await tx.campaign.findUniqueOrThrow({ where: { id: recipient.campaignId }, include: { shop: true } });
-    if (campaign.dispatchCount >= campaign.shop.maxSendsPerCampaign) throw new SafetyDelay(86_400_000, "Campaign safety ceiling reached");
-    const oneMinuteAgo = new Date(now.getTime() - 60_000);
-    const recent = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneMinuteAgo } } });
-    if (recent >= campaign.shop.maxDispatchesPerMinute) throw new SafetyDelay(60_000, "Absolute dispatch-rate ceiling reached");
-    const date = shopDate(now, campaign.shop.timezone);
-    const usage = await tx.shopOutboundDailyUsage.findUnique({ where: { shopId_shopDate: { shopId: campaign.shopId, shopDate: date } } });
-    if ((usage?.dispatchCount ?? 0) >= campaign.shop.maxSendsPerDay) throw new SafetyDelay(15 * 60_000, "Daily shop ceiling reached");
-    await tx.shopOutboundDailyUsage.upsert({
-      where: { shopId_shopDate: { shopId: campaign.shopId, shopDate: date } },
-      update: { dispatchCount: { increment: 1 }, ceiling: campaign.shop.maxSendsPerDay },
-      create: { shopId: campaign.shopId, shopDate: date, dispatchCount: 1, ceiling: campaign.shop.maxSendsPerDay }
-    });
-    await tx.outboundDispatchEvent.create({ data: { shopId: campaign.shopId, campaignId: campaign.id, deliveryId: recipient.delivery.id, dispatchedAt: now } });
-    await tx.campaign.update({ where: { id: campaign.id }, data: { dispatchCount: { increment: 1 }, state: "RUNNING" } });
-    await tx.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
-      state: "DISPATCHING", firstDispatchedAt: recipient.delivery.firstDispatchedAt ?? now, attemptCount: { increment: 1 }
-    } });
-    await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "PROCESSING" } });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
 async function markSent(recipient: any, conversationId: string, externalMessageId: string, requestId?: string) {
@@ -67,6 +72,7 @@ async function markSent(recipient: any, conversationId: string, externalMessageI
       create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, firstContactedAt: now, lastContactedAt: now, contactCount: 1, lastCampaignId: recipient.campaignId, lastDeliveryId: recipient.delivery.id }
     });
     await tx.outreachReservation.deleteMany({ where: { campaignRecipientId: recipient.id } });
+    await tx.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } });
   });
 }
 
@@ -88,7 +94,8 @@ async function markTerminalFailure(recipient: any, errorCode: string, errorDetai
     prisma.campaignRecipient.update({ where: { id: recipient.id }, data: {
       state: "FAILED", skipReason: errorCode, skipDetail: errorDetail
     } }),
-    prisma.outreachReservation.deleteMany({ where: { campaignRecipientId: recipient.id } })
+    prisma.outreachReservation.deleteMany({ where: { campaignRecipientId: recipient.id } }),
+    prisma.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } })
   ]);
 }
 
@@ -105,7 +112,8 @@ async function markDeliveryUnknown(recipient: any, attemptId: string, requestId:
       where: { shopId_creatorId: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId } },
       update: { unresolvedDelivery: true },
       create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, unresolvedDelivery: true }
-    })
+    }),
+    prisma.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } })
   ]);
   await scheduleReconciliation(recipient.delivery.id, 1);
 }
@@ -123,13 +131,10 @@ async function processSend(job: Job<{ recipientId: string }>) {
     include: { creator: true, campaign: { include: { shop: true } }, delivery: true, reservation: true }
   });
   if (!recipient?.delivery || !recipient.frozenMessage || !recipient.contentHash) return;
-  if (["SENT", "FAILED_TERMINAL", "DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"].includes(recipient.delivery.state)) return;
-  if (recipient.delivery.state === "DISPATCHING") {
-    await prisma.$transaction([
-      prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { state: "DELIVERY_UNKNOWN", lastErrorDetail: "Worker restarted after dispatch began" } }),
-      prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "DELIVERY_UNKNOWN" } }),
-      prisma.creatorShopContactState.upsert({ where: { shopId_creatorId: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId } }, update: { unresolvedDelivery: true }, create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, unresolvedDelivery: true } })
-    ]);
+  const action = deliveryAction(recipient.delivery.state);
+  if (action === "SKIP") return;
+  if (action === "RECOVER_AS_UNKNOWN") {
+    await recoverDispatchingDelivery(prisma, recipient);
     await scheduleReconciliation(recipient.delivery.id, 1);
     return;
   }
@@ -137,6 +142,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
     if (recipient.campaign.state === "PAUSE_REQUESTED") await prisma.campaign.update({ where: { id: recipient.campaignId }, data: { state: "PAUSED" } });
     return delayJob(job, 5000);
   }
+  if (recipient.campaign.state === "SAFETY_PAUSED") return;
   const providerConversation = await adapter.createOrGetConversation(recipient.creator.creatorOpenId);
   const conversation = await prisma.conversation.upsert({
     where: { externalConversationId: providerConversation.conversationId }, update: {},
@@ -144,14 +150,18 @@ async function processSend(job: Job<{ recipientId: string }>) {
   });
   await prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { conversationId: conversation.id } });
   recipient.delivery.conversationId = conversation.id;
-  try { await reserveDispatchSlot(recipient); }
+  let claim: Awaited<ReturnType<typeof reserveDispatchSlot>>;
+  try { claim = await reserveDispatchSlot(prisma, recipient); }
   catch (error) { if (error instanceof SafetyDelay) return delayJob(job, error.delayMs); throw error; }
+  if (!claim.claimed) return;
 
-  const attemptNumber = recipient.delivery.attemptCount + 1;
+  const attemptNumber = claim.attemptNumber;
   const attempt = await prisma.deliveryAttempt.create({ data: { deliveryId: recipient.delivery.id, attemptNumber, outcome: "STARTED", startedAt: new Date() } });
   let result: Awaited<ReturnType<typeof adapter.sendMessage>>;
   try {
-    result = await adapter.sendMessage(providerConversation.conversationId, recipient.creator.creatorOpenId, recipient.frozenMessage);
+    result = await adapter.sendMessage(providerConversation.conversationId, recipient.creator.creatorOpenId, recipient.frozenMessage, {
+      idempotencyKey: recipient.delivery.deterministicKey
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Network outcome was not observable";
     await markDeliveryUnknown(recipient, attempt.id, undefined, detail);
@@ -223,7 +233,8 @@ async function processReconciliation(job: Job<{ deliveryId: string; attemptNumbe
     await prisma.$transaction([
       prisma.deliveryReconciliationRun.update({ where: { deliveryId_attemptNumber: { deliveryId: delivery.id, attemptNumber: job.data.attemptNumber } }, data: { state: "UNRESOLVED", completedAt: new Date(), evidence: { reason: result.reason } } }),
       prisma.outreachDelivery.update({ where: { id: delivery.id }, data: { state: "DELIVERY_UNKNOWN_UNRESOLVED", lastErrorDetail: result.reason } }),
-      prisma.campaignRecipient.update({ where: { id: delivery.campaignRecipientId }, data: { state: "DELIVERY_UNKNOWN_UNRESOLVED" } })
+      prisma.campaignRecipient.update({ where: { id: delivery.campaignRecipientId }, data: { state: "DELIVERY_UNKNOWN_UNRESOLVED" } }),
+      prisma.outreachReservation.deleteMany({ where: { campaignRecipientId: delivery.campaignRecipientId } })
     ]);
   }
   await completeCampaignIfDone(delivery.campaignId);
@@ -240,9 +251,13 @@ const worker = new Worker("outreach", async (job) => {
 
 worker.on("failed", (job, error) => console.error("Outreach job failed", { jobId: job?.id, error: error.message }));
 worker.on("error", (error) => console.error("Worker error", { error: error.message }));
+void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error));
+const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error)), 5_000);
+maintenanceTimer.unref();
 console.log("Mock outreach worker ready", { mode: config.APP_MODE, outboundProvider: "mock-only" });
 
 async function shutdown() {
+  clearInterval(maintenanceTimer);
   await worker.close();
   await queue.close();
   await prisma.$disconnect();
