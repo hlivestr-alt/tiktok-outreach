@@ -1,0 +1,217 @@
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { createHash } from "node:crypto";
+import { Prisma } from "@affiliate/db";
+import type { CampaignCreateInput } from "@affiliate/contracts";
+import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
+import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
+import { ensureMockShop, PrismaService, QueueService } from "../shared";
+
+@Injectable()
+export class OutreachService {
+  private readonly adapter = new MockTikTokAffiliateAdapter();
+  constructor(private readonly prisma: PrismaService, private readonly queues: QueueService) {}
+
+  async list() {
+    return this.prisma.campaign.findMany({ orderBy: { createdAt: "desc" }, include: { _count: { select: { recipients: true, deliveries: true } } } });
+  }
+
+  async create(input: CampaignCreateInput) {
+    const shop = await ensureMockShop(this.prisma);
+    const rankingMetrics = new Set(["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]);
+    try {
+      assertCampaignWithinLimit(input.targetCount, {
+        maxSendsPerCampaign: shop.maxSendsPerCampaign, maxSendsPerDay: shop.maxSendsPerDay, maxDispatchesPerMinute: shop.maxDispatchesPerMinute
+      });
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
+    }
+    if (!input.name?.trim() || !input.productName?.trim() || !input.messageTemplate?.trim()) throw new BadRequestException("Name, product, and message template are required");
+    if (!Number.isInteger(input.cooldownDays) || input.cooldownDays < 0) throw new BadRequestException("Cooldown must be zero or more days");
+    if (input.messageTemplate.length > 2000) throw new BadRequestException("Message template exceeds the mock provider limit of 2,000 characters");
+    if (input.candidateLimit != null && (!Number.isInteger(input.candidateLimit) || input.candidateLimit < input.targetCount)) {
+      throw new BadRequestException("Candidate limit must be an integer at least as large as the target");
+    }
+    if (!rankingMetrics.has(input.rankingMetric)) throw new BadRequestException("Unsupported ranking metric");
+    if (input.rankingDirection && !["ASC", "DESC"].includes(input.rankingDirection)) throw new BadRequestException("Unsupported ranking direction");
+    if (input.filters?.minFollowers != null && input.filters?.maxFollowers != null && input.filters.minFollowers > input.filters.maxFollowers) {
+      throw new BadRequestException("Minimum followers cannot exceed maximum followers");
+    }
+    if (input.filters?.minGmv != null && input.filters?.maxGmv != null && input.filters.minGmv > input.filters.maxGmv) {
+      throw new BadRequestException("Minimum GMV cannot exceed maximum GMV");
+    }
+    try {
+      renderMessage(input.messageTemplate, { creatorDisplayName: "Creator", productName: input.productName, campaignName: input.name });
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : "Invalid message template");
+    }
+    return this.prisma.campaign.create({ data: {
+      shopId: shop.id, name: input.name.trim(), productName: input.productName.trim(), targetCount: input.targetCount,
+      candidateLimit: Math.min(10_000, input.candidateLimit ?? Math.max(input.targetCount * 2, input.targetCount + 500)),
+      cooldownDays: input.cooldownDays, messageTemplate: input.messageTemplate, filters: (input.filters ?? {}) as Prisma.InputJsonValue,
+      rankingMetric: input.rankingMetric, rankingDirection: input.rankingDirection ?? "DESC"
+    }});
+  }
+
+  private async requiredCampaign(id: string) {
+    const campaign = await this.prisma.campaign.findUnique({ where: { id }, include: { shop: true } });
+    if (!campaign) throw new NotFoundException("Campaign not found");
+    return campaign;
+  }
+
+  async discover(id: string) {
+    const campaign = await this.requiredCampaign(id);
+    if (!["DRAFT", "PREVIEW_READY"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
+    await this.prisma.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
+    const creators: CreatorCandidate[] = [];
+    let pageToken: string | undefined;
+    let searchKey: string | undefined;
+    let hasMore = true;
+    while (hasMore && creators.length < campaign.candidateLimit) {
+      const page = await this.adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
+      creators.push(...page.creators.slice(0, campaign.candidateLimit - creators.length));
+      pageToken = page.nextPageToken;
+      searchKey = page.searchKey;
+      hasMore = page.hasMore;
+    }
+    const openIds = [...new Set(creators.map((creator) => creator.creatorOpenId))];
+    const existingCreators = await this.prisma.creator.findMany({ where: { creatorOpenId: { in: openIds } }, include: { contacts: { where: { shopId: campaign.shopId } } } });
+    const contacts = new Map<string, ContactState>(existingCreators.map((creator) => [creator.creatorOpenId, {
+      contactCount: creator.contacts[0]?.contactCount ?? 0,
+      lastContactedAt: creator.contacts[0]?.lastContactedAt ?? undefined,
+      firstContactedAt: creator.contacts[0]?.firstContactedAt ?? undefined,
+      doNotContact: creator.contacts[0]?.doNotContact,
+      unresolvedDelivery: creator.contacts[0]?.unresolvedDelivery,
+      historical: Boolean(creator.contacts[0]?.historyCoverageStart)
+    }]));
+    const reservations = await this.prisma.outreachReservation.findMany({ where: { shopId: campaign.shopId, expiresAt: { gt: new Date() } }, include: { creator: true } });
+    const preview = buildPreview({
+      creators, filters: campaign.filters as CreatorFilters, contacts,
+      activeReservations: new Set(reservations.map((reservation) => reservation.creator.creatorOpenId)),
+      requested: campaign.targetCount, cooldownDays: campaign.cooldownDays,
+      rankingMetric: campaign.rankingMetric as RankingMetric, rankingDirection: campaign.rankingDirection as "ASC" | "DESC",
+      now: new Date(), truncated: hasMore
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.campaignRecipient.deleteMany({ where: { campaignId: id } });
+      const canonical = new Map<string, (typeof preview.creators)[number]>();
+      for (const evaluated of preview.creators) if (!canonical.has(evaluated.creatorOpenId)) canonical.set(evaluated.creatorOpenId, evaluated);
+      for (const evaluated of canonical.values()) {
+        const creator = await tx.creator.upsert({
+          where: { creatorOpenId: evaluated.creatorOpenId },
+          update: { username: evaluated.username, nickname: evaluated.nickname, creatorUserId: evaluated.creatorUserId, selectionRegion: evaluated.selectionRegion },
+          create: { creatorOpenId: evaluated.creatorOpenId, creatorUserId: evaluated.creatorUserId, username: evaluated.username, nickname: evaluated.nickname, selectionRegion: evaluated.selectionRegion }
+        });
+        const snapshot = await tx.creatorMetricSnapshot.create({ data: {
+          creatorId: creator.id, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
+          gmvAmount: new Prisma.Decimal(evaluated.gmv.amount), gmvCurrency: evaluated.gmv.currency, unitsSold: evaluated.unitsSold,
+          avgVideoViews: evaluated.avgVideoViews, avgLiveViewers: evaluated.avgLiveViewers,
+          engagementRate: evaluated.engagementRate == null ? null : new Prisma.Decimal(evaluated.engagementRate),
+          sourceFetchedAt: new Date(), rawPayload: evaluated as unknown as Prisma.InputJsonValue
+        }});
+        await tx.campaignRecipient.create({ data: {
+          campaignId: id, creatorId: creator.id, snapshotId: snapshot.id, discoveryOrdinal: evaluated.discoveryOrdinal,
+          eligibility: evaluated.eligibility, skipReason: evaluated.skipReason, skipDetail: evaluated.skipDetail,
+          rankingValue: new Prisma.Decimal(evaluated.rankingValue), selected: evaluated.selected,
+          state: evaluated.selected ? "SELECTED" : evaluated.eligibility === "ELIGIBLE" ? "ELIGIBLE" : "DISCOVERED"
+        }});
+      }
+      await tx.campaign.update({ where: { id }, data: {
+        state: "PREVIEW_READY", summary: preview.summary as unknown as Prisma.InputJsonValue, searchKey, nextPageToken: pageToken,
+        truncated: hasMore, version: { increment: 1 }
+      }});
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: preview.summary as unknown as Prisma.InputJsonValue } });
+    });
+    return this.preview(id);
+  }
+
+  async preview(id: string) {
+    return this.prisma.campaign.findUnique({ where: { id }, include: {
+      recipients: { orderBy: [{ selected: "desc" }, { rankingValue: "desc" }], take: 250, include: { creator: true, snapshot: true } }
+    }});
+  }
+
+  async recipients(id: string, view?: string) {
+    const where: Prisma.CampaignRecipientWhereInput = { campaignId: id };
+    if (view === "selected") where.selected = true;
+    else if (view === "excluded") where.eligibility = "EXCLUDED";
+    else if (view === "eligible") where.eligibility = "ELIGIBLE";
+    return this.prisma.campaignRecipient.findMany({ where, include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 1000 });
+  }
+
+  async get(id: string) {
+    const campaign = await this.prisma.campaign.findUnique({ where: { id }, include: {
+      shop: true, recipients: { include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 250 },
+      _count: { select: { recipients: true, deliveries: true } }
+    }});
+    if (!campaign) throw new NotFoundException("Campaign not found");
+    return campaign;
+  }
+
+  async freeze(id: string, version: number) {
+    const campaign = await this.requiredCampaign(id);
+    if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
+    const selected = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true }, include: { creator: true } });
+    if (!selected.length) throw new BadRequestException("No eligible recipients to freeze");
+    const expiresAt = new Date(Date.now() + 30 * 60_000);
+    await this.prisma.$transaction(async (tx) => {
+      for (const recipient of selected) {
+        const frozenMessage = renderMessage(campaign.messageTemplate, {
+          creatorDisplayName: recipient.creator.nickname ?? recipient.creator.username ?? "there",
+          productName: campaign.productName, campaignName: campaign.name
+        });
+        const contentHash = createHash("sha256").update(frozenMessage).digest("hex");
+        await tx.outreachReservation.create({ data: { shopId: campaign.shopId, creatorId: recipient.creatorId, campaignRecipientId: recipient.id, expiresAt } });
+        await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { frozenMessage, contentHash, state: "RESERVED" } });
+      }
+      await tx.campaign.update({ where: { id }, data: { state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt, version: { increment: 1 } } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: { selected: selected.length, expiresAt: expiresAt.toISOString() } } });
+    });
+    return this.get(id);
+  }
+
+  async start(id: string, input: { version: number; confirmationName: string; confirmationCount: number }) {
+    const campaign = await this.requiredCampaign(id);
+    const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true } });
+    if (campaign.state !== "FROZEN" || campaign.version !== input.version || !campaign.freezeExpiresAt || campaign.freezeExpiresAt <= new Date()) throw new BadRequestException("Frozen preview is stale or expired");
+    if (input.confirmationName !== campaign.name || input.confirmationCount !== selectedCount) throw new BadRequestException("Typed campaign name and selected count must match exactly");
+    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.outreachReservation.updateMany({
+        where: { recipient: { campaignId: id, selected: true } },
+        data: { expiresAt: new Date("9999-12-31T23:59:59.999Z") }
+      });
+      for (const recipient of recipients) {
+        await tx.outreachDelivery.upsert({
+          where: { campaignRecipientId: recipient.id },
+          update: {},
+          create: { campaignId: id, campaignRecipientId: recipient.id, deterministicKey: `${id}:${recipient.creatorId}`, contentHash: recipient.contentHash! }
+        });
+        await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } });
+      }
+      await tx.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_CONFIRMED", payload: { selectedCount } } });
+    });
+    for (const recipient of recipients) await this.queues.outreach.add("send", { recipientId: recipient.id }, {
+      jobId: `send-${recipient.id}`, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000
+    });
+    return this.get(id);
+  }
+
+  async pause(id: string) {
+    const campaign = await this.requiredCampaign(id);
+    if (!["QUEUED", "RUNNING"].includes(campaign.state)) throw new BadRequestException("Campaign is not running");
+    return this.prisma.campaign.update({ where: { id }, data: { state: "PAUSE_REQUESTED", version: { increment: 1 } } });
+  }
+
+  async resume(id: string) {
+    const campaign = await this.requiredCampaign(id);
+    if (!["PAUSED", "PAUSE_REQUESTED"].includes(campaign.state)) throw new BadRequestException("Campaign is not paused");
+    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, state: { in: ["QUEUED", "RESERVED"] } } });
+    await this.prisma.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
+    for (const recipient of recipients) await this.queues.outreach.add("send", { recipientId: recipient.id }, {
+      jobId: `send-${recipient.id}`, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000
+    });
+    return this.get(id);
+  }
+}

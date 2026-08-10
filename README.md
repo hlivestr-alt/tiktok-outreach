@@ -1,0 +1,65 @@
+# Affiliate Outreach Operations
+
+Phase-one mock implementation of TikTok Shop affiliate bulk outreach operations. It discovers deterministic Indonesian creator fixtures, applies filters and historical cooldowns, freezes exact messages, and runs a crash-aware BullMQ mock queue with absolute safety ceilings.
+
+Detailed design notes are in [Architecture and safety](docs/architecture.md) and [Future TikTok integration](docs/tiktok-integration.md).
+
+## Safety boundary
+
+- `APP_MODE` accepts only `mock`.
+- No TikTok production adapter or credentials exist.
+- No code connects to TikTok or n8n.
+- The unauthenticated application binds to localhost only.
+- PostgreSQL stores exact frozen outbound messages; runtime logs use IDs and hashes only.
+
+## Local start with Docker
+
+1. Copy `.env.example` to `.env` if `.env` is missing.
+2. Run `docker compose up --build`.
+3. Open `http://127.0.0.1:3000`.
+4. API documentation is at `http://127.0.0.1:4000/api/docs`.
+
+The API container applies the checked-in Prisma migration before it starts.
+
+## Local development
+
+```powershell
+docker compose up -d postgres redis
+cmd /c pnpm install
+cmd /c pnpm db:migrate
+cmd /c pnpm dev
+```
+
+Then open `http://127.0.0.1:3000`.
+
+## Tests and builds
+
+```powershell
+cmd /c pnpm test
+cmd /c pnpm typecheck
+cmd /c pnpm build
+```
+
+## Mock workflow
+
+1. Open **History readiness** and run the mock TikTok history sync. This imports 230 previous outbound conversations and makes them participate in cooldown checks.
+2. Optionally import a CSV with `contacted_at` and either `creator_open_id` or `conversation_id`. Supported optional columns are `source_record_id`, `creator_user_id`, `username`, `external_message_id`, `campaign_name`, `message_body`, and `send_status`.
+3. Create a campaign. Discovery produces 1,540 occurrences with 40 deliberate duplicates.
+4. Review the exclusion breakdown and shortfall warning, then freeze the eligible selection.
+5. Type the exact campaign name and selected count to enqueue mock sends.
+6. Pause/resume from the campaign screen. Status refreshes every five seconds.
+
+## Absolute safety ceilings
+
+Defaults are 1,000 dispatches per campaign, 1,000 per Indonesia shop day, and 10 per rolling minute. PostgreSQL dispatch events and daily usage rows enforce these across worker restarts; the BullMQ limiter may only run more slowly.
+
+## Delivery unknown
+
+Selected fixture IDs occasionally return `DELIVERY_UNKNOWN`. They are never resent. Read-only reconciliation checks run after the configured delays. A single exact outbound content-hash match becomes `SENT`; zero or multiple matches remain blocked for review.
+
+## Phase-one boundaries
+
+- Authentication and multi-user authorization are intentionally deferred; all services bind to localhost.
+- CSV import is supplied as a UTF-8 string through the local API/UI and is intended for mock or controlled historical exports.
+- The mock adapter uses deterministic fixtures, not a complete simulation of every TikTok payload or market rule.
+- The Docker build requires access to Docker Hub the first time it pulls `node:24-alpine`, PostgreSQL, and Redis images.

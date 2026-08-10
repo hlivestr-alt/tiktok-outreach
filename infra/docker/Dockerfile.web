@@ -1,0 +1,8 @@
+FROM node:24-alpine AS build
+WORKDIR /app
+RUN corepack enable
+COPY . .
+RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store && pnpm install --frozen-lockfile
+RUN pnpm --filter @affiliate/web... build
+EXPOSE 3000
+CMD ["pnpm", "--filter", "@affiliate/web", "start"]

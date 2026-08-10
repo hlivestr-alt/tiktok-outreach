@@ -1,0 +1,405 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ConnectionMode {
+  MOCK
+  DISABLED
+  READ_ONLY
+  PRODUCTION
+}
+
+enum CampaignState {
+  DRAFT
+  DISCOVERING
+  PREVIEW_READY
+  FROZEN
+  QUEUED
+  RUNNING
+  PAUSE_REQUESTED
+  PAUSED
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+}
+
+enum Eligibility {
+  ELIGIBLE
+  EXCLUDED
+}
+
+enum RecipientState {
+  DISCOVERED
+  ELIGIBLE
+  SELECTED
+  RESERVED
+  QUEUED
+  PROCESSING
+  SENT
+  FAILED
+  DELIVERY_UNKNOWN
+  DELIVERY_UNKNOWN_UNRESOLVED
+  CANCELLED
+}
+
+enum DeliveryState {
+  PENDING
+  DISPATCHING
+  SENT
+  FAILED_RETRYABLE
+  FAILED_TERMINAL
+  DELIVERY_UNKNOWN
+  DELIVERY_UNKNOWN_UNRESOLVED
+}
+
+enum SyncState {
+  PENDING
+  RUNNING
+  COMPLETE
+  PARTIAL
+  FAILED
+}
+
+enum Direction {
+  OUTBOUND
+  INBOUND
+}
+
+enum ReconciliationState {
+  PENDING
+  MATCHED
+  UNRESOLVED
+}
+
+model Shop {
+  id                         String   @id @default(uuid())
+  name                       String
+  externalShopId             String?  @unique
+  shopCipher                 String?
+  region                     String   @default("ID")
+  currency                   String   @default("IDR")
+  timezone                   String   @default("Asia/Jakarta")
+  connectionMode             ConnectionMode @default(MOCK)
+  maxSendsPerCampaign        Int      @default(1000)
+  maxSendsPerDay             Int      @default(1000)
+  maxDispatchesPerMinute     Int      @default(10)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+  campaigns                  Campaign[]
+  contacts                   CreatorShopContactState[]
+  conversations              Conversation[]
+  reservations               OutreachReservation[]
+  syncRuns                   ContactHistorySyncRun[]
+  imports                    HistoricalContactImport[]
+  dailyUsage                 ShopOutboundDailyUsage[]
+  dispatchEvents             OutboundDispatchEvent[]
+}
+
+model IntegrationConnection {
+  id                    String @id @default(uuid())
+  shopId                String
+  provider              String @default("TIKTOK_SHOP")
+  mode                  ConnectionMode @default(MOCK)
+  status                String @default("READY")
+  grantedScopes         Json @default("[]")
+  accessTokenCiphertext String?
+  refreshTokenCiphertext String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  lastValidatedAt       DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  @@unique([shopId, provider])
+}
+
+model Creator {
+  id                String   @id @default(uuid())
+  creatorOpenId     String   @unique
+  creatorUserId     String?
+  username          String?
+  nickname          String?
+  selectionRegion   String   @default("ID")
+  avatarUrl         String?
+  profileUri        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  snapshots         CreatorMetricSnapshot[]
+  contacts          CreatorShopContactState[]
+  conversations     Conversation[]
+  recipients        CampaignRecipient[]
+  reservations      OutreachReservation[]
+}
+
+model CreatorMetricSnapshot {
+  id                String   @id @default(uuid())
+  creatorId         String
+  followerCount     Int
+  categoryIds       Json
+  gmvAmount         Decimal  @db.Decimal(24, 2)
+  gmvCurrency       String
+  unitsSold         Int
+  avgVideoViews     Int
+  avgLiveViewers    Int
+  engagementRate    Decimal? @db.Decimal(10, 6)
+  metrics           Json     @default("{}")
+  rawPayload        Json     @default("{}")
+  sourceFetchedAt   DateTime
+  creator           Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  recipients        CampaignRecipient[]
+  @@index([creatorId, sourceFetchedAt])
+}
+
+model CreatorShopContactState {
+  id                    String   @id @default(uuid())
+  shopId                String
+  creatorId             String
+  firstContactedAt      DateTime?
+  lastContactedAt       DateTime?
+  contactCount          Int      @default(0)
+  lastCampaignId        String?
+  lastDeliveryId        String?
+  doNotContact          Boolean  @default(false)
+  unresolvedDelivery   Boolean  @default(false)
+  latestReplyStatus     String   @default("NONE")
+  historyCoverageStart DateTime?
+  updatedAt             DateTime @updatedAt
+  shop                  Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  creator               Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  @@unique([shopId, creatorId])
+  @@index([shopId, lastContactedAt])
+}
+
+model Conversation {
+  id                     String   @id @default(uuid())
+  shopId                 String
+  creatorId              String
+  externalConversationId String   @unique
+  unreadCount            Int      @default(0)
+  lastSyncedAt            DateTime?
+  shop                    Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  creator                 Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  messages                ConversationMessage[]
+  deliveries              OutreachDelivery[]
+  @@unique([shopId, creatorId])
+}
+
+model ConversationMessage {
+  id                String    @id @default(uuid())
+  conversationId    String
+  externalMessageId String    @unique
+  direction         Direction
+  messageType       String    @default("TEXT")
+  content           String    @db.Text
+  contentHash       String
+  providerCreatedAt DateTime
+  importSource      String
+  rawPayload        Json      @default("{}")
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  @@index([conversationId, providerCreatedAt])
+}
+
+model ContactHistorySyncRun {
+  id                    String    @id @default(uuid())
+  shopId                String
+  source                String
+  state                 SyncState @default(PENDING)
+  cursor                Json?
+  earliestCoveredAt     DateTime?
+  latestCoveredAt       DateTime?
+  conversationsScanned  Int       @default(0)
+  messagesImported      Int       @default(0)
+  unmatchedCount        Int       @default(0)
+  error                  String?
+  startedAt              DateTime?
+  completedAt            DateTime?
+  createdAt              DateTime  @default(now())
+  shop                   Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+}
+
+model HistoricalContactImport {
+  id              String    @id @default(uuid())
+  shopId          String
+  sourceName      String
+  sourceHash      String
+  state           SyncState @default(PENDING)
+  rowCount        Int       @default(0)
+  importedCount   Int       @default(0)
+  duplicateCount  Int       @default(0)
+  unmatchedCount  Int       @default(0)
+  conflictCount   Int       @default(0)
+  createdAt        DateTime  @default(now())
+  completedAt      DateTime?
+  shop             Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  records          HistoricalContactRecord[]
+  @@unique([shopId, sourceHash])
+}
+
+model HistoricalContactRecord {
+  id                  String   @id @default(uuid())
+  importId            String
+  sourceRecordId      String
+  creatorOpenId       String?
+  conversationId      String?
+  externalMessageId   String?
+  contactedAt         DateTime
+  sendStatus          String
+  campaignName        String?
+  messageContent      String?  @db.Text
+  resolutionState     String
+  historicalImport    HistoricalContactImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  @@unique([importId, sourceRecordId])
+}
+
+model Campaign {
+  id                 String   @id @default(uuid())
+  shopId             String
+  name               String
+  productName        String
+  targetCount        Int
+  candidateLimit     Int
+  cooldownDays       Int
+  messageTemplate    String   @db.Text
+  filters            Json
+  rankingMetric      String
+  rankingDirection   String   @default("DESC")
+  state              CampaignState @default(DRAFT)
+  version            Int      @default(1)
+  summary             Json    @default("{}")
+  searchKey           String?
+  nextPageToken       String?
+  truncated           Boolean @default(false)
+  frozenAt            DateTime?
+  freezeExpiresAt     DateTime?
+  dispatchCount       Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  shop                Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  recipients          CampaignRecipient[]
+  deliveries          OutreachDelivery[]
+  dispatchEvents      OutboundDispatchEvent[]
+  @@index([shopId, state])
+}
+
+model CampaignRecipient {
+  id                String   @id @default(uuid())
+  campaignId        String
+  creatorId         String
+  snapshotId        String
+  discoveryOrdinal  Int
+  eligibility       Eligibility
+  skipReason        String?
+  skipDetail        String?
+  rankingValue      Decimal  @db.Decimal(24, 6)
+  selected          Boolean  @default(false)
+  frozenMessage     String?  @db.Text
+  contentHash       String?
+  state             RecipientState @default(DISCOVERED)
+  replyStatus       String   @default("NONE")
+  campaign          Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  creator           Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  snapshot          CreatorMetricSnapshot @relation(fields: [snapshotId], references: [id])
+  delivery          OutreachDelivery?
+  reservation       OutreachReservation?
+  @@unique([campaignId, creatorId])
+  @@index([campaignId, selected, state])
+}
+
+model OutreachReservation {
+  id                  String   @id @default(uuid())
+  shopId              String
+  creatorId           String
+  campaignRecipientId String   @unique
+  expiresAt           DateTime
+  shop                Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  creator             Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  recipient           CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+  @@unique([shopId, creatorId])
+}
+
+model OutreachDelivery {
+  id                  String   @id @default(uuid())
+  campaignId          String
+  campaignRecipientId String   @unique
+  conversationId      String?
+  deterministicKey    String   @unique
+  contentHash         String
+  state               DeliveryState @default(PENDING)
+  externalMessageId   String?  @unique
+  providerRequestId   String?
+  attemptCount        Int      @default(0)
+  firstDispatchedAt   DateTime?
+  sentAt              DateTime?
+  lastErrorCode       String?
+  lastErrorDetail     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  campaign            Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipient           CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+  conversation        Conversation? @relation(fields: [conversationId], references: [id])
+  attempts            DeliveryAttempt[]
+  reconciliations     DeliveryReconciliationRun[]
+}
+
+model DeliveryAttempt {
+  id             String   @id @default(uuid())
+  deliveryId     String
+  attemptNumber  Int
+  outcome        String
+  providerCode   String?
+  providerRequestId String?
+  startedAt      DateTime
+  completedAt    DateTime?
+  delivery       OutreachDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  @@unique([deliveryId, attemptNumber])
+}
+
+model DeliveryReconciliationRun {
+  id               String   @id @default(uuid())
+  deliveryId       String
+  attemptNumber    Int
+  state            ReconciliationState @default(PENDING)
+  matchedMessageId String?
+  evidence         Json     @default("{}")
+  scheduledFor     DateTime
+  completedAt      DateTime?
+  delivery         OutreachDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  @@unique([deliveryId, attemptNumber])
+}
+
+model OutboundDispatchEvent {
+  id          String   @id @default(uuid())
+  shopId      String
+  campaignId  String
+  deliveryId  String
+  dispatchedAt DateTime @default(now())
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  @@index([shopId, dispatchedAt])
+  @@index([deliveryId])
+}
+
+model ShopOutboundDailyUsage {
+  id            String   @id @default(uuid())
+  shopId        String
+  shopDate      DateTime @db.Date
+  dispatchCount Int      @default(0)
+  ceiling       Int
+  updatedAt     DateTime @updatedAt
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  @@unique([shopId, shopDate])
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid())
+  shopId      String
+  campaignId  String?
+  eventType   String
+  actor       String   @default("local-operator")
+  payload     Json     @default("{}")
+  createdAt   DateTime @default(now())
+  @@index([shopId, createdAt])
+}

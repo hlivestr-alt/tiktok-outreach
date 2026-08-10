@@ -1,0 +1,35 @@
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import Link from "next/link";
+import { AlertTriangle, ArrowLeft, Check, Clock, Pause, Play, RefreshCw, ShieldAlert, UserCheck, Users, XCircle } from "lucide-react";
+import { api, formatIdr, formatNumber } from "../../../lib/api";
+
+type Recipient = { id: string; selected: boolean; eligibility: string; skipReason?: string; state: string; frozenMessage?: string; creator: { creatorOpenId: string; username?: string; nickname?: string }; snapshot?: { followerCount: number; gmvAmount: string; unitsSold: number } };
+type Campaign = { id: string; name: string; productName: string; targetCount: number; cooldownDays: number; state: string; version: number; summary: any; freezeExpiresAt?: string; dispatchCount: number; shop: any; recipients: Recipient[] };
+
+export default function CampaignPage() {
+  const { id } = useParams<{ id: string }>();
+  const [campaign, setCampaign] = useState<Campaign>();
+  const [error, setError] = useState("");
+  const [confirmName, setConfirmName] = useState("");
+  const [confirmCount, setConfirmCount] = useState("");
+  const load = () => api<Campaign>(`/outreach/campaigns/${id}`).then(setCampaign).catch((e) => setError(e.message));
+  useEffect(() => { load(); const timer = setInterval(load, 5000); return () => clearInterval(timer); }, [id]);
+  async function action(name: string, body: unknown = {}) { setError(""); try { await api(`/outreach/campaigns/${id}/${name}`, { method: "POST", body: JSON.stringify(body) }); await load(); } catch (e) { setError(e instanceof Error ? e.message : "Action failed"); } }
+  if (!campaign) return <div className="page"><div className="loading">Loading campaign…</div>{error && <div className="alert error">{error}</div>}</div>;
+  const summary = campaign.summary ?? {};
+  const selectedCount = Number(summary.selected ?? campaign.recipients.filter((r) => r.selected).length);
+  return <div className="page"><Link className="back-link" href="/campaigns"><ArrowLeft size={16}/>Campaigns</Link>
+    <header className="page-header"><div><span className="eyebrow">{campaign.productName}</span><h1>{campaign.name}</h1><p>{campaign.cooldownDays}-day cooldown · Mock Indonesian marketplace · IDR performance</p></div><div className="header-actions">{["QUEUED", "RUNNING"].includes(campaign.state) && <button className="button secondary" onClick={() => action("pause")}><Pause size={16}/>Pause</button>}{["PAUSED", "PAUSE_REQUESTED"].includes(campaign.state) && <button className="button primary" onClick={() => action("resume")}><Play size={16}/>Resume</button>}<span className={`status large ${campaign.state.toLowerCase()}`}>{campaign.state.replaceAll("_", " ")}</span></div></header>
+    <section className="metric-strip"><div><span>Requested</span><strong>{formatNumber(summary.requested ?? campaign.targetCount)}</strong></div><div><span>Fetched</span><strong>{formatNumber(summary.fetchedOccurrences)}</strong></div><div><span>Excluded</span><strong>{formatNumber((summary.fetchedOccurrences ?? 0) - (summary.eligible ?? 0))}</strong></div><div><span>Eligible</span><strong>{formatNumber(summary.eligible)}</strong></div><div className="accent"><span>Selected</span><strong>{formatNumber(summary.selected)}</strong></div><div><span>Dispatched</span><strong>{formatNumber(campaign.dispatchCount)}</strong></div></section>
+    {summary.shortfall > 0 && <div className="alert warning"><AlertTriangle/><div><strong>Target shortfall: {formatNumber(summary.shortfall)}</strong><span>Only {formatNumber(summary.selected)} creators meet every filter and safety rule. You may freeze these recipients; filters will not be weakened.</span></div></div>}
+    {summary.truncated && <div className="alert neutral"><Clock/><div><strong>Candidate pool was capped</strong><span>More mock marketplace pages exist. Ranking applies only to the fetched pool.</span></div></div>}
+    {error && <div className="alert error">{error}</div>}
+    {campaign.state === "PREVIEW_READY" && <section className="confirmation-card"><div><h2>Preview is ready</h2><p>Freeze {formatNumber(selectedCount)} selected creators and persist each exact rendered message. Reservations last 30 minutes.</p></div><button className="button primary" onClick={() => action("freeze", { version: campaign.version })}><Check size={17}/>Freeze recipients</button></section>}
+    {campaign.state === "FROZEN" && <section className="panel confirmation"><div><h2>Confirm mock dispatch</h2><p>Type the exact campaign name and selected count. This queues mock jobs only.</p></div><div className="confirmation-inputs"><label>Campaign name<input value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={campaign.name}/></label><label>Selected count<input value={confirmCount} onChange={(e) => setConfirmCount(e.target.value)} placeholder={String(selectedCount)}/></label><button className="button primary" onClick={() => action("start", { version: campaign.version, confirmationName: confirmName, confirmationCount: Number(confirmCount) })}>Confirm & queue mock campaign</button></div></section>}
+    <section className="reason-grid"><div><XCircle/><span>Filter mismatch</span><strong>{formatNumber(summary.excludedByFilter)}</strong></div><div><Users/><span>Duplicates</span><strong>{formatNumber(summary.skippedDuplicates)}</strong></div><div><Clock/><span>Cooldown/history</span><strong>{formatNumber(summary.skippedCooldown)}</strong></div><div><ShieldAlert/><span>Unknown delivery</span><strong>{formatNumber(summary.skippedUnknownDelivery)}</strong></div></section>
+    <section className="panel"><div className="panel-heading"><div><h2>Creator preview</h2><p>Top 250 recipients are shown; all selected records remain in PostgreSQL.</p></div><button className="icon-button" onClick={load} aria-label="Refresh"><RefreshCw size={17}/></button></div><div className="table-wrap"><table><thead><tr><th>Creator</th><th>Followers</th><th>30-day GMV</th><th>Units</th><th>Eligibility</th><th>Queue state</th></tr></thead><tbody>{campaign.recipients.map((recipient) => <tr key={recipient.id}><td><div className="creator"><div className="avatar">{(recipient.creator.nickname ?? recipient.creator.username ?? "?")[0]}</div><div><strong>{recipient.creator.nickname ?? recipient.creator.username ?? "Unknown creator"}</strong><small>{recipient.creator.creatorOpenId}</small></div></div></td><td>{formatNumber(recipient.snapshot?.followerCount)}</td><td>{formatIdr(recipient.snapshot?.gmvAmount)}</td><td>{formatNumber(recipient.snapshot?.unitsSold)}</td><td>{recipient.selected ? <span className="pill good"><UserCheck size={14}/>Selected</span> : recipient.eligibility === "ELIGIBLE" ? <span className="pill">Eligible</span> : <span className="pill bad">{recipient.skipReason?.replaceAll("_", " ")}</span>}</td><td><span className={`status ${recipient.state.toLowerCase()}`}>{recipient.state.replaceAll("_", " ")}</span></td></tr>)}</tbody></table></div></section>
+  </div>;
+}
+

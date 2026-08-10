@@ -1,0 +1,25 @@
+{
+  "name": "affiliate-outreach-operations",
+  "private": true,
+  "packageManager": "pnpm@11.13.1",
+  "engines": { "node": ">=24 <27" },
+  "scripts": {
+    "build": "pnpm -r --workspace-concurrency=1 run build",
+    "build:packages": "pnpm -r --filter \"./packages/**\" --workspace-concurrency=1 run build",
+    "dev": "pnpm build:packages && pnpm --parallel --filter @affiliate/api --filter @affiliate/worker --filter @affiliate/web run dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",
+    "db:studio": "prisma studio --schema packages/db/prisma/schema.prisma",
+    "typecheck": "pnpm build:packages && pnpm -r --workspace-concurrency=1 run typecheck",
+    "postinstall": "pnpm db:generate"
+  },
+  "devDependencies": {
+    "@prisma/client": "^6.19.0",
+    "@types/node": "^24.0.0",
+    "prisma": "^6.19.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
