@@ -39,6 +39,14 @@ export type ProviderMessage = {
   createdAt: Date;
 };
 
+export type ProviderPage<T> = {
+  items: T[];
+  nextPageToken?: string;
+  hasMore: boolean;
+};
+
+export type ProviderConversation = { id: string; creatorOpenId: string };
+
 export type SendMessageResult =
   | { status: "SENT"; messageId: string; requestId: string }
   | { status: "DELIVERY_UNKNOWN"; requestId: string }
@@ -48,10 +56,10 @@ export type SendMessageResult =
 export interface TikTokAffiliateAdapter {
   getCapabilities(): Promise<AdapterCapabilities>;
   searchCreators(filters: CreatorFilters, cursor?: { pageToken?: string; searchKey?: string; pageSize: number }): Promise<CreatorSearchPage>;
-  getCreatorPerformance(creatorOpenId: string): Promise<CreatorCandidate>;
+  getCreatorPerformance(creatorUserId: string): Promise<CreatorCandidate>;
   createOrGetConversation(creatorOpenId: string): Promise<{ conversationId: string; isNew: boolean }>;
-  sendMessage(conversationId: string, creatorOpenId: string, content: string): Promise<SendMessageResult>;
-  listConversations(): Promise<Array<{ id: string; creatorOpenId: string }>>;
-  listMessages(conversationId: string): Promise<ProviderMessage[]>;
+  sendMessage(conversationId: string, creatorOpenId: string, content: string, options: { idempotencyKey: string }): Promise<SendMessageResult>;
+  listConversations(cursor?: { pageToken?: string; pageSize: number }): Promise<ProviderPage<ProviderConversation>>;
+  listMessages(conversationId: string, cursor?: { pageToken?: string; pageSize: number }): Promise<ProviderPage<ProviderMessage>>;
   getLatestUnreadMessages(): Promise<ProviderMessage[]>;
 }

@@ -63,13 +63,21 @@ describe("messages and reconciliation", () => {
     expect(reconcileUnknownDelivery({ conversationId: "c1", contentHash: "hash", dispatchedAt, messages: [message], alreadyLinkedMessageIds: new Set() })).toEqual({ status: "MATCHED", messageId: "m1" });
     expect(reconcileUnknownDelivery({ conversationId: "c1", contentHash: "hash", dispatchedAt, messages: [message, { ...message, id: "m2" }], alreadyLinkedMessageIds: new Set() }).status).toBe("UNRESOLVED");
   });
+
+  it("leaves reconciliation unresolved when there are zero matches", () => {
+    const result = reconcileUnknownDelivery({
+      conversationId: "c1", contentHash: "hash", dispatchedAt: new Date("2026-08-10T00:00:00Z"),
+      messages: [], alreadyLinkedMessageIds: new Set()
+    });
+    expect(result).toEqual({ status: "UNRESOLVED", reason: "No exact outbound match" });
+  });
 });
 
 describe("hard safety limits", () => {
   it("rejects invalid or above-ceiling campaign targets", () => {
-    const limits = { maxSendsPerCampaign: 1000, maxSendsPerDay: 1000, maxDispatchesPerMinute: 10 };
+    const limits = { maxRecipientsPerCampaign: 1000, maxDispatchAttemptsPerCampaign: 4000, maxSendsPerDay: 1000, maxDispatchesPerMinute: 10 };
     expect(() => assertCampaignWithinLimit(1000, limits)).not.toThrow();
-    expect(() => assertCampaignWithinLimit(1001, limits)).toThrow("campaign ceiling");
+    expect(() => assertCampaignWithinLimit(1001, limits)).toThrow("campaign recipient ceiling");
     expect(() => assertCampaignWithinLimit(0, limits)).toThrow("positive integer");
   });
 });

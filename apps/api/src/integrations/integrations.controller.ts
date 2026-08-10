@@ -11,7 +11,12 @@ export class IntegrationsController {
   @Get("tiktok")
   async status() {
     const shop = await ensureMockShop(this.prisma);
-    return { shop, capabilities: await this.adapter.getCapabilities(), outboundEnabled: false, productionAdapterInstalled: false };
+    const safetySettingsAudit = await this.prisma.safetySettingsAudit.findMany({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" }, take: 10 });
+    return {
+      shop, capabilities: await this.adapter.getCapabilities(), outboundEnabled: false, productionAdapterInstalled: false,
+      safetySettingsSource: "PERSISTENT_DATABASE_AFTER_INITIAL_CREATION",
+      environmentRole: "INITIAL_DEFAULTS_ONLY",
+      safetySettingsAudit
+    };
   }
 }
-

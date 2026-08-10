@@ -28,7 +28,7 @@ Base URL: `https://open-api.tiktokglobalshop.com`.
 | Adapter operation | Current documented endpoint | Purpose |
 | --- | --- | --- |
 | `searchCreators` | `POST /affiliate_seller/202508/marketplace_creators/search` | Creator discovery; page size 12 or 20, stable `search_key`, filters for GMV, units sold, categories, content performance, demographics, and country-specific advanced filters. |
-| `getCreatorPerformance` | `GET /affiliate_seller/202508/marketplace_creators/{creator_open_id}` | Last-30-day creator profile and performance details. |
+| `getCreatorPerformance` | `GET /affiliate_seller/202508/marketplace_creators/{creator_user_id}` | Last-30-day creator profile and performance details. The literal 202508 path parameter name is `creator_user_id`. |
 | `listConversations` | `GET /affiliate_seller/202412/conversations` | Historical sync and conversation discovery, paged up to 50. |
 | `listMessages` | `GET /affiliate_seller/202412/conversation/{conversation_id}/messages` | Historical outbound/inbound message import and delivery reconciliation, paged up to 20. |
 | `createOrGetConversation` | `POST /affiliate_seller/202508/conversations` | Resolve or create a conversation from `creator_open_id`. |
@@ -37,6 +37,15 @@ Base URL: `https://open-api.tiktokglobalshop.com`.
 Official references: [creator search](https://partner.tiktokshop.com/docv2/page/seller-search-creator-on-marketplace-202508), [creator performance](https://partner.tiktokshop.com/docv2/page/get-marketplace-creator-performance), [conversation list](https://partner.tiktokshop.com/docv2/page/get-conversation-list-202412), [conversation messages](https://partner.tiktokshop.com/docv2/page/get-message-in-the-conversation-202412), [create conversation](https://partner.tiktokshop.com/docv2/page/create-conversation-with-creator-202508), and [send message](https://partner.tiktokshop.com/docv2/page/send-im-message-202412).
 
 The adapter should also implement the officially listed Get Latest Unread Messages operation for reply status once its active Partner Center API version and path are confirmed for the approved app.
+
+### Creator identifier boundary
+
+Preserve TikTok's field and parameter names exactly; do not normalize these two names into one adapter value:
+
+- `creator_user_id` is the literal path-parameter name documented by the 202508 **Get Marketplace Creator Performance** endpoint: `/affiliate_seller/202508/marketplace_creators/{creator_user_id}`. Pass the value supplied for that field by the matching marketplace API version. Do not substitute a property named `creator_open_id` in the path.
+- `creator_open_id` is the literal request-body field documented by the 202508 **Create Conversation with creator** endpoint. It is the privacy-preserving Creator Open ID used by the messaging operation.
+
+TikTok's performance page currently describes its `creator_user_id` value as “Creator Open ID,” while still naming the path parameter `creator_user_id`. The future adapter must mirror the endpoint contract as documented and retain both fields returned by discovery. It must not assume they are interchangeable, derive one from the other, or guess a mapping. Revalidate the active API version and identifier migration guidance immediately before Phase 2 implementation.
 
 ## Safe activation sequence
 

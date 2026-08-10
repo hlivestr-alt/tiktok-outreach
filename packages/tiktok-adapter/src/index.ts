@@ -34,6 +34,13 @@ const allCreators = generateMockCreators();
 
 export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
   private readonly sendAttempts = new Map<string, number>();
+  private historyCalls = 0;
+  constructor(private readonly options: { historyConversationPageSize?: number; historyMessagePageSize?: number; failHistoryAfterCalls?: number } = {}) {}
+
+  private maybeFailHistory(): void {
+    this.historyCalls++;
+    if (this.options.failHistoryAfterCalls === this.historyCalls) throw new Error("MOCK_HISTORY_PAGE_INTERRUPTION");
+  }
   async getCapabilities(): Promise<AdapterCapabilities> {
     return {
       mode: "MOCK", market: "ID", currency: "IDR", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 2000,
@@ -58,8 +65,8 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
     };
   }
 
-  async getCreatorPerformance(creatorOpenId: string): Promise<CreatorCandidate> {
-    const found = allCreators.find((creator) => creator.creatorOpenId === creatorOpenId);
+  async getCreatorPerformance(creatorUserId: string): Promise<CreatorCandidate> {
+    const found = allCreators.find((creator) => creator.creatorUserId === creatorUserId || creator.creatorOpenId === creatorUserId);
     if (!found) throw new Error("Mock creator not found");
     return found;
   }
@@ -68,28 +75,35 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
     return { conversationId: `mock_conversation_${creatorOpenId}`, isNew: false };
   }
 
-  async sendMessage(_conversationId: string, creatorOpenId: string, content: string): Promise<SendMessageResult> {
+  async sendMessage(_conversationId: string, creatorOpenId: string, _content: string, options: { idempotencyKey: string }): Promise<SendMessageResult> {
     const numeric = Number(creatorOpenId.slice(-5));
-    const attempt = (this.sendAttempts.get(creatorOpenId) ?? 0) + 1;
-    this.sendAttempts.set(creatorOpenId, attempt);
-    const requestId = `mock_request_${creatorOpenId}_${Date.now()}`;
+    const attempt = (this.sendAttempts.get(options.idempotencyKey) ?? 0) + 1;
+    this.sendAttempts.set(options.idempotencyKey, attempt);
+    const keyDigest = createHash("sha256").update(options.idempotencyKey).digest("hex").slice(0, 20);
+    const requestId = `mock_request_${keyDigest}_${attempt}`;
     if (numeric % 43 === 0) return { status: "RESTRICTED", requestId, errorCode: "CREATOR_MESSAGING_RESTRICTED" };
     if (numeric % 47 === 0 && attempt === 1) return { status: "QUOTA_LIMITED", requestId, errorCode: "MOCK_QUOTA_LIMIT", retryAfterMs: 1500 };
     if (numeric % 41 === 0 && attempt === 1) return { status: "RETRYABLE_ERROR", requestId, errorCode: "MOCK_TEMPORARY_ERROR", retryAfterMs: 750 };
     if (numeric % 53 === 0 && attempt === 1) throw new Error("MOCK_NETWORK_TIMEOUT_AFTER_DISPATCH");
     if (numeric % 37 === 0) return { status: "DELIVERY_UNKNOWN", requestId };
-    const digest = createHash("sha256").update(`${creatorOpenId}:${content}`).digest("hex").slice(0, 20);
-    return { status: "SENT", messageId: `mock_message_${digest}`, requestId };
+    return { status: "SENT", messageId: `mock_message_${keyDigest}`, requestId };
   }
 
-  async listConversations(): Promise<Array<{ id: string; creatorOpenId: string }>> {
-    return allCreators.slice(0, 230).map((creator) => ({ id: `mock_conversation_${creator.creatorOpenId}`, creatorOpenId: creator.creatorOpenId }));
+  async listConversations(cursor: { pageToken?: string; pageSize: number } = { pageSize: this.options.historyConversationPageSize ?? 50 }) {
+    this.maybeFailHistory();
+    const conversations = allCreators.slice(0, 230).map((creator) => ({ id: `mock_conversation_${creator.creatorOpenId}`, creatorOpenId: creator.creatorOpenId }));
+    const offset = Number(cursor.pageToken ?? 0);
+    const pageSize = cursor.pageSize || this.options.historyConversationPageSize || 50;
+    const items = conversations.slice(offset, offset + pageSize);
+    const next = offset + items.length;
+    return { items, nextPageToken: next < conversations.length ? String(next) : undefined, hasMore: next < conversations.length };
   }
 
-  async listMessages(conversationId: string): Promise<ProviderMessage[]> {
+  async listMessages(conversationId: string, cursor: { pageToken?: string; pageSize: number } = { pageSize: this.options.historyMessagePageSize ?? 20 }) {
+    this.maybeFailHistory();
     const creatorOpenId = conversationId.replace("mock_conversation_", "");
     const index = Number(creatorOpenId.slice(-5)) || 1;
-    return [{
+    const messages: ProviderMessage[] = [{
       id: `historical_message_${creatorOpenId}`,
       conversationId,
       creatorOpenId,
@@ -97,6 +111,11 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
       content: `Historical outreach to ${creatorOpenId}`,
       createdAt: new Date(Date.now() - (1 + (index % 29)) * 86_400_000)
     }];
+    const offset = Number(cursor.pageToken ?? 0);
+    const pageSize = cursor.pageSize || this.options.historyMessagePageSize || 20;
+    const items = messages.slice(offset, offset + pageSize);
+    const next = offset + items.length;
+    return { items, nextPageToken: next < messages.length ? String(next) : undefined, hasMore: next < messages.length };
   }
 
   async getLatestUnreadMessages(): Promise<ProviderMessage[]> {
@@ -111,10 +130,10 @@ export class DisabledTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
   private disabled(): never { throw new Error("TikTok outbound integration is not implemented. APP_MODE must remain mock."); }
   async getCapabilities(): Promise<AdapterCapabilities> { return { mode: "DISABLED", market: "ID", currency: "IDR", pageSizes: [], filters: [], rankingMetrics: [], messageTypes: ["TEXT"], maxMessageLength: 0 }; }
   async searchCreators(_filters: CreatorFilters, _cursor?: { pageToken?: string; searchKey?: string; pageSize: number }): Promise<CreatorSearchPage> { return this.disabled(); }
-  async getCreatorPerformance(_creatorOpenId: string): Promise<CreatorCandidate> { return this.disabled(); }
+  async getCreatorPerformance(_creatorUserId: string): Promise<CreatorCandidate> { return this.disabled(); }
   async createOrGetConversation(_creatorOpenId: string): Promise<{ conversationId: string; isNew: boolean }> { return this.disabled(); }
-  async sendMessage(_conversationId: string, _creatorOpenId: string, _content: string): Promise<SendMessageResult> { return this.disabled(); }
-  async listConversations(): Promise<Array<{ id: string; creatorOpenId: string }>> { return this.disabled(); }
-  async listMessages(_conversationId: string): Promise<ProviderMessage[]> { return this.disabled(); }
+  async sendMessage(_conversationId: string, _creatorOpenId: string, _content: string, _options: { idempotencyKey: string }): Promise<SendMessageResult> { return this.disabled(); }
+  async listConversations(_cursor: { pageToken?: string; pageSize: number } = { pageSize: 50 }): ReturnType<TikTokAffiliateAdapter["listConversations"]> { return this.disabled(); }
+  async listMessages(_conversationId: string, _cursor: { pageToken?: string; pageSize: number } = { pageSize: 20 }): ReturnType<TikTokAffiliateAdapter["listMessages"]> { return this.disabled(); }
   async getLatestUnreadMessages(): Promise<ProviderMessage[]> { return this.disabled(); }
 }
