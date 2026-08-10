@@ -6,6 +6,7 @@ import { reconcileUnknownDelivery } from "@affiliate/domain";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
 import { reserveDispatchSlot, SafetyDelay } from "./dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "./delivery-policy";
+import { campaignCompletionSummary } from "./campaign-completion";
 
 const config = loadConfig();
 const redisUrl = new URL(config.REDIS_URL);
@@ -135,11 +136,18 @@ async function markDeliveryUnknown(recipient: any, attemptId: string, requestId:
 async function completeCampaignIfDone(campaignId: string) {
   const unfinished = await prisma.campaignRecipient.count({ where: { campaignId, selected: true, state: { in: ["RESERVED", "QUEUED", "PROCESSING", "DELIVERY_UNKNOWN"] } } });
   if (unfinished) return;
-  const failures = await prisma.campaignRecipient.count({ where: { campaignId, selected: true, state: { in: ["FAILED", "DELIVERY_UNKNOWN_UNRESOLVED"] } } });
-  await prisma.campaign.update({ where: { id: campaignId }, data: { state: failures ? "COMPLETED_WITH_ERRORS" : "COMPLETED" } });
+  const recipients = await prisma.campaignRecipient.findMany({ where: { campaignId, selected: true }, select: { state: true } });
+  const completion = campaignCompletionSummary(recipients.map((recipient) => recipient.state));
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { summary: true } });
+  const previous = campaign.summary && typeof campaign.summary === "object" && !Array.isArray(campaign.summary) ? campaign.summary as Record<string, unknown> : {};
+  await prisma.campaign.update({ where: { id: campaignId }, data: {
+    state: completion.completedSuccessfully ? "COMPLETED" : "COMPLETED_WITH_ERRORS",
+    summary: { ...previous, completion } as Prisma.InputJsonValue
+  } });
 }
 
 async function processSend(job: Job<{ recipientId: string }>) {
+  if (config.APP_MODE !== "mock") throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable in read-only mode");
   const recipient = await prisma.campaignRecipient.findUnique({
     where: { id: job.data.recipientId },
     include: { creator: true, campaign: { include: { shop: true } }, delivery: true, reservation: true }
@@ -293,7 +301,7 @@ worker.on("error", (error) => console.error("Worker error", { error: error.messa
 void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error));
 const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error)), 5_000);
 maintenanceTimer.unref();
-console.log("Mock outreach worker ready", { mode: config.APP_MODE, outboundProvider: "mock-only" });
+console.log(config.APP_MODE === "mock" ? "Mock outreach worker ready" : "TikTok worker idle: outbound disabled", { mode: config.APP_MODE, outboundProvider: config.APP_MODE === "mock" ? "mock-only" : "none" });
 
 async function shutdown() {
   clearInterval(maintenanceTimer);

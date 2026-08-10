@@ -1,22 +1,16 @@
-import { Controller, Get } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
-import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
-import { ensureMockShop, PrismaService } from "../shared";
+import { TikTokIntegrationService } from "./tiktok.service";
 
 @ApiTags("integrations")
 @Controller("api/v1/integrations")
 export class IntegrationsController {
-  private readonly adapter = new MockTikTokAffiliateAdapter();
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly tiktok: TikTokIntegrationService) {}
   @Get("tiktok")
-  async status() {
-    const shop = await ensureMockShop(this.prisma);
-    const safetySettingsAudit = await this.prisma.safetySettingsAudit.findMany({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" }, take: 10 });
-    return {
-      shop, capabilities: await this.adapter.getCapabilities(), outboundEnabled: false, productionAdapterInstalled: false,
-      safetySettingsSource: "PERSISTENT_DATABASE_AFTER_INITIAL_CREATION",
-      environmentRole: "INITIAL_DEFAULTS_ONLY",
-      safetySettingsAudit
-    };
-  }
+  status() { return this.tiktok.status(); }
+  @Post("tiktok/authorize") authorize() { return this.tiktok.initiateAuthorization(); }
+  @Get("tiktok/callback") callback(@Query() query: { state?: string; code?: string; error?: string }) { return this.tiktok.callback(query); }
+  @Post("tiktok/shop-selection") select(@Body() body: { externalShopId: string }) { return this.tiktok.selectShop(body.externalShopId); }
+  @Post("tiktok/refresh") refresh() { return this.tiktok.refreshToken().then(() => this.tiktok.status()); }
+  @Get("tiktok/creators/:creatorOpenId/performance") performance(@Param("creatorOpenId") creatorOpenId: string) { return this.tiktok.creatorPerformance(creatorOpenId); }
 }

@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:unit": "vitest run --exclude apps/api/src/hardening.integration.test.ts",
     "test:integration": "vitest run apps/api/src/hardening.integration.test.ts",
+    "test:tiktok": "vitest run packages/tiktok-adapter/src/real-read-only.test.ts apps/api/src/integrations/tiktok.service.test.ts",
     "test:watch": "vitest",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",

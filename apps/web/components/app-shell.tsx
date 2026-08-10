@@ -1,7 +1,9 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { History, LayoutDashboard, Megaphone, Settings, ShieldCheck, Sparkles } from "lucide-react";
+import { api } from "../lib/api";
 
 const nav = [
   { href: "/campaigns", label: "Campaigns", icon: Megaphone },
@@ -12,13 +14,15 @@ const nav = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [mode, setMode] = useState("MOCK");
+  useEffect(() => { api<any>("/integrations/tiktok").then((value) => setMode(value.mode ?? "MOCK")).catch(() => undefined); }, []);
+  const readOnly = mode === "READ_ONLY";
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><LayoutDashboard size={20}/></div><div><strong>Affiliate Ops</strong><span>Operations console</span></div></div>
       <nav>{nav.map(({ href, label, icon: Icon }) => <Link className={pathname === href || (href === "/campaigns" && pathname.startsWith("/campaigns/")) ? "active" : ""} href={href} key={href}><Icon size={18}/>{label}</Link>)}</nav>
-      <div className="sidebar-safety"><ShieldCheck size={18}/><div><strong>Outbound locked</strong><span>Mock adapter only</span></div></div>
+      <div className="sidebar-safety"><ShieldCheck size={18}/><div><strong>{readOnly ? "Outbound disabled" : "Mock outbound only"}</strong><span>{readOnly ? "Real reads only" : "No TikTok API calls"}</span></div></div>
     </aside>
-    <main className="main"><div className="mock-banner"><span className="pulse"/>MOCK MODE — No TikTok API calls or real messages can occur</div>{children}</main>
+    <main className="main"><div className={`mock-banner ${readOnly ? "real-read-only" : ""}`}><span className="pulse"/>{readOnly ? "REAL TIKTOK — READ ONLY — OUTBOUND DISABLED" : "MOCK MODE — No TikTok API calls or real messages can occur"}</div>{children}</main>
   </div>;
 }
-

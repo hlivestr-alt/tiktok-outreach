@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { TikTokAffiliateAdapter, AdapterCapabilities, CreatorSearchPage, ProviderMessage, SendMessageResult } from "@affiliate/contracts";
 import type { CreatorCandidate, CreatorFilters } from "@affiliate/domain";
+export * from "./signing";
+export * from "./real-read-only";
+export * from "./token-crypto";
+export * from "./auth";
 
 const categories = ["beauty", "fashion", "home", "health", "food"];
 const names = ["Ayu", "Bintang", "Citra", "Dewi", "Eka", "Fitri", "Gita", "Hana", "Intan", "Joko"];
@@ -65,8 +69,8 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
     };
   }
 
-  async getCreatorPerformance(creatorUserId: string): Promise<CreatorCandidate> {
-    const found = allCreators.find((creator) => creator.creatorUserId === creatorUserId || creator.creatorOpenId === creatorUserId);
+  async getCreatorPerformance(creatorOpenId: string): Promise<CreatorCandidate> {
+    const found = allCreators.find((creator) => creator.creatorOpenId === creatorOpenId);
     if (!found) throw new Error("Mock creator not found");
     return found;
   }
@@ -91,7 +95,7 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
 
   async listConversations(cursor: { pageToken?: string; pageSize: number } = { pageSize: this.options.historyConversationPageSize ?? 50 }) {
     this.maybeFailHistory();
-    const conversations = allCreators.slice(0, 230).map((creator) => ({ id: `mock_conversation_${creator.creatorOpenId}`, creatorOpenId: creator.creatorOpenId }));
+    const conversations = allCreators.slice(0, 230).map((creator) => ({ id: `mock_conversation_${creator.creatorOpenId}`, creatorOpenId: creator.creatorOpenId, creatorImId: `mock_im_${creator.creatorOpenId}` }));
     const offset = Number(cursor.pageToken ?? 0);
     const pageSize = cursor.pageSize || this.options.historyConversationPageSize || 50;
     const items = conversations.slice(offset, offset + pageSize);
@@ -127,7 +131,7 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
 }
 
 export class DisabledTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
-  private disabled(): never { throw new Error("TikTok outbound integration is not implemented. APP_MODE must remain mock."); }
+  private disabled(): never { throw new Error("TikTok integration is not implemented in this disabled adapter."); }
   async getCapabilities(): Promise<AdapterCapabilities> { return { mode: "DISABLED", market: "ID", currency: "IDR", pageSizes: [], filters: [], rankingMetrics: [], messageTypes: ["TEXT"], maxMessageLength: 0 }; }
   async searchCreators(_filters: CreatorFilters, _cursor?: { pageToken?: string; searchKey?: string; pageSize: number }): Promise<CreatorSearchPage> { return this.disabled(); }
   async getCreatorPerformance(_creatorUserId: string): Promise<CreatorCandidate> { return this.disabled(); }

@@ -8,8 +8,11 @@ import { HistoryService } from "./history/history.service";
 import { ensureMockShop, expireFrozenCampaigns, reconcileOutbox } from "./shared";
 import { reserveDispatchSlot, SafetyDelay, shopDate } from "../../worker/src/dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "../../worker/src/delivery-policy";
+import { createHash } from "node:crypto";
+import { TikTokIntegrationService } from "./integrations/tiktok.service";
 
 const prisma = new PrismaClient();
+const tiktokStub = { activeShop: () => ensureMockShop(prisma as any), adapter: async () => new MockTikTokAffiliateAdapter() } as any;
 const testIds = new Set<string>();
 const stamp = () => `hardening_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
@@ -59,13 +62,26 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
+describe("TikTok authorization state persistence", () => {
+  it("rejects mismatched, expired, and reused states before any token request", async () => {
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.callback({ state: stamp(), code: "code" })).rejects.toThrow(/does not match/i);
+    const expired = stamp();
+    await prisma.tikTokAuthorizationState.create({ data: { stateHash: createHash("sha256").update(expired).digest("hex"), expiresAt: new Date(Date.now() - 1000) } });
+    await expect(service.callback({ state: expired, code: "code" })).rejects.toThrow(/expired/i);
+    const reused = stamp();
+    await prisma.tikTokAuthorizationState.create({ data: { stateHash: createHash("sha256").update(reused).digest("hex"), expiresAt: new Date(Date.now() + 60_000), consumedAt: new Date() } });
+    await expect(service.callback({ state: reused, code: "code" })).rejects.toThrow(/already used/i);
+  });
+});
+
 describe.sequential("PostgreSQL campaign reservation safety", () => {
   it("serializes concurrent campaign freezes and reserves a creator only once", async () => {
     const shop = await createShop();
     const creatorId = stamp();
     const first = await createRecipient(shop.id, "PREVIEW_READY", creatorId);
     const second = await createRecipient(shop.id, "PREVIEW_READY", creatorId);
-    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
+    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any, tiktokStub);
     await Promise.all([service.freeze(first.campaign.id, 1), service.freeze(second.campaign.id, 1)]);
     expect(await prisma.outreachReservation.count({ where: { shopId: shop.id, creatorId: first.creator.id } })).toBe(1);
     expect(await prisma.campaignRecipient.count({ where: { campaignId: { in: [first.campaign.id, second.campaign.id] }, selected: true } })).toBe(1);
@@ -75,7 +91,7 @@ describe.sequential("PostgreSQL campaign reservation safety", () => {
     const shop = await createShop();
     const seed = await createRecipient(shop.id);
     await prisma.creatorShopContactState.create({ data: { shopId: shop.id, creatorId: seed.creator.id, contactCount: 1, lastContactedAt: new Date() } });
-    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
+    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any, tiktokStub);
     const frozen = await service.freeze(seed.campaign.id, 1);
     expect(frozen.state).toBe("PREVIEW_EXPIRED");
     expect(frozen.freezeExpiresAt).toBeNull();
@@ -88,7 +104,7 @@ describe.sequential("PostgreSQL campaign reservation safety", () => {
   it("serializes freeze with an overlapping contact-history mutation", async () => {
     const shop = await createShop();
     const seed = await createRecipient(shop.id);
-    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
+    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any, tiktokStub);
     let locked!: () => void;
     let release!: () => void;
     const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
@@ -121,7 +137,7 @@ describe.sequential("PostgreSQL campaign reservation safety", () => {
     await expireFrozenCampaigns(prisma);
     expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "PREVIEW_EXPIRED" });
     expect(await prisma.outreachReservation.count({ where: { shopId: shop.id } })).toBe(0);
-    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
+    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any, tiktokStub);
     await expect(service.start(seed.campaign.id, { version: 2, confirmationName: seed.campaign.name, confirmationCount: 1 })).rejects.toThrow("stale or expired");
   });
 });
@@ -281,7 +297,7 @@ describe.sequential("dispatch ceilings and delivery policy", () => {
 
 describe.sequential("historical import identity and paged sync", () => {
   it("uses explicit source identity to deduplicate the same stable record id", async () => {
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     const sourceRecordId = stamp();
     const creatorOpenId = stamp();
     const header = "external_source,source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
@@ -293,7 +309,7 @@ describe.sequential("historical import identity and paged sync", () => {
   });
 
   it("keeps equal stable record ids from different implicit filename sources distinct", async () => {
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     const sourceRecordId = stamp();
     const creatorOpenId = stamp();
     const header = "source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
@@ -307,7 +323,7 @@ describe.sequential("historical import identity and paged sync", () => {
   });
 
   it("deduplicates different filenames when both declare the same external source", async () => {
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     const sourceRecordId = stamp();
     const creatorOpenId = stamp();
     const header = "external_source,source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
@@ -319,7 +335,7 @@ describe.sequential("historical import identity and paged sync", () => {
   });
 
   it("deduplicates the same provider message across files and reordered CSVs", async () => {
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     const id = stamp();
     const creator = stamp();
     const header = "external_source,external_message_id,source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
@@ -341,7 +357,7 @@ describe.sequential("historical import identity and paged sync", () => {
   });
 
   it("lets a corrected import supersede an earlier unresolved row", async () => {
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     const sourceRecord = stamp();
     const creator = stamp();
     const header = "source_system,source_record_id,creator_open_id,contacted_at,send_status\n";
@@ -356,7 +372,7 @@ describe.sequential("historical import identity and paged sync", () => {
   it("persists page cursors, survives interruption, and resumes idempotently to exhaustion", async () => {
     const prefix = stamp();
     let shouldFail = true;
-    const conversations = [{ id: `${prefix}_c1`, creatorOpenId: `${prefix}_u1` }, { id: `${prefix}_c2`, creatorOpenId: `${prefix}_u2` }];
+    const conversations = [{ id: `${prefix}_c1`, creatorOpenId: `${prefix}_u1`, creatorImId: `${prefix}_im1` }, { id: `${prefix}_c2`, creatorOpenId: `${prefix}_u2`, creatorImId: `${prefix}_im2` }];
     const adapter: TikTokAffiliateAdapter = {
       getCapabilities: () => new MockTikTokAffiliateAdapter().getCapabilities(),
       searchCreators: (...args: any[]) => (new MockTikTokAffiliateAdapter().searchCreators as any)(...args),
@@ -374,7 +390,7 @@ describe.sequential("historical import identity and paged sync", () => {
       getLatestUnreadMessages: async () => []
     };
     const source = `${prefix}_source`;
-    const service = new HistoryService(prisma as any);
+    const service = new HistoryService(prisma as any, tiktokStub);
     await expect(service.syncMockHistory(adapter, source)).rejects.toThrow("INTERRUPTED");
     const shop = await ensureMockShop(prisma as any);
     const partial = await prisma.contactHistorySyncRun.findFirstOrThrow({ where: { shopId: shop.id, source } });

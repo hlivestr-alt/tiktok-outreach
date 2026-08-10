@@ -3,13 +3,12 @@ import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
-import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
-import { ensureMockShop, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
+import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
+import { TikTokIntegrationService } from "../integrations/tiktok.service";
 
 @Injectable()
 export class OutreachService {
-  private readonly adapter = new MockTikTokAffiliateAdapter();
-  constructor(private readonly prisma: PrismaService, private readonly queues: QueueService) {}
+  constructor(private readonly prisma: PrismaService, private readonly queues: QueueService, private readonly tiktok: TikTokIntegrationService) {}
 
   async list() {
     await expireFrozenCampaigns(this.prisma);
@@ -17,7 +16,7 @@ export class OutreachService {
   }
 
   async create(input: CampaignCreateInput) {
-    const shop = await ensureMockShop(this.prisma);
+    const shop = await this.tiktok.activeShop();
     const rankingMetrics = new Set(["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]);
     try {
       assertCampaignWithinLimit(input.targetCount, {
@@ -70,9 +69,11 @@ export class OutreachService {
     let pageToken: string | undefined;
     let searchKey: string | undefined;
     let hasMore = true;
+    const adapter = await this.tiktok.adapter();
     while (hasMore && creators.length < campaign.candidateLimit) {
-      const page = await this.adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
-      creators.push(...page.creators.slice(0, campaign.candidateLimit - creators.length));
+      const page = await adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
+      const remaining = campaign.candidateLimit - creators.length;
+      creators.push(...page.creators.slice(0, remaining).map((creator, index) => ({ ...creator, discoveryOrdinal: creators.length + index })));
       pageToken = page.nextPageToken;
       searchKey = page.searchKey;
       hasMore = page.hasMore;
@@ -108,7 +109,7 @@ export class OutreachService {
         });
         const snapshot = await tx.creatorMetricSnapshot.create({ data: {
           creatorId: creator.id, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
-          gmvAmount: new Prisma.Decimal(evaluated.gmv.amount), gmvCurrency: evaluated.gmv.currency, unitsSold: evaluated.unitsSold,
+          gmvAmount: evaluated.gmv ? new Prisma.Decimal(evaluated.gmv.amount) : null, gmvCurrency: evaluated.gmv?.currency, unitsSold: evaluated.unitsSold,
           avgVideoViews: evaluated.avgVideoViews, avgLiveViewers: evaluated.avgLiveViewers,
           engagementRate: evaluated.engagementRate == null ? null : new Prisma.Decimal(evaluated.engagementRate),
           sourceFetchedAt: new Date(), rawPayload: evaluated as unknown as Prisma.InputJsonValue
@@ -155,6 +156,7 @@ export class OutreachService {
   }
 
   async freeze(id: string, version: number) {
+    if (config.APP_MODE === "read_only") throw new BadRequestException("READ_ONLY_PREVIEW: real TikTok campaigns cannot be frozen or dispatched in Phase 2A");
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
@@ -247,6 +249,7 @@ export class OutreachService {
   }
 
   async start(id: string, input: { version: number; confirmationName: string; confirmationCount: number }) {
+    if (config.APP_MODE === "read_only") throw new BadRequestException("OUTBOUND_DISABLED: real TikTok campaigns cannot enter the dispatch queue");
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true, state: "RESERVED" } });

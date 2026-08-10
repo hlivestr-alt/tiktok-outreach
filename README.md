@@ -1,13 +1,14 @@
 # Affiliate Outreach Operations
 
-Phase-one mock implementation of TikTok Shop affiliate bulk outreach operations. It discovers deterministic Indonesian creator fixtures, applies filters and historical cooldowns, freezes exact messages, and runs a crash-aware BullMQ mock queue with absolute safety ceilings.
+TikTok Shop affiliate outreach operations with a deterministic Phase 1 mock workflow and a Phase 2A real TikTok read-only workflow. Real mode supports seller authorization, Indonesian shop selection, marketplace discovery/performance, and resumable history backfill while keeping TikTok outbound physically unavailable.
 
 Detailed design notes are in [Architecture and safety](docs/architecture.md) and [Future TikTok integration](docs/tiktok-integration.md).
 
 ## Safety boundary
 
-- `APP_MODE` accepts only `mock`.
-- No TikTok production adapter or credentials exist.
+- `APP_MODE` accepts only `mock` or `read_only`.
+- The real HTTP client has an explicit read-operation method/path allowlist.
+- Real campaigns end at preview and cannot freeze, queue, or dispatch.
 - No code connects to TikTok or n8n.
 - The unauthenticated application binds to localhost only.
 - PostgreSQL stores exact frozen outbound messages; runtime logs use IDs and hashes only.
@@ -57,7 +58,11 @@ Defaults are 1,000 recipients per campaign, 4,000 provider dispatch attempts per
 
 Selected fixture IDs occasionally return `DELIVERY_UNKNOWN`. They are never resent. Read-only reconciliation checks run after the configured delays. A single exact outbound content-hash match becomes `SENT`; zero or multiple matches remain blocked for review.
 
-## Phase-one boundaries
+## Phase 2A read-only setup
+
+Set `APP_MODE=read_only` and provide the four server-only `TIKTOK_*` credential variables described in [TikTok integration](docs/tiktok-integration.md). Do not paste credentials into chat or commit them. Without credentials the app starts normally as `READ_ONLY_NOT_CONFIGURED`.
+
+## Current boundaries
 
 - Authentication and multi-user authorization are intentionally deferred; all services bind to localhost.
 - CSV import is supplied as a UTF-8 string through the local API/UI and is intended for mock or controlled historical exports.

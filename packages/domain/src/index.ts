@@ -6,11 +6,11 @@ export type CreatorCandidate = {
   username?: string;
   nickname?: string;
   categoryIds: string[];
-  followerCount: number;
-  gmv: Money;
-  unitsSold: number;
-  avgVideoViews: number;
-  avgLiveViewers: number;
+  followerCount: number | null;
+  gmv: Money | null;
+  unitsSold: number | null;
+  avgVideoViews: number | null;
+  avgLiveViewers: number | null;
   engagementRate?: number;
   selectionRegion: string;
   discoveryOrdinal: number;
@@ -81,31 +81,32 @@ export type PreviewSummary = {
 
 export type PreviewResult = { creators: EvaluatedCreator[]; summary: PreviewSummary };
 
-const numericGmv = (creator: CreatorCandidate): number => Number(creator.gmv.amount || 0);
+const numericGmv = (creator: CreatorCandidate): number | null => creator.gmv ? Number(creator.gmv.amount) : null;
 
 export function matchesFilters(creator: CreatorCandidate, filters: CreatorFilters): boolean {
   const keyword = filters.keyword?.trim().toLowerCase();
   if (keyword && !`${creator.username ?? ""} ${creator.nickname ?? ""}`.toLowerCase().includes(keyword)) return false;
   if (filters.categoryIds?.length && !filters.categoryIds.some((id) => creator.categoryIds.includes(id))) return false;
-  if (filters.minFollowers != null && creator.followerCount < filters.minFollowers) return false;
-  if (filters.maxFollowers != null && creator.followerCount > filters.maxFollowers) return false;
-  if (filters.minGmv != null && numericGmv(creator) < filters.minGmv) return false;
-  if (filters.maxGmv != null && numericGmv(creator) > filters.maxGmv) return false;
-  if (filters.minUnitsSold != null && creator.unitsSold < filters.minUnitsSold) return false;
-  if (filters.minAvgVideoViews != null && creator.avgVideoViews < filters.minAvgVideoViews) return false;
-  if (filters.minAvgLiveViewers != null && creator.avgLiveViewers < filters.minAvgLiveViewers) return false;
-  if (filters.minEngagementRate != null && (creator.engagementRate ?? 0) < filters.minEngagementRate) return false;
+  if (filters.minFollowers != null && (creator.followerCount == null || creator.followerCount < filters.minFollowers)) return false;
+  if (filters.maxFollowers != null && (creator.followerCount == null || creator.followerCount > filters.maxFollowers)) return false;
+  const gmv = numericGmv(creator);
+  if (filters.minGmv != null && (gmv == null || gmv < filters.minGmv)) return false;
+  if (filters.maxGmv != null && (gmv == null || gmv > filters.maxGmv)) return false;
+  if (filters.minUnitsSold != null && (creator.unitsSold == null || creator.unitsSold < filters.minUnitsSold)) return false;
+  if (filters.minAvgVideoViews != null && (creator.avgVideoViews == null || creator.avgVideoViews < filters.minAvgVideoViews)) return false;
+  if (filters.minAvgLiveViewers != null && (creator.avgLiveViewers == null || creator.avgLiveViewers < filters.minAvgLiveViewers)) return false;
+  if (filters.minEngagementRate != null && (creator.engagementRate == null || creator.engagementRate < filters.minEngagementRate)) return false;
   return true;
 }
 
 export function rankingValue(creator: CreatorCandidate, metric: RankingMetric): number {
   switch (metric) {
-    case "GMV": return numericGmv(creator);
-    case "UNITS_SOLD": return creator.unitsSold;
-    case "FOLLOWERS": return creator.followerCount;
-    case "AVG_VIDEO_VIEWS": return creator.avgVideoViews;
-    case "AVG_LIVE_VIEWERS": return creator.avgLiveViewers;
-    case "ENGAGEMENT_RATE": return creator.engagementRate ?? 0;
+    case "GMV": return numericGmv(creator) ?? Number.MIN_SAFE_INTEGER;
+    case "UNITS_SOLD": return creator.unitsSold ?? Number.MIN_SAFE_INTEGER;
+    case "FOLLOWERS": return creator.followerCount ?? Number.MIN_SAFE_INTEGER;
+    case "AVG_VIDEO_VIEWS": return creator.avgVideoViews ?? Number.MIN_SAFE_INTEGER;
+    case "AVG_LIVE_VIEWERS": return creator.avgLiveViewers ?? Number.MIN_SAFE_INTEGER;
+    case "ENGAGEMENT_RATE": return creator.engagementRate ?? Number.MIN_SAFE_INTEGER;
     case "TIKTOK_RELEVANCE": return -creator.discoveryOrdinal;
   }
 }

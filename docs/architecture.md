@@ -45,7 +45,8 @@ PostgreSQL stores the exact frozen outbound message and content hash. Runtime lo
 
 ## Safety invariants
 
-- `APP_MODE` validates to `mock` only. A production adapter and production credential fields do not exist.
+- `APP_MODE` validates only to `mock` or `read_only`; unsupported values fail closed and no production/live-send mode exists.
+- The real read-only adapter can issue only its exact method/path allowlist. Campaign freeze, queue creation, and worker dispatch reject `read_only` mode before any provider call.
 - A dispatch is counted before the mock provider is called.
 - Campaign, Indonesia shop-day, and rolling-minute ceilings are enforced under a PostgreSQL advisory lock and serializable transaction.
 - PostgreSQL is authoritative for the maximum permitted dispatch rate. BullMQ also has an environment-configured infrastructure limiter, which may operate more slowly but can never override the database ceiling.

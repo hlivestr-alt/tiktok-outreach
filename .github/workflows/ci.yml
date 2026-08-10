@@ -66,6 +66,8 @@ jobs:
           pnpm exec prisma migrate status --schema packages/db/prisma/schema.prisma
       - name: Unit tests
         run: pnpm test:unit
+      - name: TikTok read-only mocked HTTP boundary tests
+        run: pnpm test:tiktok
       - name: PostgreSQL and Redis/BullMQ integration tests
         run: pnpm test:integration
       - name: Typecheck
