@@ -8,6 +8,8 @@
     "build:packages": "pnpm -r --filter \"./packages/**\" --workspace-concurrency=1 run build",
     "dev": "pnpm build:packages && pnpm --parallel --filter @affiliate/api --filter @affiliate/worker --filter @affiliate/web run dev",
     "test": "vitest run",
+    "test:unit": "vitest run --exclude apps/api/src/hardening.integration.test.ts",
+    "test:integration": "vitest run apps/api/src/hardening.integration.test.ts",
     "test:watch": "vitest",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",

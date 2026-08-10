@@ -29,7 +29,7 @@ The domain package owns filtering, ranking, cooldown decisions, deduplication, t
 8. Require the current campaign version, exact campaign name, and exact selected count before enqueueing.
 9. Dispatch through BullMQ. PostgreSQL records a dispatch slot before every provider attempt.
 
-Frozen previews expire after 30 minutes, move to `PREVIEW_EXPIRED`, and release reservations idempotently. Freeze re-checks current contact state, cooldown, unknown deliveries, do-not-contact, and active reservations under a shop-scoped transaction lock. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection.
+Frozen previews expire after 30 minutes, move to `PREVIEW_EXPIRED`, and release reservations idempotently. Freeze re-checks current contact state, cooldown, unknown deliveries, do-not-contact, and active reservations under ordered per-shop/per-creator transaction locks shared by history and delivery mutations. If every selected creator became ineligible, freeze returns the campaign to `PREVIEW_EXPIRED` immediately without an active expiry window. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection.
 
 Campaign recipient capacity (`maxRecipientsPerCampaign`) and provider dispatch-attempt capacity (`maxDispatchAttemptsPerCampaign`) are independent. Daily and rolling-minute claims remain separate. Reaching the campaign attempt ceiling moves the campaign to `SAFETY_PAUSED`; it does not create an infinite delayed-job loop.
 
@@ -48,11 +48,12 @@ PostgreSQL stores the exact frozen outbound message and content hash. Runtime lo
 - `APP_MODE` validates to `mock` only. A production adapter and production credential fields do not exist.
 - A dispatch is counted before the mock provider is called.
 - Campaign, Indonesia shop-day, and rolling-minute ceilings are enforced under a PostgreSQL advisory lock and serializable transaction.
-- BullMQ also has a global worker limiter and may operate more slowly than the hard ceiling.
+- PostgreSQL is authoritative for the maximum permitted dispatch rate. BullMQ also has an environment-configured infrastructure limiter, which may operate more slowly but can never override the database ceiling.
 - Explicit non-acceptance outcomes may retry with exponential backoff. Each retry consumes a new dispatch event and safety budget.
 - A timeout or crash after dispatch becomes `DELIVERY_UNKNOWN` and is never sent again.
 - Reconciliation is read-only. One unique outbound message with the same conversation, content hash, and timing window marks the delivery sent. No match or multiple matches remain blocked after the final check.
 - Contact cooldown is updated only after a confirmed send or positively reconciled send.
+- Immediately before a dispatch claim, the worker re-checks do-not-contact, unrelated unresolved deliveries, reservation ownership, campaign state, and external cooldown changes. Unsafe recipients are cancelled and audited without consuming an attempt.
 - Pause is cooperative: active database transitions finish, queued jobs delay, and resume re-enqueues only safe states.
 
 ## Historical-contact gate

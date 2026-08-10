@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@affiliate/db";
+import { lockCreatorEligibility, PrismaClient } from "@affiliate/db";
 import { Queue } from "bullmq";
 import type { TikTokAffiliateAdapter } from "@affiliate/contracts";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
@@ -42,10 +42,15 @@ async function createRecipient(shopId: string, campaignState: any = "PREVIEW_REA
 }
 
 async function addDelivery(seed: Awaited<ReturnType<typeof createRecipient>>, state: any = "PENDING") {
-  return prisma.outreachDelivery.create({ data: {
+  const delivery = await prisma.outreachDelivery.create({ data: {
     campaignId: seed.campaign.id, campaignRecipientId: seed.recipient.id,
     deterministicKey: `${seed.campaign.id}:${seed.creator.id}`, contentHash: "hash", state
   } });
+  await prisma.outreachReservation.upsert({
+    where: { campaignRecipientId: seed.recipient.id }, update: {},
+    create: { shopId: seed.campaign.shopId, creatorId: seed.creator.id, campaignRecipientId: seed.recipient.id, expiresAt: new Date("9999-12-31T23:59:59.999Z") }
+  });
+  return delivery;
 }
 
 beforeAll(async () => { await ensureMockShop(prisma as any); });
@@ -72,10 +77,39 @@ describe.sequential("PostgreSQL campaign reservation safety", () => {
     await prisma.creatorShopContactState.create({ data: { shopId: shop.id, creatorId: seed.creator.id, contactCount: 1, lastContactedAt: new Date() } });
     const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
     const frozen = await service.freeze(seed.campaign.id, 1);
+    expect(frozen.state).toBe("PREVIEW_EXPIRED");
+    expect(frozen.freezeExpiresAt).toBeNull();
     expect((frozen.summary as any).selected).toBe(0);
     expect((frozen.summary as any).freezeAdjustment).toBe(1);
     expect(await prisma.outreachReservation.count({ where: { shopId: shop.id } })).toBe(0);
     expect(await prisma.campaignRecipient.findUniqueOrThrow({ where: { id: seed.recipient.id } })).toMatchObject({ selected: false, skipReason: "COOLDOWN" });
+  });
+
+  it("serializes freeze with an overlapping contact-history mutation", async () => {
+    const shop = await createShop();
+    const seed = await createRecipient(shop.id);
+    const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any);
+    let locked!: () => void;
+    let release!: () => void;
+    const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    const mutation = prisma.$transaction(async (tx) => {
+      await lockCreatorEligibility(tx, shop.id, [seed.creator.id]);
+      locked();
+      await releasePromise;
+      await tx.creatorShopContactState.create({ data: {
+        shopId: shop.id, creatorId: seed.creator.id, contactCount: 1,
+        firstContactedAt: new Date(), lastContactedAt: new Date(), historyCoverageStart: new Date()
+      } });
+    });
+    await lockedPromise;
+    const freezing = service.freeze(seed.campaign.id, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    await Promise.all([mutation, freezing]);
+    expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "PREVIEW_EXPIRED" });
+    expect(await prisma.campaignRecipient.findUniqueOrThrow({ where: { id: seed.recipient.id } })).toMatchObject({ selected: false, skipReason: "COOLDOWN" });
+    expect(await prisma.outreachReservation.count({ where: { campaignRecipientId: seed.recipient.id } })).toBe(0);
   });
 
   it("expires frozen reservations idempotently and makes the campaign unstartable", async () => {
@@ -138,6 +172,26 @@ describe.sequential("durable queue outbox", () => {
       await testQueue.close();
     }
   });
+
+  it("does not recreate jobs across repeated reconciliation for SAFETY_PAUSED campaigns", async () => {
+    const shop = await createShop();
+    const seed = await createRecipient(shop.id, "SAFETY_PAUSED");
+    const delivery = await addDelivery(seed);
+    await prisma.queueOutbox.create({ data: {
+      campaignId: seed.campaign.id, deliveryId: delivery.id, recipientId: seed.recipient.id,
+      deterministicJobId: `send-${seed.recipient.id}`, state: "PENDING"
+    } });
+    let adds = 0;
+    const queue = { getJob: async () => undefined, add: async (_name: string, data: { recipientId: string }) => {
+      if (data.recipientId === seed.recipient.id) adds++;
+    } };
+    await reconcileOutbox(prisma, queue as any);
+    await reconcileOutbox(prisma, queue as any);
+    await reconcileOutbox(prisma, queue as any);
+    expect(adds).toBe(0);
+    expect(await prisma.queueOutbox.count({ where: { campaignId: seed.campaign.id } })).toBe(1);
+    expect(await prisma.queueOutbox.findUniqueOrThrow({ where: { recipientId: seed.recipient.id } })).toMatchObject({ state: "PENDING", enqueueAttempts: 0 });
+  });
 });
 
 describe.sequential("dispatch ceilings and delivery policy", () => {
@@ -197,6 +251,24 @@ describe.sequential("dispatch ceilings and delivery policy", () => {
     expect((await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).dispatchCount).toBe(1);
   });
 
+  it("cancels an unsafe recipient before claim without consuming a dispatch attempt", async () => {
+    const shop = await createShop();
+    const seed = await createRecipient(shop.id, "QUEUED");
+    const delivery = await addDelivery(seed);
+    await prisma.queueOutbox.create({ data: {
+      campaignId: seed.campaign.id, deliveryId: delivery.id, recipientId: seed.recipient.id,
+      deterministicJobId: `send-${seed.recipient.id}`, state: "ENQUEUED"
+    } });
+    await prisma.creatorShopContactState.create({ data: { shopId: shop.id, creatorId: seed.creator.id, doNotContact: true } });
+    const recipient = { ...seed.recipient, campaignId: seed.campaign.id, campaign: { ...seed.campaign, shopId: shop.id }, delivery };
+    expect(await reserveDispatchSlot(prisma, recipient)).toMatchObject({ claimed: false, cancelled: true, reason: "DO_NOT_CONTACT" });
+    expect(await prisma.campaignRecipient.findUniqueOrThrow({ where: { id: seed.recipient.id } })).toMatchObject({ state: "CANCELLED", skipReason: "DO_NOT_CONTACT" });
+    expect(await prisma.outreachDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).toMatchObject({ state: "FAILED_TERMINAL", attemptCount: 0 });
+    expect(await prisma.outboundDispatchEvent.count({ where: { deliveryId: delivery.id } })).toBe(0);
+    expect(await prisma.outreachReservation.count({ where: { campaignRecipientId: seed.recipient.id } })).toBe(0);
+    expect(await prisma.auditEvent.count({ where: { campaignId: seed.campaign.id, eventType: "RECIPIENT_CANCELLED_PRE_DISPATCH" } })).toBe(1);
+  });
+
   it("turns a DISPATCHING delivery left by worker restart into DELIVERY_UNKNOWN", async () => {
     const shop = await createShop();
     const seed = await createRecipient(shop.id, "QUEUED");
@@ -208,6 +280,44 @@ describe.sequential("dispatch ceilings and delivery policy", () => {
 });
 
 describe.sequential("historical import identity and paged sync", () => {
+  it("uses explicit source identity to deduplicate the same stable record id", async () => {
+    const service = new HistoryService(prisma as any);
+    const sourceRecordId = stamp();
+    const creatorOpenId = stamp();
+    const header = "external_source,source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
+    await service.importCsv({ sourceName: "first.csv", csv: `${header}affiliate-crm,${sourceRecordId},${creatorOpenId},2026-01-05T00:00:00Z,SENT,first\n` });
+    const duplicate = await service.importCsv({ sourceName: "second.csv", csv: `${header}affiliate-crm,${sourceRecordId},${creatorOpenId},2026-01-05T00:00:00Z,SENT,second\n` });
+    expect(duplicate.duplicateCount).toBe(1);
+    const shop = await ensureMockShop(prisma as any);
+    expect(await prisma.historicalContactFact.count({ where: { shopId: shop.id, identityKey: `source:affiliate-crm:${sourceRecordId}` } })).toBe(1);
+  });
+
+  it("keeps equal stable record ids from different implicit filename sources distinct", async () => {
+    const service = new HistoryService(prisma as any);
+    const sourceRecordId = stamp();
+    const creatorOpenId = stamp();
+    const header = "source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
+    await service.importCsv({ sourceName: "old_tiktok_export.csv", csv: `${header}${sourceRecordId},${creatorOpenId},2026-01-06T00:00:00Z,SENT,tiktok-export\n` });
+    const second = await service.importCsv({ sourceName: "affiliate_crm_export.csv", csv: `${header}${sourceRecordId},${creatorOpenId},2026-01-06T00:00:00Z,SENT,crm-export\n` });
+    expect(second.duplicateCount).toBe(0);
+    const shop = await ensureMockShop(prisma as any);
+    expect(await prisma.historicalContactFact.count({ where: {
+      shopId: shop.id, sourceRecordId, externalSource: { in: ["old_tiktok_export.csv", "affiliate_crm_export.csv"] }
+    } })).toBe(2);
+  });
+
+  it("deduplicates different filenames when both declare the same external source", async () => {
+    const service = new HistoryService(prisma as any);
+    const sourceRecordId = stamp();
+    const creatorOpenId = stamp();
+    const header = "external_source,source_record_id,creator_open_id,contacted_at,send_status,campaign_name\n";
+    await service.importCsv({ sourceName: "export-a.csv", csv: `${header}shared-system,${sourceRecordId},${creatorOpenId},2026-01-07T00:00:00Z,SENT,a\n` });
+    const duplicate = await service.importCsv({ sourceName: "export-b.csv", csv: `${header}shared-system,${sourceRecordId},${creatorOpenId},2026-01-07T00:00:00Z,SENT,b\n` });
+    expect(duplicate.duplicateCount).toBe(1);
+    const shop = await ensureMockShop(prisma as any);
+    expect(await prisma.historicalContactFact.count({ where: { shopId: shop.id, identityKey: `source:shared-system:${sourceRecordId}` } })).toBe(1);
+  });
+
   it("deduplicates the same provider message across files and reordered CSVs", async () => {
     const service = new HistoryService(prisma as any);
     const id = stamp();

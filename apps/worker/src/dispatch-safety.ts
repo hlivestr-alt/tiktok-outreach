@@ -1,4 +1,4 @@
-import { Prisma, PrismaClient } from "@affiliate/db";
+import { lockCreatorEligibility, Prisma, PrismaClient } from "@affiliate/db";
 
 export class SafetyDelay extends Error {
   constructor(readonly delayMs: number, message: string) { super(message); }
@@ -9,12 +9,61 @@ export const shopDate = (date: Date, timezone: string): Date => {
   return new Date(`${formatted}T00:00:00.000Z`);
 };
 
-export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, now = new Date()): Promise<{ claimed: true; attemptNumber: number } | { claimed: false }> {
+type DispatchClaim = { claimed: true; attemptNumber: number } | { claimed: false; cancelled: boolean; reason?: string };
+
+export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, now = new Date()): Promise<DispatchClaim> {
   return prisma.$transaction(async (tx) => {
+    await lockCreatorEligibility(tx, recipient.campaign.shopId, [recipient.creatorId]);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`outbound:${recipient.campaign.shopId}`}))`;
     const campaign = await tx.campaign.findUniqueOrThrow({ where: { id: recipient.campaignId }, include: { shop: true } });
     const currentDelivery = await tx.outreachDelivery.findUniqueOrThrow({ where: { id: recipient.delivery.id } });
-    if (!["PENDING", "FAILED_RETRYABLE"].includes(currentDelivery.state)) return { claimed: false as const };
+    if (!["PENDING", "FAILED_RETRYABLE"].includes(currentDelivery.state)) return { claimed: false as const, cancelled: false };
+    if (!["QUEUED", "RUNNING"].includes(campaign.state)) return { claimed: false as const, cancelled: false };
+
+    const [currentRecipient, reservation, contact] = await Promise.all([
+      tx.campaignRecipient.findUniqueOrThrow({ where: { id: recipient.id } }),
+      tx.outreachReservation.findUnique({ where: { campaignRecipientId: recipient.id } }),
+      tx.creatorShopContactState.findUnique({
+        where: { shopId_creatorId: { shopId: campaign.shopId, creatorId: recipient.creatorId } }
+      })
+    ]);
+    let exclusionReason: string | undefined;
+    let exclusionDetail: string | undefined;
+    if (contact?.doNotContact) {
+      exclusionReason = "DO_NOT_CONTACT";
+      exclusionDetail = "Creator was marked do-not-contact after campaign confirmation";
+    } else if (contact?.unresolvedDelivery && contact.lastDeliveryId !== currentDelivery.id) {
+      exclusionReason = "DELIVERY_UNKNOWN";
+      exclusionDetail = "Creator has an unresolved delivery from another outreach delivery";
+    } else if (!reservation || reservation.expiresAt <= now || reservation.shopId !== campaign.shopId || reservation.creatorId !== recipient.creatorId
+      || reservation.campaignRecipientId !== currentRecipient.id || currentRecipient.campaignId !== campaign.id) {
+      exclusionReason = "RESERVATION_INVALID";
+      exclusionDetail = "The active reservation no longer belongs to this campaign recipient";
+    } else {
+      const ownConfirmedContact = contact?.lastCampaignId === campaign.id && contact.lastDeliveryId === currentDelivery.id;
+      const cutoff = new Date(now.getTime() - campaign.cooldownDays * 86_400_000);
+      if (!ownConfirmedContact && contact?.lastContactedAt && contact.lastContactedAt > cutoff) {
+        exclusionReason = "COOLDOWN_CHANGED";
+        exclusionDetail = `An external contact at ${contact.lastContactedAt.toISOString()} made dispatch unsafe`;
+      }
+    }
+    if (exclusionReason) {
+      await tx.outreachDelivery.update({ where: { id: currentDelivery.id }, data: {
+        state: "FAILED_TERMINAL", lastErrorCode: `SAFETY_${exclusionReason}`, lastErrorDetail: exclusionDetail
+      } });
+      await tx.campaignRecipient.update({ where: { id: currentRecipient.id }, data: {
+        state: "CANCELLED", eligibility: "EXCLUDED", skipReason: exclusionReason, skipDetail: exclusionDetail
+      } });
+      await tx.outreachReservation.deleteMany({ where: { campaignRecipientId: currentRecipient.id } });
+      await tx.queueOutbox.updateMany({ where: { recipientId: currentRecipient.id }, data: {
+        state: "COMPLETED", lastError: `Safety cancellation: ${exclusionReason}`
+      } });
+      await tx.auditEvent.create({ data: {
+        shopId: campaign.shopId, campaignId: campaign.id, eventType: "RECIPIENT_CANCELLED_PRE_DISPATCH",
+        payload: { recipientId: currentRecipient.id, creatorId: recipient.creatorId, deliveryId: currentDelivery.id, reason: exclusionReason, detail: exclusionDetail }
+      } });
+      return { claimed: false as const, cancelled: true, reason: exclusionReason };
+    }
     if (campaign.dispatchCount >= campaign.shop.maxDispatchAttemptsPerCampaign) {
       const reason = `Campaign dispatch-attempt ceiling of ${campaign.shop.maxDispatchAttemptsPerCampaign} reached`;
       await tx.campaign.update({ where: { id: campaign.id }, data: { state: "SAFETY_PAUSED", safetyPauseReason: reason, version: { increment: 1 } } });
@@ -22,7 +71,7 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
         dispatchAttempts: campaign.dispatchCount, ceiling: campaign.shop.maxDispatchAttemptsPerCampaign, reason
       } } });
       await tx.queueOutbox.updateMany({ where: { campaignId: campaign.id, state: { in: ["PENDING", "ENQUEUED"] } }, data: { state: "SAFETY_PAUSED", lastError: reason } });
-      return { claimed: false as const };
+      return { claimed: false as const, cancelled: false };
     }
     const oneMinuteAgo = new Date(now.getTime() - 60_000);
     const recent = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneMinuteAgo } } });

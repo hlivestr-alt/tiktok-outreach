@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { parse } from "csv-parse/sync";
-import { Prisma } from "@affiliate/db";
+import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { TikTokAffiliateAdapter } from "@affiliate/contracts";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
 import { ensureMockShop, PrismaService } from "../shared";
@@ -83,25 +83,29 @@ export class HistoryService {
           while (true) {
             const messages = await adapter.listMessages(providerConversation.id, { pageToken: messagePageToken, pageSize: 20 });
             for (const message of messages.items.filter((item) => item.direction === "OUTBOUND")) {
-              const existingMessage = await this.prisma.conversationMessage.findUnique({ where: { externalMessageId: message.id } });
-              await this.prisma.conversationMessage.upsert({
-                where: { externalMessageId: message.id }, update: {},
-                create: { conversationId: conversation.id, externalMessageId: message.id, direction: "OUTBOUND", content: message.content, contentHash: hash(message.content), providerCreatedAt: message.createdAt, importSource: source }
-              });
-              const existing = await this.prisma.creatorShopContactState.findUnique({ where: { shopId_creatorId: { shopId: shop.id, creatorId: creator.id } } });
-              await this.prisma.creatorShopContactState.upsert({
-                where: { shopId_creatorId: { shopId: shop.id, creatorId: creator.id } },
-                update: {
-                  firstContactedAt: existing?.firstContactedAt && existing.firstContactedAt < message.createdAt ? existing.firstContactedAt : message.createdAt,
-                  lastContactedAt: existing?.lastContactedAt && existing.lastContactedAt > message.createdAt ? existing.lastContactedAt : message.createdAt,
-                  contactCount: existingMessage ? undefined : { increment: 1 },
-                  historyCoverageStart: existing?.historyCoverageStart && existing.historyCoverageStart < message.createdAt ? existing.historyCoverageStart : message.createdAt
-                },
-                create: { shopId: shop.id, creatorId: creator.id, firstContactedAt: message.createdAt, lastContactedAt: message.createdAt, contactCount: 1, historyCoverageStart: message.createdAt }
+              const wasImported = await this.prisma.$transaction(async (tx) => {
+                await lockCreatorEligibility(tx, shop.id, [creator.id]);
+                const existingMessage = await tx.conversationMessage.findUnique({ where: { externalMessageId: message.id } });
+                await tx.conversationMessage.upsert({
+                  where: { externalMessageId: message.id }, update: {},
+                  create: { conversationId: conversation.id, externalMessageId: message.id, direction: "OUTBOUND", content: message.content, contentHash: hash(message.content), providerCreatedAt: message.createdAt, importSource: source }
+                });
+                const existing = await tx.creatorShopContactState.findUnique({ where: { shopId_creatorId: { shopId: shop.id, creatorId: creator.id } } });
+                await tx.creatorShopContactState.upsert({
+                  where: { shopId_creatorId: { shopId: shop.id, creatorId: creator.id } },
+                  update: {
+                    firstContactedAt: existing?.firstContactedAt && existing.firstContactedAt < message.createdAt ? existing.firstContactedAt : message.createdAt,
+                    lastContactedAt: existing?.lastContactedAt && existing.lastContactedAt > message.createdAt ? existing.lastContactedAt : message.createdAt,
+                    contactCount: existingMessage ? undefined : { increment: 1 },
+                    historyCoverageStart: existing?.historyCoverageStart && existing.historyCoverageStart < message.createdAt ? existing.historyCoverageStart : message.createdAt
+                  },
+                  create: { shopId: shop.id, creatorId: creator.id, firstContactedAt: message.createdAt, lastContactedAt: message.createdAt, contactCount: 1, historyCoverageStart: message.createdAt }
+                });
+                return !existingMessage;
               });
               earliest = !earliest || message.createdAt < earliest ? message.createdAt : earliest;
               latest = !latest || message.createdAt > latest ? message.createdAt : latest;
-              if (!existingMessage) imported++;
+              if (wasImported) imported++;
             }
             messagePageToken = messages.nextPageToken;
             cursor = { phase: "CONVERSATIONS", conversationPageToken: pageToken ?? null, conversationIndex: index, messagePageToken: messagePageToken ?? null };
@@ -159,7 +163,8 @@ export class HistoryService {
   }
 
   private historicalIdentity(sourceName: string, row: Record<string, string>, contactedAt: Date): { identityKey: string; externalSource: string; sourceRecordId: string } {
-    const externalSource = (row.external_source || row.source_system || row.provider || "CSV").trim().toLowerCase();
+    const normalizedSourceName = sourceName.trim().replace(/\\/g, "/").split("/").at(-1)?.trim().toLowerCase().replace(/\s+/g, "_") || "unnamed-csv";
+    const externalSource = (row.external_source || row.source_system || row.provider || normalizedSourceName).trim().toLowerCase();
     const externalMessageId = row.external_message_id?.trim();
     const sourceRecordId = row.source_record_id?.trim();
     if (externalMessageId) return { identityKey: `message:${externalSource}:${externalMessageId}`, externalSource, sourceRecordId: sourceRecordId || externalMessageId };
@@ -168,21 +173,21 @@ export class HistoryService {
       row.creator_open_id?.trim(), row.conversation_id?.trim(), Number.isNaN(contactedAt.getTime()) ? row.contacted_at?.trim() : contactedAt.toISOString(),
       (row.send_status || "SENT").toUpperCase(), row.campaign_name?.trim(), row.message_body?.trim()
     ].map((value) => value ?? "").join("\u001f");
-    return { identityKey: `fallback:${hash(fallback)}`, externalSource, sourceRecordId: `fallback:${hash(fallback).slice(0, 20)}` };
+    return { identityKey: `fallback:${externalSource}:${hash(fallback)}`, externalSource, sourceRecordId: `fallback:${hash(fallback).slice(0, 20)}` };
   }
 
-  private async rebuildContactState(shopId: string, creatorId: string): Promise<void> {
+  private async rebuildContactState(db: Prisma.TransactionClient, shopId: string, creatorId: string): Promise<void> {
     const [deliveries, messages, facts, unknownDeliveries] = await Promise.all([
-      this.prisma.outreachDelivery.findMany({
+      db.outreachDelivery.findMany({
         where: { state: "SENT", recipient: { creatorId }, campaign: { shopId } },
         select: { id: true, externalMessageId: true, sentAt: true, firstDispatchedAt: true, campaignId: true }, orderBy: { sentAt: "desc" }
       }),
-      this.prisma.conversationMessage.findMany({
+      db.conversationMessage.findMany({
         where: { direction: "OUTBOUND", conversation: { shopId, creatorId } },
         select: { externalMessageId: true, providerCreatedAt: true }
       }),
-      this.prisma.historicalContactFact.findMany({ where: { shopId, creatorOpenId: (await this.prisma.creator.findUniqueOrThrow({ where: { id: creatorId } })).creatorOpenId } }),
-      this.prisma.outreachDelivery.count({ where: { state: { in: ["DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"] }, recipient: { creatorId }, campaign: { shopId } } })
+      db.historicalContactFact.findMany({ where: { shopId, creatorOpenId: (await db.creator.findUniqueOrThrow({ where: { id: creatorId } })).creatorOpenId } }),
+      db.outreachDelivery.count({ where: { state: { in: ["DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"] }, recipient: { creatorId }, campaign: { shopId } } })
     ]);
     const contacts = new Map<string, Date>();
     for (const delivery of deliveries) contacts.set(delivery.externalMessageId ? `provider:${delivery.externalMessageId}` : `delivery:${delivery.id}`, delivery.sentAt ?? delivery.firstDispatchedAt ?? new Date(0));
@@ -193,7 +198,7 @@ export class HistoryService {
     const dates = [...contacts.values()].filter((date) => date.getTime() > 0).sort((a, b) => a.getTime() - b.getTime());
     const historicalDates = facts.filter((item) => item.resolutionState === "MATCHED").map((item) => item.contactedAt).sort((a, b) => a.getTime() - b.getTime());
     const latestDelivery = deliveries[0];
-    await this.prisma.creatorShopContactState.upsert({
+    await db.creatorShopContactState.upsert({
       where: { shopId_creatorId: { shopId, creatorId } },
       update: {
         firstContactedAt: dates[0] ?? null, lastContactedAt: dates.at(-1) ?? null, contactCount: contacts.size,
@@ -245,21 +250,30 @@ export class HistoryService {
         continue;
       }
       if (!creatorOpenId) unmatchedCount++;
-      const existingFact = await this.prisma.historicalContactFact.findUnique({ where: { shopId_identityKey: { shopId: shop.id, identityKey: identity.identityKey } } });
-      const same = existingFact && existingFact.creatorOpenId === (creatorOpenId ?? null) && existingFact.conversationId === (conversationId ?? null)
-        && existingFact.contactedAt.getTime() === contactedAt.getTime() && existingFact.sendStatus === status && existingFact.resolutionState === resolutionState;
-      if (same) {
-        duplicateCount++;
-        await this.prisma.historicalContactRecord.create({ data: {
-          importId: historicalImport.id, shopId: shop.id, sourceRecordId: identity.sourceRecordId, identityKey: identity.identityKey,
-          creatorOpenId: creatorOpenId || null, conversationId: conversationId || null, externalMessageId: row.external_message_id || null,
-          contactedAt, sendStatus: status, campaignName: row.campaign_name || null, messageContent: row.message_body || null,
-          resolutionState: "DUPLICATE", contactFactId: existingFact.id
-        } });
-        continue;
-      }
-      let priorCreatorOpenId = existingFact?.creatorOpenId ?? undefined;
-      const record = await this.prisma.$transaction(async (tx) => {
+      const outcome = await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`historical-identity:${shop.id}:${identity.identityKey}`}))`;
+        const existingFact = await tx.historicalContactFact.findUnique({ where: { shopId_identityKey: { shopId: shop.id, identityKey: identity.identityKey } } });
+        const creatorOpenIds = new Set([existingFact?.creatorOpenId, creatorOpenId].filter((value): value is string => Boolean(value)));
+        const creators: Array<{ id: string }> = [];
+        for (const openId of creatorOpenIds) {
+          creators.push(await tx.creator.upsert({
+            where: { creatorOpenId: openId },
+            update: openId === creatorOpenId ? { username: row.username || undefined } : {},
+            create: { creatorOpenId: openId, username: openId === creatorOpenId ? row.username || null : null, selectionRegion: "ID" }
+          }));
+        }
+        await lockCreatorEligibility(tx, shop.id, creators.map((creator) => creator.id));
+        const same = existingFact && existingFact.creatorOpenId === (creatorOpenId ?? null) && existingFact.conversationId === (conversationId ?? null)
+          && existingFact.contactedAt.getTime() === contactedAt.getTime() && existingFact.sendStatus === status && existingFact.resolutionState === resolutionState;
+        if (same) {
+          await tx.historicalContactRecord.create({ data: {
+            importId: historicalImport.id, shopId: shop.id, sourceRecordId: identity.sourceRecordId, identityKey: identity.identityKey,
+            creatorOpenId: creatorOpenId || null, conversationId: conversationId || null, externalMessageId: row.external_message_id || null,
+            contactedAt, sendStatus: status, campaignName: row.campaign_name || null, messageContent: row.message_body || null,
+            resolutionState: "DUPLICATE", contactFactId: existingFact.id
+          } });
+          return "DUPLICATE" as const;
+        }
         const fact = existingFact
           ? await tx.historicalContactFact.update({ where: { id: existingFact.id }, data: {
               externalSource: identity.externalSource, sourceRecordId: identity.sourceRecordId, externalMessageId: row.external_message_id || null,
@@ -281,14 +295,11 @@ export class HistoryService {
           shopId: shop.id, identityKey: identity.identityKey, id: { not: created.id }, resolutionState: { in: ["UNMATCHED", "CONFLICT"] }, supersededByRecordId: null
         }, data: { resolutionState: "SUPERSEDED", supersededByRecordId: created.id } });
         await tx.historicalContactFact.update({ where: { id: fact.id }, data: { currentRecordId: created.id } });
-        return created;
+        for (const creator of creators) await this.rebuildContactState(tx, shop.id, creator.id);
+        return "IMPORTED" as const;
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-      void record;
-      importedCount++;
-      for (const openId of new Set([priorCreatorOpenId, creatorOpenId].filter((value): value is string => Boolean(value)))) {
-        const creator = await this.prisma.creator.upsert({ where: { creatorOpenId: openId }, update: openId === creatorOpenId ? { username: row.username || undefined } : {}, create: { creatorOpenId: openId, username: openId === creatorOpenId ? row.username || null : null, selectionRegion: "ID" } });
-        await this.rebuildContactState(shop.id, creator.id);
-      }
+      if (outcome === "DUPLICATE") duplicateCount++;
+      else importedCount++;
     }
     return this.prisma.historicalContactImport.update({ where: { id: historicalImport.id }, data: {
       state: unmatchedCount || conflictCount ? "PARTIAL" : "COMPLETE", importedCount, duplicateCount, unmatchedCount, conflictCount, completedAt: new Date()

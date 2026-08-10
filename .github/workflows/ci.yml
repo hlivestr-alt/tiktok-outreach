@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: affiliate
+          POSTGRES_PASSWORD: affiliate
+          POSTGRES_DB: affiliate_outreach
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U affiliate -d affiliate_outreach"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://affiliate:affiliate@localhost:5432/affiliate_outreach?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_MODE: mock
+      SHOP_TIMEZONE: Asia/Jakarta
+      MAX_RECIPIENTS_PER_CAMPAIGN: 1000
+      MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: 4000
+      MAX_SENDS_PER_DAY: 1000
+      MAX_DISPATCHES_PER_MINUTE: 10
+      MOCK_RECONCILIATION_DELAYS_MS: 10,20,30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate and validate Prisma client
+        run: |
+          pnpm db:generate
+          pnpm exec prisma validate --schema packages/db/prisma/schema.prisma
+      - name: Apply and verify migrations
+        run: |
+          pnpm db:migrate
+          pnpm exec prisma migrate status --schema packages/db/prisma/schema.prisma
+      - name: Unit tests
+        run: pnpm test:unit
+      - name: PostgreSQL and Redis/BullMQ integration tests
+        run: pnpm test:integration
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Production build
+        run: pnpm build

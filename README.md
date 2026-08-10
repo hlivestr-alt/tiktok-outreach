@@ -51,7 +51,7 @@ cmd /c pnpm build
 
 ## Absolute safety ceilings
 
-Defaults are 1,000 dispatches per campaign, 1,000 per Indonesia shop day, and 10 per rolling minute. PostgreSQL dispatch events and daily usage rows enforce these across worker restarts; the BullMQ limiter may only run more slowly.
+Defaults are 1,000 recipients per campaign, 4,000 provider dispatch attempts per campaign, 1,000 dispatches per Indonesia shop day, and 10 per rolling minute. PostgreSQL is authoritative for the maximum permitted dispatch rate and enforces these ceilings across worker restarts. The BullMQ/infrastructure limiter may operate more slowly, but it can never override the database ceiling.
 
 ## Delivery unknown
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { DelayedError, Job, Queue, Worker } from "bullmq";
-import { Prisma, PrismaClient } from "@affiliate/db";
+import { lockCreatorEligibility, Prisma, PrismaClient } from "@affiliate/db";
 import { loadConfig } from "@affiliate/config";
 import { reconcileUnknownDelivery } from "@affiliate/domain";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
@@ -30,7 +30,7 @@ async function maintenanceSweep(): Promise<void> {
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
   const recipients = await prisma.campaignRecipient.findMany({
-    where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED"] } } },
+    where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING"] } } },
     include: { delivery: true }, take: 250
   });
   for (const recipient of recipients) {
@@ -39,6 +39,7 @@ async function maintenanceSweep(): Promise<void> {
       where: { recipientId: recipient.id }, update: {},
       create: { campaignId: recipient.campaignId, deliveryId: recipient.delivery.id, recipientId: recipient.id, deterministicJobId: `send-${recipient.id}` }
     });
+    if (!["PENDING", "ENQUEUED"].includes(entry.state)) continue;
     try {
       const existing = await queue.getJob(entry.deterministicJobId);
       if (existing) {
@@ -63,13 +64,25 @@ async function delayJob(job: Job, delayMs: number): Promise<never> {
 async function markSent(recipient: any, conversationId: string, externalMessageId: string, requestId?: string) {
   const now = new Date();
   await prisma.$transaction(async (tx) => {
+    await lockCreatorEligibility(tx, recipient.campaign.shopId, [recipient.creatorId]);
     const previous = await tx.creatorShopContactState.findUnique({ where: { shopId_creatorId: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId } } });
     await tx.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { state: "SENT", conversationId, externalMessageId, providerRequestId: requestId, sentAt: now } });
     await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "SENT" } });
+    const [otherUnknownDeliveries, historicalUnknownFacts] = await Promise.all([
+      tx.outreachDelivery.count({ where: {
+        id: { not: recipient.delivery.id }, state: { in: ["DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"] },
+        recipient: { creatorId: recipient.creatorId }, campaign: { shopId: recipient.campaign.shopId }
+      } }),
+      tx.historicalContactFact.count({ where: {
+        shopId: recipient.campaign.shopId, creatorOpenId: recipient.creator.creatorOpenId,
+        sendStatus: "UNKNOWN", resolutionState: "MATCHED"
+      } })
+    ]);
+    const unresolvedDelivery = otherUnknownDeliveries > 0 || historicalUnknownFacts > 0;
     await tx.creatorShopContactState.upsert({
       where: { shopId_creatorId: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId } },
-      update: { firstContactedAt: previous?.firstContactedAt ?? now, lastContactedAt: now, contactCount: { increment: 1 }, lastCampaignId: recipient.campaignId, lastDeliveryId: recipient.delivery.id, unresolvedDelivery: false },
-      create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, firstContactedAt: now, lastContactedAt: now, contactCount: 1, lastCampaignId: recipient.campaignId, lastDeliveryId: recipient.delivery.id }
+      update: { firstContactedAt: previous?.firstContactedAt ?? now, lastContactedAt: now, contactCount: { increment: 1 }, lastCampaignId: recipient.campaignId, lastDeliveryId: recipient.delivery.id, unresolvedDelivery },
+      create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, firstContactedAt: now, lastContactedAt: now, contactCount: 1, lastCampaignId: recipient.campaignId, lastDeliveryId: recipient.delivery.id, unresolvedDelivery }
     });
     await tx.outreachReservation.deleteMany({ where: { campaignRecipientId: recipient.id } });
     await tx.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } });
@@ -100,21 +113,22 @@ async function markTerminalFailure(recipient: any, errorCode: string, errorDetai
 }
 
 async function markDeliveryUnknown(recipient: any, attemptId: string, requestId: string | undefined, detail: string) {
-  await prisma.$transaction([
-    prisma.deliveryAttempt.update({ where: { id: attemptId }, data: {
+  await prisma.$transaction(async (tx) => {
+    await lockCreatorEligibility(tx, recipient.campaign.shopId, [recipient.creatorId]);
+    await tx.deliveryAttempt.update({ where: { id: attemptId }, data: {
       outcome: "DELIVERY_UNKNOWN", providerRequestId: requestId, providerCode: "DELIVERY_UNKNOWN", completedAt: new Date()
-    } }),
-    prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
+    } });
+    await tx.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
       state: "DELIVERY_UNKNOWN", providerRequestId: requestId, lastErrorCode: "DELIVERY_UNKNOWN", lastErrorDetail: detail
-    } }),
-    prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "DELIVERY_UNKNOWN" } }),
-    prisma.creatorShopContactState.upsert({
+    } });
+    await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "DELIVERY_UNKNOWN" } });
+    await tx.creatorShopContactState.upsert({
       where: { shopId_creatorId: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId } },
-      update: { unresolvedDelivery: true },
-      create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, unresolvedDelivery: true }
-    }),
-    prisma.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } })
-  ]);
+      update: { unresolvedDelivery: true, lastDeliveryId: recipient.delivery.id },
+      create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, unresolvedDelivery: true, lastDeliveryId: recipient.delivery.id }
+    });
+    await tx.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } });
+  });
   await scheduleReconciliation(recipient.delivery.id, 1);
 }
 
@@ -143,20 +157,45 @@ async function processSend(job: Job<{ recipientId: string }>) {
     return delayJob(job, 5000);
   }
   if (recipient.campaign.state === "SAFETY_PAUSED") return;
-  const providerConversation = await adapter.createOrGetConversation(recipient.creator.creatorOpenId);
-  const conversation = await prisma.conversation.upsert({
-    where: { externalConversationId: providerConversation.conversationId }, update: {},
-    create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, externalConversationId: providerConversation.conversationId }
-  });
-  await prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { conversationId: conversation.id } });
-  recipient.delivery.conversationId = conversation.id;
   let claim: Awaited<ReturnType<typeof reserveDispatchSlot>>;
   try { claim = await reserveDispatchSlot(prisma, recipient); }
   catch (error) { if (error instanceof SafetyDelay) return delayJob(job, error.delayMs); throw error; }
-  if (!claim.claimed) return;
+  if (!claim.claimed) {
+    if (claim.cancelled) await completeCampaignIfDone(recipient.campaignId);
+    return;
+  }
 
   const attemptNumber = claim.attemptNumber;
   const attempt = await prisma.deliveryAttempt.create({ data: { deliveryId: recipient.delivery.id, attemptNumber, outcome: "STARTED", startedAt: new Date() } });
+  let providerConversation: Awaited<ReturnType<typeof adapter.createOrGetConversation>>;
+  let conversation: { id: string };
+  try {
+    providerConversation = await adapter.createOrGetConversation(recipient.creator.creatorOpenId);
+    conversation = await prisma.conversation.upsert({
+      where: { externalConversationId: providerConversation.conversationId }, update: {},
+      create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, externalConversationId: providerConversation.conversationId }
+    });
+    await prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { conversationId: conversation.id } });
+    recipient.delivery.conversationId = conversation.id;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Provider conversation setup failed";
+    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
+      outcome: finalAttempt ? "FAILED_TERMINAL" : "FAILED_RETRYABLE", providerCode: "CONVERSATION_SETUP_FAILED", completedAt: new Date()
+    } });
+    if (finalAttempt) {
+      await markTerminalFailure(recipient, "CONVERSATION_SETUP_FAILED", detail);
+      await completeCampaignIfDone(recipient.campaignId);
+      return;
+    }
+    await prisma.$transaction([
+      prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
+        state: "FAILED_RETRYABLE", lastErrorCode: "CONVERSATION_SETUP_FAILED", lastErrorDetail: detail
+      } }),
+      prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } })
+    ]);
+    throw error;
+  }
   let result: Awaited<ReturnType<typeof adapter.sendMessage>>;
   try {
     result = await adapter.sendMessage(providerConversation.conversationId, recipient.creator.creatorOpenId, recipient.frozenMessage, {

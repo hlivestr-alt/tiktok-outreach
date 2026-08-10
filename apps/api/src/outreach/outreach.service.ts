@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
-import { Prisma } from "@affiliate/db";
+import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
 import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
@@ -160,7 +160,11 @@ export class OutreachService {
     if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
     const expiresAt = new Date(Date.now() + 30 * 60_000);
     await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`freeze:${campaign.shopId}`}))`;
+      const selectedCreatorIds = (await tx.campaignRecipient.findMany({
+        where: { campaignId: id, selected: true }, select: { creatorId: true }
+      })).map((recipient) => recipient.creatorId);
+      if (!selectedCreatorIds.length) throw new BadRequestException("No eligible recipients to freeze");
+      await lockCreatorEligibility(tx, campaign.shopId, selectedCreatorIds);
       const current = await tx.campaign.findUniqueOrThrow({ where: { id }, include: { shop: true } });
       if (current.state !== "PREVIEW_READY" || current.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
       await tx.outreachReservation.deleteMany({ where: { shopId: current.shopId, expiresAt: { lte: new Date() } } });
@@ -219,11 +223,25 @@ export class OutreachService {
         skippedActiveReservation: numberValue("skippedActiveReservation") + (exclusionCounts.ACTIVE_RESERVATION ?? 0),
         freezeAdjustment: selected.length - finalSelected
       };
-      await tx.campaign.update({ where: { id }, data: { state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt, version: { increment: 1 } } });
-      await tx.campaign.update({ where: { id }, data: { summary: finalSummary as Prisma.InputJsonValue } });
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: {
-        previewSelected: selected.length, finalSelected, exclusions: exclusionCounts, expiresAt: expiresAt.toISOString()
-      } } });
+      if (finalSelected === 0) {
+        await tx.outreachReservation.deleteMany({ where: { recipient: { campaignId: id } } });
+        await tx.campaign.update({ where: { id }, data: {
+          state: "PREVIEW_EXPIRED", frozenAt: null, freezeExpiresAt: null,
+          summary: finalSummary as Prisma.InputJsonValue, version: { increment: 1 }
+        } });
+        await tx.auditEvent.create({ data: {
+          shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FREEZE_EMPTY",
+          payload: { previewSelected: selected.length, finalSelected: 0, exclusions: exclusionCounts, reservationsReleased: true }
+        } });
+      } else {
+        await tx.campaign.update({ where: { id }, data: {
+          state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt,
+          summary: finalSummary as Prisma.InputJsonValue, version: { increment: 1 }
+        } });
+        await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: {
+          previewSelected: selected.length, finalSelected, exclusions: exclusionCounts, expiresAt: expiresAt.toISOString()
+        } } });
+      }
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 20_000 });
     return this.get(id);
   }

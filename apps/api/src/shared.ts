@@ -39,7 +39,7 @@ export async function expireFrozenCampaigns(prisma: PrismaClient, now = new Date
 
 export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQueue, limit = 250): Promise<{ enqueued: number; failed: number }> {
   const missing = await prisma.campaignRecipient.findMany({
-    where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED"] } } },
+    where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING"] } } },
     include: { delivery: true }, take: limit
   });
   for (const recipient of missing) {
@@ -54,7 +54,10 @@ export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQu
   }
 
   const entries = await prisma.queueOutbox.findMany({
-    where: { availableAt: { lte: new Date() }, delivery: { recipient: { state: "QUEUED" } } },
+    where: {
+      state: { in: ["PENDING", "ENQUEUED"] }, availableAt: { lte: new Date() },
+      campaign: { state: { in: ["QUEUED", "RUNNING"] } }, delivery: { recipient: { state: "QUEUED" } }
+    },
     orderBy: { createdAt: "asc" }, take: limit
   });
   let enqueued = 0;
