@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCampaignWithinLimit, buildPreview, reconcileUnknownDelivery, renderMessage, type CreatorCandidate } from "./index";
+import { assertCampaignWithinLimit, buildPreview, matchesFilters, rankingValue, reconcileUnknownDelivery, renderMessage, type CreatorCandidate } from "./index";
 
 const creator = (id: string, ordinal: number, gmv = 100): CreatorCandidate => ({
   creatorOpenId: id,
@@ -44,6 +44,28 @@ describe("campaign preview", () => {
       contacts: new Map([["a", { contactCount: 1, lastContactedAt: new Date("2026-07-11T00:00:00Z") }]])
     });
     expect(result.summary.selected).toBe(1);
+  });
+});
+
+describe("currency-aware GMV", () => {
+  it("compares GMV only in the explicit matching currency", () => {
+    expect(matchesFilters(creator("idr", 1, 100), { minGmv: 50, gmvCurrency: "IDR" })).toBe(true);
+    expect(matchesFilters({ ...creator("usd", 1, 100), gmv: { amount: "100", currency: "USD" } }, { minGmv: 50, gmvCurrency: "IDR" })).toBe(false);
+  });
+
+  it("reports mixed currencies and excludes unexpected values without FX conversion", () => {
+    const result = buildPreview({
+      creators: [creator("idr", 1, 100), { ...creator("usd", 2, 999), gmv: { amount: "999", currency: "USD" } }],
+      filters: { gmvCurrency: "IDR" }, contacts: new Map(), activeReservations: new Set(), requested: 2,
+      cooldownDays: 0, rankingMetric: "GMV", now: new Date("2026-08-10T00:00:00Z")
+    });
+    expect(result.summary).toMatchObject({ gmvCurrencyCounts: { IDR: 1, USD: 1 }, gmvMixedCurrency: true, gmvExcludedCurrencyMismatch: 1, selected: 1 });
+  });
+
+  it("keeps unknown GMV null rather than converting it to zero", () => {
+    const unknown = { ...creator("null", 1), gmv: null };
+    expect(matchesFilters(unknown, { minGmv: 0, gmvCurrency: "IDR" })).toBe(false);
+    expect(rankingValue(unknown, "GMV")).toBe(Number.MIN_SAFE_INTEGER);
   });
 });
 

@@ -165,6 +165,12 @@ async function processSend(job: Job<{ recipientId: string }>) {
     return delayJob(job, 5000);
   }
   if (recipient.campaign.state === "SAFETY_PAUSED") return;
+  const creatorOpenId = recipient.creator.creatorOpenId;
+  if (!creatorOpenId) {
+    await markTerminalFailure(recipient, "INVALID_MESSAGING_ID", "Creator has no Marketplace Open ID");
+    await completeCampaignIfDone(recipient.campaignId);
+    return;
+  }
   let claim: Awaited<ReturnType<typeof reserveDispatchSlot>>;
   try { claim = await reserveDispatchSlot(prisma, recipient); }
   catch (error) { if (error instanceof SafetyDelay) return delayJob(job, error.delayMs); throw error; }
@@ -178,7 +184,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
   let providerConversation: Awaited<ReturnType<typeof adapter.createOrGetConversation>>;
   let conversation: { id: string };
   try {
-    providerConversation = await adapter.createOrGetConversation(recipient.creator.creatorOpenId);
+    providerConversation = await adapter.createOrGetConversation(creatorOpenId);
     conversation = await prisma.conversation.upsert({
       where: { externalConversationId: providerConversation.conversationId }, update: {},
       create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, externalConversationId: providerConversation.conversationId }
@@ -206,7 +212,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
   }
   let result: Awaited<ReturnType<typeof adapter.sendMessage>>;
   try {
-    result = await adapter.sendMessage(providerConversation.conversationId, recipient.creator.creatorOpenId, recipient.frozenMessage, {
+    result = await adapter.sendMessage(providerConversation.conversationId, creatorOpenId, recipient.frozenMessage, {
       idempotencyKey: recipient.delivery.deterministicKey
     });
   } catch (error) {
@@ -220,7 +226,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
     await markSent(recipient, conversation.id, result.messageId, result.requestId);
   } else if (result.status === "DELIVERY_UNKNOWN") {
     await markDeliveryUnknown(recipient, attempt.id, result.requestId, "Provider response did not establish whether the message was accepted");
-    const numeric = Number(recipient.creator.creatorOpenId.slice(-5));
+    const numeric = Number(creatorOpenId.slice(-5));
     if (numeric % 74 === 0) {
       await prisma.conversationMessage.create({ data: {
         conversationId: conversation.id, externalMessageId: `mock_reconciled_${recipient.delivery.id}`, direction: "OUTBOUND",

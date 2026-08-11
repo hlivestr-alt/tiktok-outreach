@@ -5,10 +5,16 @@ import type { CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
+import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
 
 @Injectable()
 export class OutreachService {
-  constructor(private readonly prisma: PrismaService, private readonly queues: QueueService, private readonly tiktok: TikTokIntegrationService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queues: QueueService,
+    private readonly tiktok: TikTokIntegrationService,
+    private readonly identities: CreatorIdentityResolver = new CreatorIdentityResolver(prisma)
+  ) {}
 
   async list() {
     await expireFrozenCampaigns(this.prisma);
@@ -41,6 +47,14 @@ export class OutreachService {
     if (input.filters?.minGmv != null && input.filters?.maxGmv != null && input.filters.minGmv > input.filters.maxGmv) {
       throw new BadRequestException("Minimum GMV cannot exceed maximum GMV");
     }
+    const usesGmv = input.rankingMetric === "GMV" || input.filters?.minGmv != null || input.filters?.maxGmv != null;
+    const filters: CreatorFilters = { ...(input.filters ?? {}) };
+    if (config.APP_MODE === "mock" && usesGmv) filters.gmvCurrency = "IDR";
+    if (config.APP_MODE === "read_only" && usesGmv && !filters.gmvCurrency?.trim()) {
+      throw new BadRequestException("An explicit expected GMV currency is required for real Marketplace filtering or ranking");
+    }
+    if (filters.gmvCurrency && !/^[A-Za-z]{3}$/.test(filters.gmvCurrency)) throw new BadRequestException("GMV currency must be a three-letter provider currency code");
+    if (filters.gmvCurrency) filters.gmvCurrency = filters.gmvCurrency.toUpperCase();
     try {
       renderMessage(input.messageTemplate, { creatorDisplayName: "Creator", productName: input.productName, campaignName: input.name });
     } catch (error) {
@@ -49,7 +63,7 @@ export class OutreachService {
     return this.prisma.campaign.create({ data: {
       shopId: shop.id, name: input.name.trim(), productName: input.productName.trim(), targetCount: input.targetCount,
       candidateLimit: Math.min(10_000, input.candidateLimit ?? Math.max(input.targetCount * 2, input.targetCount + 500)),
-      cooldownDays: input.cooldownDays, messageTemplate: input.messageTemplate, filters: (input.filters ?? {}) as Prisma.InputJsonValue,
+      cooldownDays: input.cooldownDays, messageTemplate: input.messageTemplate, filters: filters as Prisma.InputJsonValue,
       rankingMetric: input.rankingMetric, rankingDirection: input.rankingDirection ?? "DESC"
     }});
   }
@@ -80,7 +94,7 @@ export class OutreachService {
     }
     const openIds = [...new Set(creators.map((creator) => creator.creatorOpenId))];
     const existingCreators = await this.prisma.creator.findMany({ where: { creatorOpenId: { in: openIds } }, include: { contacts: { where: { shopId: campaign.shopId } } } });
-    const contacts = new Map<string, ContactState>(existingCreators.map((creator) => [creator.creatorOpenId, {
+    const contacts = new Map<string, ContactState>(existingCreators.filter((creator) => creator.creatorOpenId).map((creator) => [creator.creatorOpenId!, {
       contactCount: creator.contacts[0]?.contactCount ?? 0,
       lastContactedAt: creator.contacts[0]?.lastContactedAt ?? undefined,
       firstContactedAt: creator.contacts[0]?.firstContactedAt ?? undefined,
@@ -91,22 +105,31 @@ export class OutreachService {
     const reservations = await this.prisma.outreachReservation.findMany({ where: { shopId: campaign.shopId, expiresAt: { gt: new Date() } }, include: { creator: true } });
     const preview = buildPreview({
       creators, filters: campaign.filters as CreatorFilters, contacts,
-      activeReservations: new Set(reservations.map((reservation) => reservation.creator.creatorOpenId)),
+      activeReservations: new Set(reservations.flatMap((reservation) => reservation.creator.creatorOpenId ? [reservation.creator.creatorOpenId] : [])),
       requested: campaign.targetCount, cooldownDays: campaign.cooldownDays,
       rankingMetric: campaign.rankingMetric as RankingMetric, rankingDirection: campaign.rankingDirection as "ASC" | "DESC",
       now: new Date(), truncated: hasMore
     });
+    const unresolvedHistory = await this.prisma.creatorShopContactState.aggregate({
+      where: { shopId: campaign.shopId, contactCount: { gt: 0 }, creator: { creatorOpenId: null } },
+      _count: { _all: true }, _sum: { contactCount: true }
+    });
+    const summary = {
+      ...preview.summary,
+      historyIdentityCoverageIncomplete: unresolvedHistory._count._all > 0,
+      unresolvedHistoricalCreators: unresolvedHistory._count._all,
+      unresolvedHistoricalOutboundContacts: unresolvedHistory._sum.contactCount ?? 0
+    };
+
+    const canonical = new Map<string, (typeof preview.creators)[number]>();
+    for (const evaluated of preview.creators) if (!canonical.has(evaluated.creatorOpenId)) canonical.set(evaluated.creatorOpenId, evaluated);
+    const canonicalCreatorIds = new Map<string, string>();
+    for (const evaluated of canonical.values()) canonicalCreatorIds.set(evaluated.creatorOpenId, (await this.identities.ensureMarketplaceCreator(evaluated)).id);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.campaignRecipient.deleteMany({ where: { campaignId: id } });
-      const canonical = new Map<string, (typeof preview.creators)[number]>();
-      for (const evaluated of preview.creators) if (!canonical.has(evaluated.creatorOpenId)) canonical.set(evaluated.creatorOpenId, evaluated);
       for (const evaluated of canonical.values()) {
-        const creator = await tx.creator.upsert({
-          where: { creatorOpenId: evaluated.creatorOpenId },
-          update: { username: evaluated.username, nickname: evaluated.nickname, creatorUserId: evaluated.creatorUserId, selectionRegion: evaluated.selectionRegion },
-          create: { creatorOpenId: evaluated.creatorOpenId, creatorUserId: evaluated.creatorUserId, username: evaluated.username, nickname: evaluated.nickname, selectionRegion: evaluated.selectionRegion }
-        });
+        const creator = await tx.creator.findUniqueOrThrow({ where: { id: canonicalCreatorIds.get(evaluated.creatorOpenId)! } });
         const snapshot = await tx.creatorMetricSnapshot.create({ data: {
           creatorId: creator.id, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
           gmvAmount: evaluated.gmv ? new Prisma.Decimal(evaluated.gmv.amount) : null, gmvCurrency: evaluated.gmv?.currency, unitsSold: evaluated.unitsSold,
@@ -122,10 +145,10 @@ export class OutreachService {
         }});
       }
       await tx.campaign.update({ where: { id }, data: {
-        state: "PREVIEW_READY", summary: preview.summary as unknown as Prisma.InputJsonValue, searchKey, nextPageToken: pageToken,
+        state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue, searchKey, nextPageToken: pageToken,
         truncated: hasMore, version: { increment: 1 }
       }});
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: preview.summary as unknown as Prisma.InputJsonValue } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: summary as unknown as Prisma.InputJsonValue } });
     });
     return this.preview(id);
   }

@@ -22,7 +22,8 @@ export type CreatorSearchPage = {
 export type AdapterCapabilities = {
   mode: "MOCK" | "READ_ONLY" | "DISABLED";
   market: "ID";
-  currency: "IDR";
+  currency: string | null;
+  currencySource: "MOCK_FIXED" | "PROVIDER_RESPONSE_REQUIRED";
   pageSizes: number[];
   filters: string[];
   rankingMetrics: RankingMetric[];

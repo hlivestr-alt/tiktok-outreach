@@ -4,6 +4,7 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().default("redis://localhost:6379"),
   PORT: z.coerce.number().default(4000),
+  HOST: z.string().default("127.0.0.1"),
   APP_MODE: z.enum(["mock", "read_only"]).default("mock"),
   TIKTOK_APP_KEY: z.string().min(1).optional(),
   TIKTOK_APP_SECRET: z.string().min(1).optional(),

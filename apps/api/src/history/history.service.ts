@@ -5,12 +5,17 @@ import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { TikTokReadAdapter } from "@affiliate/contracts";
 import { config, PrismaService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
+import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
 @Injectable()
 export class HistoryService {
-  constructor(private readonly prisma: PrismaService, private readonly tiktok: TikTokIntegrationService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tiktok: TikTokIntegrationService,
+    private readonly identities: CreatorIdentityResolver = new CreatorIdentityResolver(prisma)
+  ) {}
 
   async contacts() {
     const shop = await this.tiktok.activeShop();
@@ -18,7 +23,10 @@ export class HistoryService {
       where: { shopId: shop.id }, orderBy: [{ lastContactedAt: "desc" }, { updatedAt: "desc" }], take: 500,
       include: { creator: { include: {
         snapshots: { orderBy: { sourceFetchedAt: "desc" }, take: 1 },
-        conversations: { where: { shopId: shop.id }, orderBy: { lastSyncedAt: "desc" }, take: 1 }
+        conversations: { where: { shopId: shop.id }, orderBy: { lastSyncedAt: "desc" }, take: 1 },
+        providerIdentities: { where: {
+          provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED"
+        } }
       } } }
     });
     const campaignIds = [...new Set(contacts.flatMap((item) => item.lastCampaignId ? [item.lastCampaignId] : []))];
@@ -29,9 +37,15 @@ export class HistoryService {
     ]);
     const campaignById = new Map(campaigns.map((item) => [item.id, item.name]));
     const deliveryById = new Map(deliveries.map((item) => [item.id, item.state]));
-    return contacts.map((contact) => ({
+    return contacts.map((contact) => {
+      const marketplaceLinked = Boolean(contact.creator.creatorOpenId && contact.creator.providerIdentities.some(
+        (identity) => identity.identifier === contact.creator.creatorOpenId
+      ));
+      return ({
       id: contact.id,
       creatorOpenId: contact.creator.creatorOpenId,
+      creatorImId: contact.creator.creatorImId,
+      identityCoverage: marketplaceLinked ? "LINKED_TO_MARKETPLACE" : contact.creator.creatorImId && !contact.creator.creatorOpenId ? "IM_ONLY_UNRESOLVED" : "UNRESOLVED",
       username: contact.creator.username,
       nickname: contact.creator.nickname,
       categoryIds: contact.creator.snapshots[0]?.categoryIds ?? [],
@@ -46,7 +60,8 @@ export class HistoryService {
       replyStatus: contact.latestReplyStatus,
       unresolvedDelivery: contact.unresolvedDelivery,
       doNotContact: contact.doNotContact
-    }));
+    });
+    });
   }
 
   async syncMockHistory(adapter?: TikTokReadAdapter, source = config.APP_MODE === "mock" ? "MOCK_TIKTOK" : "REAL_TIKTOK_READ_ONLY") {
@@ -74,9 +89,7 @@ export class HistoryService {
         const page = await effectiveAdapter.listConversations({ pageToken, pageSize: 50 });
         for (let index = cursor.conversationIndex; index < page.items.length; index++) {
           const providerConversation = page.items[index];
-          const creator = providerConversation.creatorOpenId
-            ? await this.prisma.creator.upsert({ where: { creatorOpenId: providerConversation.creatorOpenId }, update: { creatorImId: providerConversation.creatorImId, username: providerConversation.username }, create: { creatorOpenId: providerConversation.creatorOpenId, creatorImId: providerConversation.creatorImId, username: providerConversation.username, selectionRegion: "ID" } })
-            : await this.prisma.creator.upsert({ where: { creatorImId: providerConversation.creatorImId }, update: { username: providerConversation.username }, create: { creatorOpenId: `im:${providerConversation.creatorImId}`, creatorImId: providerConversation.creatorImId, username: providerConversation.username, selectionRegion: "ID" } });
+          const creator = await this.identities.ensureConversationCreator(providerConversation);
           const conversation = await this.prisma.conversation.upsert({
             where: { externalConversationId: providerConversation.id }, update: { lastSyncedAt: new Date() },
             create: { shopId: shop.id, creatorId: creator.id, externalConversationId: providerConversation.id, lastSyncedAt: new Date() }
@@ -125,9 +138,10 @@ export class HistoryService {
       const unreadMessages = effectiveAdapter.getLatestUnreadMessages ? await effectiveAdapter.getLatestUnreadMessages() : [];
       for (const message of unreadMessages) {
         const existingMessage = await this.prisma.conversationMessage.findUnique({ where: { externalMessageId: message.id } });
+        if (!message.creatorOpenId) throw new BadRequestException("Unread message omitted creator_open_id");
         const creator = await this.prisma.creator.upsert({
-          where: { creatorOpenId: message.creatorOpenId! }, update: {},
-          create: { creatorOpenId: message.creatorOpenId!, selectionRegion: "ID" }
+          where: { creatorOpenId: message.creatorOpenId }, update: {},
+          create: { creatorOpenId: message.creatorOpenId, selectionRegion: "ID" }
         });
         const conversation = await this.prisma.conversation.upsert({
           where: { externalConversationId: message.conversationId },
@@ -186,7 +200,10 @@ export class HistoryService {
         where: { direction: "OUTBOUND", conversation: { shopId, creatorId } },
         select: { externalMessageId: true, providerCreatedAt: true }
       }),
-      db.historicalContactFact.findMany({ where: { shopId, creatorOpenId: (await db.creator.findUniqueOrThrow({ where: { id: creatorId } })).creatorOpenId } }),
+      (async () => {
+        const openId = (await db.creator.findUniqueOrThrow({ where: { id: creatorId } })).creatorOpenId;
+        return openId ? db.historicalContactFact.findMany({ where: { shopId, creatorOpenId: openId } }) : [];
+      })(),
       db.outreachDelivery.count({ where: { state: { in: ["DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"] }, recipient: { creatorId }, campaign: { shopId } } })
     ]);
     const contacts = new Map<string, Date>();
@@ -235,7 +252,7 @@ export class HistoryService {
         const existingConversation = await this.prisma.conversation.findUnique({
           where: { externalConversationId: conversationId }, include: { creator: true }
         });
-        creatorOpenId = existingConversation?.creator.creatorOpenId;
+        creatorOpenId = existingConversation?.creator.creatorOpenId ?? undefined;
       }
       const status = (row.send_status || "SENT").toUpperCase();
       const invalidDate = Number.isNaN(contactedAt.getTime());
@@ -314,11 +331,59 @@ export class HistoryService {
     const conflicts = await this.prisma.historicalContactRecord.count({ where: {
       shopId: shop.id, resolutionState: { in: ["UNMATCHED", "CONFLICT"] }, supersededByRecordId: null
     } });
-    const historyReady = latestSync?.state === "COMPLETE" && fresh && conflicts === 0;
-    return { mode: config.APP_MODE === "mock" ? "MOCK" : "READ_ONLY", historyReady, discoverySafe: historyReady, outboundEnabled: false, latestSync, imports, unresolvedImportConflicts: conflicts, blockers: [
+    const historicalContacts = await this.prisma.creatorShopContactState.findMany({
+      where: { shopId: shop.id, contactCount: { gt: 0 } }, select: { contactCount: true, creator: { select: {
+        creatorOpenId: true, creatorImId: true,
+        providerIdentities: { where: { provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED" }, select: { identifier: true } }
+      } } }
+    });
+    const marketplaceLinked = (item: (typeof historicalContacts)[number]) => Boolean(
+      item.creator.creatorOpenId && item.creator.providerIdentities.some((identity) => identity.identifier === item.creator.creatorOpenId)
+    );
+    const totalHistoricalCreators = historicalContacts.length;
+    const fullyLinkedHistoricalCreators = historicalContacts.filter(marketplaceLinked).length;
+    const historicalCreatorsMissingVerifiedMarketplaceIdentity = totalHistoricalCreators - fullyLinkedHistoricalCreators;
+    const imOnlyHistoricalCreators = historicalContacts.filter((item) => item.creator.creatorImId && !item.creator.creatorOpenId).length;
+    const outboundContactsOnUnresolvedIdentities = historicalContacts
+      .filter((item) => !marketplaceLinked(item))
+      .reduce((sum, item) => sum + item.contactCount, 0);
+    const unresolvedCreatorIdentities = await this.prisma.creatorProviderIdentity.count({
+      where: { linkState: "UNRESOLVED", creator: { contacts: { some: { shopId: shop.id, contactCount: { gt: 0 } } } } }
+    });
+    const paginationComplete = latestSync?.state === "COMPLETE";
+    const identityReconciliationComplete = unresolvedCreatorIdentities === 0 && outboundContactsOnUnresolvedIdentities === 0 && conflicts === 0;
+    const discoveryUsableForAnalysis = paginationComplete && fresh;
+    const futureOutboundSafe = discoveryUsableForAnalysis && identityReconciliationComplete;
+    const identityCoveragePercent = totalHistoricalCreators === 0 ? 100 : Math.round((fullyLinkedHistoricalCreators / totalHistoricalCreators) * 10_000) / 100;
+    return {
+      mode: config.APP_MODE === "mock" ? "MOCK" : "READ_ONLY",
+      historyReady: futureOutboundSafe,
+      historyPaginationComplete: paginationComplete,
+      identityReconciliationComplete,
+      discoveryUsableForAnalysis,
+      futureOutboundSafe,
+      cooldownDedupeCoverageComplete: futureOutboundSafe,
+      outboundEnabled: false,
+      latestSync,
+      imports,
+      unresolvedImportConflicts: conflicts,
+      identityCoverage: {
+        totalHistoricalCreators,
+        fullyLinkedHistoricalCreators,
+        historicalCreatorsMissingVerifiedMarketplaceIdentity,
+        imOnlyHistoricalCreators,
+        unresolvedCreatorIdentities,
+        outboundContactsOnUnresolvedIdentities,
+        percent: identityCoveragePercent
+      },
+      warning: identityReconciliationComplete ? null : "HISTORY IDENTITY COVERAGE INCOMPLETE",
+      blockers: [
       ...(latestSync?.state === "COMPLETE" ? [] : ["A complete TikTok conversation sync is required"]),
       ...(fresh ? [] : ["History sync must be less than 24 hours old"]),
       ...(conflicts ? [`${conflicts} imported rows require identity review`] : []),
+      ...(imOnlyHistoricalCreators ? [`${imOnlyHistoricalCreators} IM-only historical creator identities cannot yet be safely linked to Marketplace identities`] : []),
+      ...(historicalCreatorsMissingVerifiedMarketplaceIdentity ? [`${historicalCreatorsMissingVerifiedMarketplaceIdentity} historical creators lack a verified Marketplace identity link`] : []),
+      ...(outboundContactsOnUnresolvedIdentities ? [`${outboundContactsOnUnresolvedIdentities} outbound historical contacts are attached to unresolved identities`] : []),
       config.APP_MODE === "mock" ? "Only mock outbound dispatch is available" : "Real TikTok outbound is physically unavailable in Phase 2A"
     ] };
   }

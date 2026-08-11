@@ -101,7 +101,9 @@ describe("real read-only adapter", () => {
       ["POST", "/affiliate_seller/202412/conversations/123/messages"],
       ["POST", "/affiliate_seller/202412/conversations/123/read"],
       ["POST", "/affiliate_seller/202508/target_collaborations"],
+      ["POST", "/affiliate_seller/202508/invitations"],
       ["POST", "/affiliate_seller/202409/sample_applications/search"],
+      ["POST", "/affiliate_seller/202409/sample_applications/123/approve"],
       ["POST", "/affiliate_seller/202508/open_collaborations"]
     ];
     for (const [method, path] of mutations) {

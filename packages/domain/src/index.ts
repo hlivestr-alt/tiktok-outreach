@@ -23,6 +23,7 @@ export type CreatorFilters = {
   maxFollowers?: number;
   minGmv?: number;
   maxGmv?: number;
+  gmvCurrency?: string;
   minUnitsSold?: number;
   minAvgVideoViews?: number;
   minAvgLiveViewers?: number;
@@ -77,6 +78,10 @@ export type PreviewSummary = {
   selected: number;
   shortfall: number;
   truncated: boolean;
+  gmvCurrencyCounts: Record<string, number>;
+  gmvMixedCurrency: boolean;
+  expectedGmvCurrency?: string;
+  gmvExcludedCurrencyMismatch: number;
 };
 
 export type PreviewResult = { creators: EvaluatedCreator[]; summary: PreviewSummary };
@@ -90,6 +95,7 @@ export function matchesFilters(creator: CreatorCandidate, filters: CreatorFilter
   if (filters.minFollowers != null && (creator.followerCount == null || creator.followerCount < filters.minFollowers)) return false;
   if (filters.maxFollowers != null && (creator.followerCount == null || creator.followerCount > filters.maxFollowers)) return false;
   const gmv = numericGmv(creator);
+  if (filters.gmvCurrency && creator.gmv?.currency.toUpperCase() !== filters.gmvCurrency.toUpperCase()) return false;
   if (filters.minGmv != null && (gmv == null || gmv < filters.minGmv)) return false;
   if (filters.maxGmv != null && (gmv == null || gmv > filters.maxGmv)) return false;
   if (filters.minUnitsSold != null && (creator.unitsSold == null || creator.unitsSold < filters.minUnitsSold)) return false;
@@ -137,6 +143,11 @@ export function buildPreview(input: {
   now: Date;
   truncated?: boolean;
 }): PreviewResult {
+  const gmvCurrencyCounts: Record<string, number> = {};
+  for (const creator of input.creators) if (creator.gmv?.currency) {
+    const currency = creator.gmv.currency.toUpperCase();
+    gmvCurrencyCounts[currency] = (gmvCurrencyCounts[currency] ?? 0) + 1;
+  }
   const seen = new Set<string>();
   const cutoff = new Date(input.now.getTime() - input.cooldownDays * 86_400_000);
   const creators: EvaluatedCreator[] = input.creators.map((creator) => {
@@ -187,7 +198,13 @@ export function buildPreview(input: {
       eligible: eligible.length,
       selected,
       shortfall: Math.max(0, input.requested - selected),
-      truncated: Boolean(input.truncated)
+      truncated: Boolean(input.truncated),
+      gmvCurrencyCounts,
+      gmvMixedCurrency: Object.keys(gmvCurrencyCounts).length > 1,
+      expectedGmvCurrency: input.filters.gmvCurrency?.toUpperCase(),
+      gmvExcludedCurrencyMismatch: input.filters.gmvCurrency
+        ? creators.filter((creator) => creator.gmv && creator.gmv.currency.toUpperCase() !== input.filters.gmvCurrency!.toUpperCase()).length
+        : 0
     }
   };
 }

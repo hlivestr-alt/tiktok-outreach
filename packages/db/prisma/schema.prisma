@@ -76,6 +76,24 @@ enum ReconciliationState {
   UNRESOLVED
 }
 
+enum CreatorIdentityType {
+  TIKTOK_CREATOR_OPEN_ID
+  TIKTOK_CREATOR_USER_ID
+  TIKTOK_CREATOR_IM_ID
+}
+
+enum CreatorIdentityLinkState {
+  VERIFIED
+  UNRESOLVED
+}
+
+enum TokenRefreshState {
+  IDLE
+  IN_PROGRESS
+  FAILED
+  OUTCOME_UNCERTAIN
+}
+
 model Shop {
   id                             String                    @id @default(uuid())
   name                           String
@@ -114,6 +132,7 @@ model IntegrationConnection {
   status                 String         @default("READY")
   sellerOpenId           String?
   grantedScopes          Json           @default("[]")
+  capabilityStatus       Json           @default("{}")
   accessTokenCiphertext  String?
   refreshTokenCiphertext String?
   accessTokenExpiresAt   DateTime?
@@ -123,6 +142,12 @@ model IntegrationConnection {
   lastRefreshAt          DateTime?
   lastRefreshFailureAt   DateTime?
   refreshFailureCount    Int            @default(0)
+  refreshState           TokenRefreshState @default(IDLE)
+  refreshLeaseId         String?
+  refreshLeaseExpiresAt  DateTime?
+  refreshStartedAt       DateTime?
+  refreshUncertainAt     DateTime?
+  tokenVersion           Int            @default(0)
   lastErrorCode          String?
   lastErrorMessage       String?
   lastApiRequestAt       DateTime?
@@ -145,8 +170,8 @@ model TikTokAuthorizationState {
 
 model Creator {
   id              String                    @id @default(uuid())
-  creatorOpenId   String                    @unique
-  creatorUserId   String?
+  creatorOpenId   String?                   @unique
+  creatorUserId   String?                   @unique
   creatorImId     String?                   @unique
   username        String?
   nickname        String?
@@ -160,6 +185,38 @@ model Creator {
   conversations   Conversation[]
   recipients      CampaignRecipient[]
   reservations    OutreachReservation[]
+  providerIdentities CreatorProviderIdentity[]
+}
+
+model CreatorProviderIdentity {
+  id           String                   @id @default(uuid())
+  creatorId    String
+  provider     String                   @default("TIKTOK_SHOP")
+  identityType CreatorIdentityType
+  identifier   String
+  linkState    CreatorIdentityLinkState @default(VERIFIED)
+  evidenceType String
+  evidence     Json                     @default("{}")
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  creator      Creator                  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, identityType, identifier])
+  @@index([creatorId, linkState])
+}
+
+model CreatorIdentityAudit {
+  id              String   @id @default(uuid())
+  provider        String   @default("TIKTOK_SHOP")
+  action          String
+  sourceCreatorId String
+  targetCreatorId String?
+  evidenceType    String
+  evidence        Json     @default("{}")
+  createdAt       DateTime @default(now())
+
+  @@index([sourceCreatorId, createdAt])
+  @@index([targetCreatorId, createdAt])
 }
 
 model CreatorMetricSnapshot {
@@ -215,7 +272,7 @@ model Conversation {
   messages               ConversationMessage[]
   deliveries             OutreachDelivery[]
 
-  @@unique([shopId, creatorId])
+  @@index([shopId, creatorId])
 }
 
 model ConversationMessage {

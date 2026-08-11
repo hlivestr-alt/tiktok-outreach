@@ -11,4 +11,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const formatNumber = (value: number | string | null | undefined) => new Intl.NumberFormat("en-US").format(Number(value ?? 0));
 export const formatIdr = (value: number | string | null | undefined) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(Number(value ?? 0));
-
+export const formatMoney = (value: number | string | null | undefined, currency: string | null | undefined) => {
+  if (value == null || !currency) return "—";
+  try { return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(Number(value)); }
+  catch { return `${value} ${currency}`; }
+};

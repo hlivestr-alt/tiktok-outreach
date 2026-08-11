@@ -10,7 +10,6 @@ async function bootstrap() {
   app.enableCors({ origin: ["http://localhost:3000", "http://127.0.0.1:3000"] });
   const document = SwaggerModule.createDocument(app, new DocumentBuilder().setTitle("Affiliate Outreach Operations API").setVersion("1.0").build());
   SwaggerModule.setup("api/docs", app, document);
-  await app.listen(config.PORT, "0.0.0.0");
+  await app.listen(config.PORT, config.HOST);
 }
 bootstrap();
-

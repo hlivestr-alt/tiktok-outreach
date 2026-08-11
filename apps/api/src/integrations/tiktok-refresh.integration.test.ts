@@ -1,0 +1,211 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { PrismaClient } from "@affiliate/db";
+import { encryptTikTokToken } from "@affiliate/tiktok-adapter";
+import { config } from "../shared";
+import { TikTokIntegrationService } from "./tiktok.service";
+
+const prisma = new PrismaClient();
+const shopIds = new Set<string>();
+const encryptionKey = Buffer.alloc(32, 7).toString("base64");
+const originalConfig = {
+  TIKTOK_APP_KEY: config.TIKTOK_APP_KEY, TIKTOK_APP_SECRET: config.TIKTOK_APP_SECRET,
+  TIKTOK_SERVICE_ID: config.TIKTOK_SERVICE_ID, TIKTOK_TOKEN_ENCRYPTION_KEY: config.TIKTOK_TOKEN_ENCRYPTION_KEY,
+  TIKTOK_AUTH_BASE_URL: config.TIKTOK_AUTH_BASE_URL, TIKTOK_API_BASE_URL: config.TIKTOK_API_BASE_URL
+};
+const stamp = () => `refresh_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+beforeAll(() => Object.assign(config, {
+  TIKTOK_APP_KEY: "test-app", TIKTOK_APP_SECRET: "test-secret", TIKTOK_SERVICE_ID: "test-service",
+  TIKTOK_TOKEN_ENCRYPTION_KEY: encryptionKey, TIKTOK_AUTH_BASE_URL: "https://auth.example.test", TIKTOK_API_BASE_URL: "https://api.example.test"
+}));
+afterEach(() => vi.unstubAllGlobals());
+afterAll(async () => {
+  Object.assign(config, originalConfig);
+  for (const id of shopIds) await prisma.shop.delete({ where: { id } }).catch(() => undefined);
+  await prisma.$disconnect();
+});
+
+async function connection(overrides: Record<string, unknown> = {}) {
+  const externalShopId = stamp();
+  const shop = await prisma.shop.create({ data: {
+    name: stamp(), externalShopId, shopCipher: stamp(), region: "ID", currency: "UNKNOWN",
+    connectionMode: "READ_ONLY", selectedForReadOnly: true
+  } });
+  shopIds.add(shop.id);
+  const value = await prisma.integrationConnection.create({ data: {
+    shopId: shop.id, mode: "READ_ONLY", status: "HEALTHY",
+    accessTokenCiphertext: encryptTikTokToken("known-access", encryptionKey),
+    refreshTokenCiphertext: encryptTikTokToken("known-refresh", encryptionKey),
+    accessTokenExpiresAt: new Date(Date.now() - 1_000), refreshTokenExpiresAt: new Date(Date.now() + 86_400_000),
+    grantedScopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write"],
+    capabilityStatus: { authorizedShop: { available: true }, creatorMarketplace: { available: true }, affiliateMessageHistory: { available: true } },
+    ...overrides
+  } as any });
+  return { shop, connection: value };
+}
+
+function successfulFetch(shopId: string, scopes = ["seller.creator_marketplace.read", "seller.affiliate_messages.write"], delayMs = 0) {
+  return vi.fn(async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v2/token/refresh") {
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return response({ code: 0, data: {
+        access_token: "rotated-access", refresh_token: "rotated-refresh",
+        access_token_expire_in: Math.floor(Date.now() / 1000) + 86_400,
+        refresh_token_expire_in: Math.floor(Date.now() / 1000) + 604_800,
+        open_id: "seller", user_type: 0, granted_scopes: scopes
+      } });
+    }
+    if (url.pathname === "/authorization/202309/shops") return response({ code: 0, data: { shops: [{ id: shopId, cipher: "cipher", name: "Shop", region: "ID" }] }, request_id: "request-safe" });
+    throw new Error(`Unexpected test path ${url.pathname}`);
+  });
+}
+
+describe.sequential("persisted TikTok refresh lease", () => {
+  it("serializes concurrent refresh calls and performs one token rotation request", async () => {
+    const seed = await connection();
+    const fetcher = successfulFetch(seed.shop.externalShopId!, undefined, 75);
+    vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    const [first, second] = await Promise.all([service.refreshToken(seed.shop.id), service.refreshToken(seed.shop.id)]);
+    expect(first).toBe("rotated-access"); expect(second).toBe("rotated-access");
+    expect(fetcher.mock.calls.filter(([value]) => new URL(String(value)).pathname === "/api/v2/token/refresh")).toHaveLength(1);
+    expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } })).toMatchObject({ status: "HEALTHY", refreshState: "IDLE", tokenVersion: 1, refreshFailureCount: 0 });
+  });
+
+  it("preserves stored tokens when the provider refresh fails and blocks automatic repetition", async () => {
+    const seed = await connection();
+    const before = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    const fetcher = vi.fn(async () => response({ code: 105002, message: "expired" }, 401));
+    vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/automatic retry is blocked/i);
+    const after = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(after).toMatchObject({ status: "REFRESH_FAILED_RETRY_MANUALLY", refreshState: "FAILED" });
+    expect(after.accessTokenCiphertext).toBe(before.accessTokenCiphertext);
+    expect(after.refreshTokenCiphertext).toBe(before.refreshTokenCiphertext);
+    await expect(service.refreshToken(seed.shop.id, "AUTO")).rejects.toThrow(/automatic token refresh is blocked/i);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("turns provider success plus local persistence failure into explicit uncertainty", async () => {
+    const seed = await connection();
+    vi.stubGlobal("fetch", successfulFetch(seed.shop.externalShopId!));
+    const service = new TikTokIntegrationService(prisma as any);
+    const delegate = prisma.integrationConnection as any;
+    const original = delegate.updateMany.bind(delegate);
+    delegate.updateMany = async (args: any) => {
+      if (args.data?.accessTokenCiphertext) throw new Error("SIMULATED_DATABASE_PERSISTENCE_FAILURE");
+      return original(args);
+    };
+    try { await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/persistence is uncertain/i); }
+    finally { delegate.updateMany = original; }
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored).toMatchObject({ status: "REFRESH_OUTCOME_UNCERTAIN", refreshState: "OUTCOME_UNCERTAIN", accessTokenCiphertext: null, refreshTokenCiphertext: null });
+  });
+
+  it("does not let stale lease cleanup overwrite a newer healthy token generation", async () => {
+    const seed = await connection({
+      refreshState: "IN_PROGRESS", refreshLeaseId: "stale-lease", refreshLeaseExpiresAt: new Date(Date.now() - 1_000),
+      refreshStartedAt: new Date(Date.now() - 130_000), tokenVersion: 7
+    });
+    const service = new TikTokIntegrationService(prisma as any);
+    await prisma.integrationConnection.update({ where: { id: seed.connection.id }, data: {
+      status: "HEALTHY", refreshState: "IDLE", refreshLeaseId: null, refreshLeaseExpiresAt: null,
+      accessTokenCiphertext: encryptTikTokToken("newer-access", encryptionKey),
+      refreshTokenCiphertext: encryptTikTokToken("newer-refresh", encryptionKey), tokenVersion: 8
+    } });
+
+    await expect((service as any).markRefreshUncertain(seed.connection.id, "stale-lease", 7)).resolves.toBe(false);
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored).toMatchObject({ status: "HEALTHY", refreshState: "IDLE", tokenVersion: 8 });
+    expect(stored.accessTokenCiphertext).not.toBeNull();
+    expect(stored.refreshTokenCiphertext).not.toBeNull();
+  });
+
+  it("does not let a stale missing-token preflight mark a reauthorized generation failed", async () => {
+    const seed = await connection({ refreshTokenCiphertext: null, tokenVersion: 3 });
+    const service = new TikTokIntegrationService(prisma as any);
+    const delegate = prisma.integrationConnection as any;
+    const original = delegate.updateMany.bind(delegate);
+    delegate.updateMany = async (args: any) => {
+      if (args.data?.lastErrorCode === "MISSING_REFRESH_TOKEN") {
+        await prisma.integrationConnection.update({ where: { id: seed.connection.id }, data: {
+          status: "SHOP_SELECTION_REQUIRED", refreshState: "IDLE", refreshLeaseId: null, refreshLeaseExpiresAt: null,
+          accessTokenCiphertext: encryptTikTokToken("reauthorized-access", encryptionKey),
+          refreshTokenCiphertext: encryptTikTokToken("reauthorized-refresh", encryptionKey),
+          accessTokenExpiresAt: new Date(Date.now() + 86_400_000), refreshTokenExpiresAt: new Date(Date.now() + 604_800_000),
+          lastErrorCode: null, lastErrorMessage: null, tokenVersion: { increment: 1 }
+        } });
+      }
+      return original(args);
+    };
+    try { await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/connection changed/i); }
+    finally { delegate.updateMany = original; }
+    expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } })).toMatchObject({
+      status: "SHOP_SELECTION_REQUIRED", refreshState: "IDLE", tokenVersion: 4, lastErrorCode: null
+    });
+  });
+
+  it("revalidates refreshed scopes and keeps a missing capability unhealthy", async () => {
+    const seed = await connection();
+    vi.stubGlobal("fetch", successfulFetch(seed.shop.externalShopId!, ["seller.creator_marketplace.read"]));
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/missing required capabilities/i);
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored.status).toBe("MISSING_REQUIRED_SCOPES");
+    expect((stored.capabilityStatus as any).affiliateMessageHistory).toMatchObject({ available: false });
+  });
+
+  it("fails before network for missing and expired refresh tokens", async () => {
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const missing = await connection({ refreshTokenCiphertext: null });
+    const expired = await connection({ refreshTokenExpiresAt: new Date(Date.now() - 1_000) });
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.refreshToken(missing.shop.id)).rejects.toThrow(/missing/i);
+    await expect(service.refreshToken(expired.shop.id)).rejects.toThrow(/expired/i);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: missing.connection.id } })).toMatchObject({ status: "REAUTHORIZATION_REQUIRED", refreshState: "FAILED" });
+    expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: expired.connection.id } })).toMatchObject({ status: "REAUTHORIZATION_REQUIRED", refreshState: "FAILED" });
+  });
+
+  it("resets failed refresh lifecycle state after a successful reauthorization", async () => {
+    const seed = await connection({
+      status: "REFRESH_OUTCOME_UNCERTAIN", refreshState: "OUTCOME_UNCERTAIN", refreshUncertainAt: new Date(),
+      refreshLeaseId: "stale-lease", refreshLeaseExpiresAt: new Date(), refreshStartedAt: new Date(),
+      refreshFailureCount: 2, lastRefreshFailureAt: new Date(), lastErrorCode: "STALE_REFRESH_ERROR", lastErrorMessage: "stale",
+      accessTokenCiphertext: null, refreshTokenCiphertext: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null,
+      tokenVersion: 4
+    });
+    const state = stamp();
+    await prisma.tikTokAuthorizationState.create({ data: {
+      stateHash: createHash("sha256").update(state).digest("hex"), expiresAt: new Date(Date.now() + 60_000)
+    } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v2/token/get") return response({ code: 0, data: {
+        access_token: "reauthorized-access", refresh_token: "reauthorized-refresh",
+        access_token_expire_in: Math.floor(Date.now() / 1000) + 86_400,
+        refresh_token_expire_in: Math.floor(Date.now() / 1000) + 604_800,
+        open_id: "seller", user_type: 0,
+        granted_scopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write"]
+      } });
+      if (url.pathname === "/authorization/202309/shops") return response({ code: 0, data: { shops: [{
+        id: seed.shop.externalShopId, cipher: "reauthorized-cipher", name: "Shop", region: "ID"
+      }] } });
+      throw new Error(`Unexpected test path ${url.pathname}`);
+    }));
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.callback({ state, code: "new-authorization-code" })).resolves.toMatchObject({ status: "SHOP_SELECTION_REQUIRED" });
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored).toMatchObject({
+      refreshState: "IDLE", refreshLeaseId: null, refreshLeaseExpiresAt: null, refreshStartedAt: null, refreshUncertainAt: null,
+      refreshFailureCount: 0, lastRefreshFailureAt: null, lastErrorCode: null, lastErrorMessage: null,
+      tokenVersion: 5, status: "SHOP_SELECTION_REQUIRED"
+    });
+    expect(stored.accessTokenCiphertext).not.toBeNull();
+    expect(stored.refreshTokenCiphertext).not.toBeNull();
+  });
+});

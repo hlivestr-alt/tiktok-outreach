@@ -132,8 +132,8 @@ function money(value: unknown): { amount: string; currency: string } | null {
 function mapCreator(value: unknown, ordinal: number): CreatorCandidate {
   const creator = object(value, "creator");
   // Current marketplace docs describe this value as Creator Open ID. creator_im_id is intentionally never accepted here.
-  const creatorOpenId = string(creator.creator_open_id) ?? string(creator.creator_user_id);
-  if (!creatorOpenId) throw new TikTokApiError("UNSUPPORTED_IDENTIFIER", "MAP_CREATOR", undefined, undefined, undefined, "Marketplace creator response omitted creator_open_id/creator_user_id");
+  const creatorOpenId = string(creator.creator_open_id);
+  if (!creatorOpenId) throw new TikTokApiError("UNSUPPORTED_IDENTIFIER", "MAP_CREATOR", undefined, undefined, undefined, "Marketplace creator response omitted creator_open_id");
   return {
     creatorOpenId,
     creatorUserId: string(creator.creator_user_id),
@@ -142,7 +142,7 @@ function mapCreator(value: unknown, ordinal: number): CreatorCandidate {
     followerCount: number(creator.follower_count), gmv: money(creator.gmv), unitsSold: number(creator.units_sold),
     avgVideoViews: number(creator.avg_ec_video_view_count), avgLiveViewers: number(creator.avg_ec_live_uv),
     engagementRate: number(creator.engagement_rate) ?? undefined,
-    selectionRegion: string(creator.selection_region) ?? "ID", discoveryOrdinal: ordinal
+    selectionRegion: string(creator.selection_region) ?? "UNKNOWN", discoveryOrdinal: ordinal
   };
 }
 
@@ -160,8 +160,8 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
   constructor(private readonly options: { http: TikTokReadOnlyHttpClient; accessToken: () => Promise<string>; shopCipher: () => Promise<string> }) {}
 
   async getCapabilities(): Promise<AdapterCapabilities> {
-    return { mode: "READ_ONLY", market: "ID", currency: "IDR", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 0,
-      filters: ["keyword:server", "category:server", "gmvDiscreteRanges:server", "unitsSoldDiscreteRanges:server", "followers:local", "avgVideoViews:local", "avgLiveViewers:local", "engagementRate:local"],
+    return { mode: "READ_ONLY", market: "ID", currency: null, currencySource: "PROVIDER_RESPONSE_REQUIRED", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 0,
+      filters: ["keyword:server", "category:server", "gmv:currencyAwareLocal", "unitsSoldDiscreteRanges:server", "followers:local", "avgVideoViews:local", "avgLiveViewers:local", "engagementRate:local"],
       rankingMetrics: ["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"] };
   }
 
@@ -183,9 +183,7 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
     if (cursor.searchKey) body.search_key = cursor.searchKey;
     if (filters.keyword) body.keyword = filters.keyword;
     if (filters.categoryIds?.length) body.category = filters.categoryIds.map((id) => ({ id }));
-    const gmvRanges = discreteRanges(filters.minGmv, filters.maxGmv, [["GMV_RANGE_0_100", 0, 100], ["GMV_RANGE_100_1000", 100, 1000], ["GMV_RANGE_1000_10000", 1000, 10000], ["GMV_RANGE_10000_AND_ABOVE", 10000, Number.POSITIVE_INFINITY]]);
     const unitRanges = discreteRanges(filters.minUnitsSold, undefined, [["UNITS_SOLD_RANGE_0_10", 0, 10], ["UNITS_SOLD_RANGE_10_100", 10, 100], ["UNITS_SOLD_RANGE_100_1000", 100, 1000], ["UNITS_SOLD_RANGE_1000_AND_ABOVE", 1000, Number.POSITIVE_INFINITY]]);
-    if (gmvRanges) body.gmv_ranges = gmvRanges;
     if (unitRanges) body.units_sold_ranges = unitRanges;
     const response = await this.options.http.requestRaw<JsonObject>({ operation: "SEARCH_CREATORS", method: "POST", path: "/affiliate_seller/202508/marketplace_creators/search", accessToken: await this.options.accessToken(), shopReference: shopCipher,
       query: { shop_cipher: shopCipher, page_size: cursor.pageSize, page_token: cursor.pageToken }, body });
@@ -220,7 +218,8 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
       return { id, creatorImId, username: string(conversation.username), avatarUrl: string(conversation.avatar), unreadCount: number(conversation.unread_count) ?? undefined };
     });
     const nextPageToken = string(data.next_page_token);
-    return { items, nextPageToken, hasMore: data.has_more === true || Boolean(nextPageToken) };
+    if (data.has_more === true && !nextPageToken) throw new TikTokApiError("MALFORMED_RESPONSE", "LIST_CONVERSATIONS", undefined, undefined, string(response.request_id), "Conversation page has_more was true without next_page_token");
+    return { items, nextPageToken, hasMore: typeof data.has_more === "boolean" ? data.has_more : Boolean(nextPageToken) };
   }
 
   async listMessages(conversationId: string, cursor: { pageToken?: string; pageSize: number; creatorImId?: string } = { pageSize: 20 }): Promise<ProviderPage<ProviderMessage>> {
@@ -233,12 +232,13 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
     const items = array(data.messages).map((item): ProviderMessage => {
       const wrapper = object(item, "message"); const body = object(wrapper.message_body, "message_body");
       const id = string(body.id), providerConversationId = string(body.conversation_id), senderId = string(body.sender_id), created = number(body.create_time);
-      if (!id || !providerConversationId || created == null) throw new TikTokApiError("MALFORMED_RESPONSE", "LIST_MESSAGES", undefined, undefined, string(response.request_id), "Message omitted required identifiers/timestamp");
+      if (!id || !providerConversationId || !senderId || created == null || created <= 0 || created >= 100_000_000_000) throw new TikTokApiError("MALFORMED_RESPONSE", "LIST_MESSAGES", undefined, undefined, string(response.request_id), "Message omitted required identifiers or a valid epoch-second timestamp");
       let content = string(body.content) ?? "";
       try { const parsed = JSON.parse(content) as JsonObject; content = string(parsed.content) ?? content; } catch { /* provider may return non-JSON for non-text messages */ }
       return { id, conversationId: providerConversationId, creatorImId: cursor.creatorImId, direction: cursor.creatorImId && senderId === cursor.creatorImId ? "INBOUND" : "OUTBOUND", content, createdAt: new Date(created * 1000) };
     });
     const nextPageToken = string(data.next_page_token);
-    return { items, nextPageToken, hasMore: data.has_more === true || Boolean(nextPageToken) };
+    if (data.has_more === true && !nextPageToken) throw new TikTokApiError("MALFORMED_RESPONSE", "LIST_MESSAGES", undefined, undefined, string(response.request_id), "Message page has_more was true without next_page_token");
+    return { items, nextPageToken, hasMore: typeof data.has_more === "boolean" ? data.has_more : Boolean(nextPageToken) };
   }
 }

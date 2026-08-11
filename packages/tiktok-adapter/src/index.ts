@@ -47,7 +47,7 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
   }
   async getCapabilities(): Promise<AdapterCapabilities> {
     return {
-      mode: "MOCK", market: "ID", currency: "IDR", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 2000,
+      mode: "MOCK", market: "ID", currency: "IDR", currencySource: "MOCK_FIXED", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 2000,
       filters: ["keyword", "category", "followers", "gmv", "unitsSold", "avgVideoViews", "avgLiveViewers", "engagementRate", "followerDemographics"],
       rankingMetrics: ["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]
     };
@@ -132,7 +132,7 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
 
 export class DisabledTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
   private disabled(): never { throw new Error("TikTok integration is not implemented in this disabled adapter."); }
-  async getCapabilities(): Promise<AdapterCapabilities> { return { mode: "DISABLED", market: "ID", currency: "IDR", pageSizes: [], filters: [], rankingMetrics: [], messageTypes: ["TEXT"], maxMessageLength: 0 }; }
+  async getCapabilities(): Promise<AdapterCapabilities> { return { mode: "DISABLED", market: "ID", currency: null, currencySource: "PROVIDER_RESPONSE_REQUIRED", pageSizes: [], filters: [], rankingMetrics: [], messageTypes: ["TEXT"], maxMessageLength: 0 }; }
   async searchCreators(_filters: CreatorFilters, _cursor?: { pageToken?: string; searchKey?: string; pageSize: number }): Promise<CreatorSearchPage> { return this.disabled(); }
   async getCreatorPerformance(_creatorUserId: string): Promise<CreatorCandidate> { return this.disabled(); }
   async createOrGetConversation(_creatorOpenId: string): Promise<{ conversationId: string; isNew: boolean }> { return this.disabled(); }

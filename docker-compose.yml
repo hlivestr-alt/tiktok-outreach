@@ -33,6 +33,7 @@ services:
     environment:
       DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
       REDIS_URL: redis://redis:6379
+      HOST: 0.0.0.0
     ports:
       - "127.0.0.1:4000:4000"
     depends_on:
@@ -43,10 +44,16 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
-    env_file: .env
     environment:
       DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
       REDIS_URL: redis://redis:6379
+      APP_MODE: ${APP_MODE:-mock}
+      SHOP_TIMEZONE: ${SHOP_TIMEZONE:-Asia/Jakarta}
+      MAX_RECIPIENTS_PER_CAMPAIGN: ${MAX_RECIPIENTS_PER_CAMPAIGN:-1000}
+      MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: ${MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN:-4000}
+      MAX_SENDS_PER_DAY: ${MAX_SENDS_PER_DAY:-1000}
+      MAX_DISPATCHES_PER_MINUTE: ${MAX_DISPATCHES_PER_MINUTE:-10}
+      MOCK_RECONCILIATION_DELAYS_MS: ${MOCK_RECONCILIATION_DELAYS_MS:-300000,1800000,7200000}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
