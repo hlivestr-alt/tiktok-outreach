@@ -75,7 +75,7 @@ describe.sequential("persisted TikTok refresh lease", () => {
     expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } })).toMatchObject({ status: "HEALTHY", refreshState: "IDLE", tokenVersion: 1, refreshFailureCount: 0 });
   });
 
-  it("preserves stored tokens when the provider refresh fails and blocks automatic repetition", async () => {
+  it("treats an explicit TikTok refresh rejection as FAILED and preserves the stored token pair", async () => {
     const seed = await connection();
     const before = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
     const fetcher = vi.fn(async () => response({ code: 105002, message: "expired" }, 401));
@@ -88,6 +88,58 @@ describe.sequential("persisted TikTok refresh lease", () => {
     expect(after.refreshTokenCiphertext).toBe(before.refreshTokenCiphertext);
     await expect(service.refreshToken(seed.shop.id, "AUTO")).rejects.toThrow(/automatic token refresh is blocked/i);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a thrown refresh fetch as OUTCOME_UNCERTAIN and invalidates local tokens", async () => {
+    const seed = await connection();
+    const fetcher = vi.fn(async () => { throw new Error("simulated connection drop"); });
+    vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/outcome is uncertain/i);
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored).toMatchObject({
+      status: "REFRESH_OUTCOME_UNCERTAIN", refreshState: "OUTCOME_UNCERTAIN", lastErrorCode: "TOKEN_NETWORK_ERROR",
+      accessTokenCiphertext: null, refreshTokenCiphertext: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null
+    });
+    await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/reauthorization is required/i);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a malformed non-JSON refresh response as OUTCOME_UNCERTAIN", async () => {
+    const seed = await connection();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("truncated{", { status: 200, headers: { "content-type": "application/json" } })));
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/outcome is uncertain/i);
+    expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } })).toMatchObject({
+      status: "REFRESH_OUTCOME_UNCERTAIN", refreshState: "OUTCOME_UNCERTAIN", lastErrorCode: "TOKEN_MALFORMED_RESPONSE",
+      accessTokenCiphertext: null, refreshTokenCiphertext: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null
+    });
+  });
+
+  it("does not let an ambiguous stale refresh overwrite a newer reauthorization generation", async () => {
+    const seed = await connection({ tokenVersion: 11 });
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("simulated connection drop"); }));
+    const service = new TikTokIntegrationService(prisma as any);
+    const delegate = prisma.integrationConnection as any;
+    const original = delegate.updateMany.bind(delegate);
+    delegate.updateMany = async (args: any) => {
+      if (args.data?.refreshState === "OUTCOME_UNCERTAIN") {
+        await prisma.integrationConnection.update({ where: { id: seed.connection.id }, data: {
+          status: "HEALTHY", refreshState: "IDLE", refreshLeaseId: null, refreshLeaseExpiresAt: null,
+          accessTokenCiphertext: encryptTikTokToken("reauthorized-access", encryptionKey),
+          refreshTokenCiphertext: encryptTikTokToken("reauthorized-refresh", encryptionKey),
+          accessTokenExpiresAt: new Date(Date.now() + 86_400_000), refreshTokenExpiresAt: new Date(Date.now() + 604_800_000),
+          lastErrorCode: null, lastErrorMessage: null, tokenVersion: { increment: 1 }
+        } });
+      }
+      return original(args);
+    };
+    try { await expect(service.refreshToken(seed.shop.id)).rejects.toThrow(/newer token generation was preserved/i); }
+    finally { delegate.updateMany = original; }
+    const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
+    expect(stored).toMatchObject({ status: "HEALTHY", refreshState: "IDLE", tokenVersion: 12, lastErrorCode: null });
+    expect(stored.accessTokenCiphertext).not.toBeNull();
+    expect(stored.refreshTokenCiphertext).not.toBeNull();
   });
 
   it("turns provider success plus local persistence failure into explicit uncertainty", async () => {

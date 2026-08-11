@@ -12,6 +12,7 @@ import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.s
 
 const stateHash = (state: string) => createHash("sha256").update(state).digest("hex");
 export const REQUIRED_RETURNED_READ_SCOPES = ["seller.creator_marketplace.read", "seller.affiliate_messages.write"] as const;
+const AMBIGUOUS_REFRESH_ERROR_CODES = new Set(["TOKEN_NETWORK_ERROR", "TOKEN_MALFORMED_RESPONSE", "WRONG_AUTHORIZATION_IDENTITY"]);
 
 export function evaluateTikTokReadCapabilities(grantedScopes: string[], authorizedShopVerified: boolean, authorizedShopDetail?: string) {
   const missingReturnedScopes = REQUIRED_RETURNED_READ_SCOPES.filter((scope) => !grantedScopes.includes(scope));
@@ -221,14 +222,23 @@ export class TikTokIntegrationService {
     return this.refreshToken(shop.id, "AUTO");
   }
 
-  private async markRefreshUncertain(connectionId: string, leaseId: string | null, tokenVersion: number): Promise<boolean> {
+  private async markRefreshUncertain(
+    connectionId: string,
+    leaseId: string | null,
+    tokenVersion: number,
+    reason: { code: string; message: string } = {
+      code: "TOKEN_ROTATION_PERSISTENCE_UNCERTAIN",
+      message: "TikTok may have rotated the token, but local persistence was not confirmed. Reauthorization is required."
+    }
+  ): Promise<boolean> {
     const marked = await this.prisma.integrationConnection.updateMany({ where: {
       id: connectionId, refreshState: "IN_PROGRESS", refreshLeaseId: leaseId, tokenVersion
     }, data: {
       status: "REFRESH_OUTCOME_UNCERTAIN", refreshState: "OUTCOME_UNCERTAIN", refreshUncertainAt: new Date(),
-      refreshLeaseId: null, refreshLeaseExpiresAt: null, accessTokenCiphertext: null, refreshTokenCiphertext: null,
-      accessTokenExpiresAt: null, refreshTokenExpiresAt: null, lastErrorCode: "TOKEN_ROTATION_PERSISTENCE_UNCERTAIN",
-      lastErrorMessage: "TikTok may have rotated the token, but local persistence was not confirmed. Reauthorization is required."
+      refreshLeaseId: null, refreshLeaseExpiresAt: null, refreshStartedAt: null,
+      accessTokenCiphertext: null, refreshTokenCiphertext: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null,
+      lastRefreshFailureAt: new Date(), refreshFailureCount: { increment: 1 },
+      lastErrorCode: reason.code, lastErrorMessage: reason.message
     } });
     return marked.count === 1;
   }
@@ -307,14 +317,23 @@ export class TikTokIntegrationService {
     try {
       refreshed = await auth.refresh(previousRefresh);
     } catch (error) {
-      await this.prisma.integrationConnection.updateMany({ where: {
+      if (error instanceof TikTokAuthorizationError && AMBIGUOUS_REFRESH_ERROR_CODES.has(error.code)) {
+        const marked = await this.markRefreshUncertain(connection.id, leaseId, connection.tokenVersion, {
+          code: error.code,
+          message: "TikTok token refresh returned no trustworthy outcome; token rotation cannot be determined. Reauthorization is required."
+        });
+        if (!marked) throw new ServiceUnavailableException("TikTok connection changed during an uncertain refresh outcome; the newer token generation was preserved");
+        throw new ServiceUnavailableException("TikTok token refresh outcome is uncertain; reauthorization is required");
+      }
+      const failed = await this.prisma.integrationConnection.updateMany({ where: {
         id: connection.id, refreshLeaseId: leaseId, refreshState: "IN_PROGRESS", tokenVersion: connection.tokenVersion
       }, data: {
-        status: "REFRESH_FAILED_RETRY_MANUALLY", refreshState: "FAILED", refreshLeaseId: null, refreshLeaseExpiresAt: null,
+        status: "REFRESH_FAILED_RETRY_MANUALLY", refreshState: "FAILED", refreshLeaseId: null, refreshLeaseExpiresAt: null, refreshStartedAt: null,
         lastRefreshFailureAt: new Date(), refreshFailureCount: { increment: 1 },
         lastErrorCode: error instanceof TikTokAuthorizationError ? error.code : "TOKEN_REFRESH_FAILED",
         lastErrorMessage: "TikTok token refresh failed before rotation was confirmed; stored tokens were not overwritten"
       } });
+      if (failed.count !== 1) throw new ServiceUnavailableException("TikTok connection changed during refresh failure handling; the newer token generation was preserved");
       throw new ServiceUnavailableException("TikTok token refresh failed; automatic retry is blocked");
     }
 
@@ -342,7 +361,7 @@ export class TikTokIntegrationService {
         accessTokenExpiresAt: refreshed.accessTokenExpiresAt, refreshTokenExpiresAt: refreshed.refreshTokenExpiresAt,
         grantedScopes: refreshed.grantedScopes, capabilityStatus, sellerOpenId: refreshed.sellerOpenId ?? connection.sellerOpenId,
         lastRefreshAt: new Date(), lastValidatedAt: new Date(), status, refreshState: "IDLE", refreshLeaseId: null,
-        refreshLeaseExpiresAt: null, refreshFailureCount: 0, lastErrorCode: status === "HEALTHY" ? null : "MISSING_REQUIRED_CAPABILITY",
+        refreshLeaseExpiresAt: null, refreshStartedAt: null, refreshFailureCount: 0, lastErrorCode: status === "HEALTHY" ? null : "MISSING_REQUIRED_CAPABILITY",
         lastErrorMessage: status === "HEALTHY" ? null : `Missing read capabilities: ${capabilityStatus.missingCapabilities.join(", ")}`,
         tokenVersion: { increment: 1 }
       } });

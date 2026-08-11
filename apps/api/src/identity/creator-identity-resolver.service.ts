@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
-import { Prisma } from "@affiliate/db";
+import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CreatorCandidate } from "@affiliate/domain";
 import type { ProviderConversation } from "@affiliate/contracts";
 import { PrismaService } from "../shared";
@@ -133,6 +133,20 @@ export class CreatorIdentityResolver {
       if (evidence.evidenceType === "DOCUMENTED_PROVIDER_MAPPING" && !evidence.mappingReference?.trim()) {
         throw new BadRequestException("A documented provider mapping reference is required");
       }
+      const affectedCreatorIds = [source.id, target.id];
+      const [contactShops, conversationShops, recipientShops, reservationShops] = await Promise.all([
+        tx.creatorShopContactState.findMany({ where: { creatorId: { in: affectedCreatorIds } }, select: { shopId: true } }),
+        tx.conversation.findMany({ where: { creatorId: { in: affectedCreatorIds } }, select: { shopId: true } }),
+        tx.campaignRecipient.findMany({ where: { creatorId: { in: affectedCreatorIds } }, select: { campaign: { select: { shopId: true } } } }),
+        tx.outreachReservation.findMany({ where: { creatorId: { in: affectedCreatorIds } }, select: { shopId: true } })
+      ]);
+      const affectedShopIds = [...new Set([
+        ...contactShops.map((item) => item.shopId),
+        ...conversationShops.map((item) => item.shopId),
+        ...recipientShops.map((item) => item.campaign.shopId),
+        ...reservationShops.map((item) => item.shopId)
+      ])].sort();
+      for (const shopId of affectedShopIds) await lockCreatorEligibility(tx, shopId, affectedCreatorIds);
       const duplicateCampaign = await tx.campaignRecipient.findFirst({
         where: { creatorId: source.id, campaign: { recipients: { some: { creatorId: target.id } } } }, select: { campaignId: true }
       });

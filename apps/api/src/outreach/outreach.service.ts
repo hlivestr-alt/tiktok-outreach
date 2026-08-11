@@ -1,11 +1,22 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
+import { TikTokApiError } from "@affiliate/tiktok-adapter";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
+
+function redactedDiscoveryFailure(error: unknown): { category: string; message: string } {
+  if (error instanceof TikTokApiError) {
+    return { category: error.kind, message: `TikTok creator discovery failed (${error.kind}); retry is available.` };
+  }
+  if (error instanceof ServiceUnavailableException) {
+    return { category: "TOKEN_HEALTH", message: "TikTok creator discovery could not obtain a healthy access token; retry after restoring authorization health." };
+  }
+  return { category: "READ_PROVIDER_FAILURE", message: "TikTok creator discovery failed before a complete preview was produced; retry is available." };
+}
 
 @Injectable()
 export class OutreachService {
@@ -79,6 +90,7 @@ export class OutreachService {
     const campaign = await this.requiredCampaign(id);
     if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
     await this.prisma.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
+    try {
     const creators: CreatorCandidate[] = [];
     let pageToken: string | undefined;
     let searchKey: string | undefined;
@@ -151,6 +163,19 @@ export class OutreachService {
       await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: summary as unknown as Prisma.InputJsonValue } });
     });
     return this.preview(id);
+    } catch (error) {
+      const restoredState = campaign.state === "PREVIEW_READY" ? "PREVIEW_READY" : campaign.state === "PREVIEW_EXPIRED" ? "PREVIEW_EXPIRED" : "DRAFT";
+      const failure = redactedDiscoveryFailure(error);
+      await this.prisma.campaign.updateMany({
+        where: { id, state: "DISCOVERING", version: campaign.version + 1 },
+        data: { state: restoredState, version: { increment: 1 } }
+      });
+      await this.prisma.auditEvent.create({ data: {
+        shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_DISCOVERY_FAILED",
+        payload: { ...failure, retryable: true, restoredState }
+      } });
+      throw error;
+    }
   }
 
   async preview(id: string) {

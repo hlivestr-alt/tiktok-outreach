@@ -9,7 +9,8 @@ Detailed design notes are in [Architecture and safety](docs/architecture.md) and
 - `APP_MODE` accepts only `mock` or `read_only`.
 - The real HTTP client has an explicit read-operation method/path allowlist.
 - Real campaigns end at preview and cannot freeze, queue, or dispatch.
-- No code connects to TikTok or n8n.
+- Only approved TikTok authorization and read operations connect to TikTok; real TikTok mutation and outbound operations are physically blocked.
+- The worker and web containers do not receive TikTok credentials, and no code connects to n8n.
 - The unauthenticated application binds to localhost only.
 - PostgreSQL stores exact frozen outbound messages; runtime logs use IDs and hashes only.
 

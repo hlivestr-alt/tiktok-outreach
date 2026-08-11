@@ -8,62 +8,55 @@ Verified against the official TikTok Shop Partner Center documentation on 2026-0
 
 The real HTTP client uses this complete allowlist:
 
-| Operation | Method and path | Version | Scope | Pagination / identity |
-| --- | --- | --- | --- | --- |
-| Get Authorized Shops | `GET /authorization/202309/shops` | `202309` | Shop Authorized Information (Partner Center grant; exact token scope is returned in `granted_scopes`) | Seller access token; returns `shops[].id`, `cipher`, `code`, `name`, `region`, `seller_type`. |
-| Seller Search Creator on Marketplace | `POST /affiliate_seller/202508/marketplace_creators/search` | `202508` | `seller.creator_marketplace.read` | `page_size` is 12 or 20; opaque `page_token`; response `search_key` must be reused on later pages. POST is allowlisted only for this read/search operation. |
-| Get Marketplace Creator Performance | `GET /affiliate_seller/202508/marketplace_creators/{creator_user_id}` | `202508` | `seller.creator_marketplace.read` | Last 30 days. The current page names the path parameter `creator_user_id` but describes its value as Creator Open ID. |
-| Get Conversation List | `GET /affiliate_seller/202412/conversations` | `202412` | `seller.affiliate_messages.write` | `page_size` max 50, opaque `page_token`, `has_more`, `next_page_token`; returns `creator_im_id`. |
-| Get Message in the Conversation | `GET /affiliate_seller/202412/conversation/{conversation_id}/messages` | `202412` | `seller.affiliate_messages.write` | `page_size` max 20, opaque `page_token`, `has_more`, `next_page_token`; messages contain `sender_id` and epoch-second `create_time`. |
+| Operation | Method and path | Scope | Pagination / identity |
+| --- | --- | --- | --- |
+| Get Authorized Shops | `GET /authorization/202309/shops` | Shop Authorized Information grant | Seller token; returns exact shop fields. |
+| Seller Search Creator on Marketplace | `POST /affiliate_seller/202508/marketplace_creators/search` | `seller.creator_marketplace.read` | Page size 12 or 20; opaque `page_token`; reuse response `search_key`. POST is allowlisted only for this read/search operation. |
+| Get Marketplace Creator Performance | `GET /affiliate_seller/202508/marketplace_creators/{creator_user_id}` | `seller.creator_marketplace.read` | Prior 30 days. The documentation names the parameter `creator_user_id` while describing the supplied value as Creator Open ID. |
+| Get Conversation List | `GET /affiliate_seller/202412/conversations` | `seller.affiliate_messages.write` | Page size up to 50; opaque pagination; returns `creator_im_id`. |
+| Get Message in the Conversation | `GET /affiliate_seller/202412/conversation/{conversation_id}/messages` | `seller.affiliate_messages.write` | Page size up to 20; opaque pagination; messages contain `sender_id` and epoch-second `create_time`. |
 
 Official references: [authorization overview](https://partner.tiktokshop.com/docv2/page/authorization-overview-202407), [authorized shops](https://partner.tiktokshop.com/docv2/page/call-get-authorized-shops), [creator search](https://partner.tiktokshop.com/docv2/page/seller-search-creator-on-marketplace-202508), [creator performance](https://partner.tiktokshop.com/docv2/page/get-marketplace-creator-performance), [conversation list](https://partner.tiktokshop.com/docv2/page/get-conversation-list-202412), [conversation messages](https://partner.tiktokshop.com/docv2/page/get-message-in-the-conversation-202412), and [request signing](https://partner.tiktokshop.com/docv2/page/sign-your-api-request).
 
-### Scope with write semantics
+TikTok currently requires the write-named `seller.affiliate_messages.write` scope for the two history GET operations. The scope does not authorize this application to send. Create Conversation, Send IM Message, Mark Conversation Read, targeted/open collaborations, invitations, and sample actions are absent from the allowlist; deny tests prove they fail before `fetch`. Get Latest Unread Messages is not called because its exact active version/path could not be verified.
 
-TikTok currently requires `seller.affiliate_messages.write` even for the two history GET operations. At the TikTok account level this scope can also make Create Conversation, Send IM Message, Mark Conversation Read, and related message mutations permission-capable. The application does not treat the scope name as authorization to send: the method/path allowlist above is checked before `fetch`. Tests invoke the documented mutation paths and assert zero HTTP calls.
+## Search filters and GMV
 
-Known mutation references retained only for deny tests and documentation:
+The provider documents fields including `keyword`, `category`, `gmv_ranges`, `units_sold_ranges`, `follower_demographics`, `content_performance`, `affiliate_data`, and country-dependent `advanced_filters`. This implementation sends only shapes it can map without guessing: keyword, category IDs, and exact documented discrete units-sold ranges.
 
-- `POST /affiliate_seller/202508/conversations` — Create Conversation with creator.
-- `POST /affiliate_seller/202412/conversations/{conversation_id}/messages` — Send IM Message.
-- Mark-read, targeted collaboration, open collaboration, invitation, and sample actions are not allowlisted.
+Follower bounds, arbitrary GMV bounds, average video views, average live viewers, engagement, and other numeric campaign filters are applied locally. The capabilities response labels server and local filters. Unknown metrics remain `null`; they are never fabricated as zero. GMV is stored with the currency returned for that value. Filtering or ranking requires an explicit matching currency, cross-currency values are not compared, and no FX conversion or shop-region currency inference is performed. Search is capped by the campaign candidate-pool limit and reports truncation when provider pages remain.
 
-Get Latest Unread Messages is listed in the Affiliate Seller API index, but its exact active version/path could not be verified in the current public reference. Phase 2A therefore does not call it. Conversation list plus message history provide reply/unread synchronization without guessing an endpoint.
+## Provider identity namespaces
 
-## Search filters and returned metrics
+- `creatorOpenId`, `creatorUserId`, and `creatorImId` are separate namespaces and are never silently substituted.
+- `creatorImId` identifies the messaging participant and is rejected by creator-performance reads.
+- `conversationId` identifies only an affiliate conversation.
+- IM-only history has a nullable Open ID and an unresolved provider identity. No synthetic `im:<creator_im_id>` Open ID is created.
+- Username, nickname, or other fuzzy similarity never merges identities.
+- Legacy or CSV-provided Open IDs do not count as verified Marketplace evidence.
+- Exact Marketplace observation, a conversation response containing both exact identifiers, or a documented provider-exact mapping is required to verify or merge identities.
 
-Confirmed server-side request fields are `keyword`, `category`, `gmv_ranges`, `units_sold_ranges`, `follower_demographics`, `content_performance`, `affiliate_data`, and country-dependent `advanced_filters`. This implementation sends only the documented shapes it can map without guessing: keyword, category IDs, and TikTok's discrete GMV/units-sold range enumerations.
-
-Follower minimum/maximum, arbitrary GMV boundaries, average video views, average live viewers, engagement, and other numeric campaign filters are applied locally to returned data. The UI/capabilities distinguish `:server` and `:local`. Unknown or missing metrics remain `null`; they are not fabricated as zero. TikTok marketplace metrics cover the prior 30 days. Search pages are capped by the campaign candidate-pool limit and expose a truncated warning when more provider pages remain.
-
-## Identifier mapping
-
-- `creator_open_id`: stable privacy-preserving Creator Open ID used by the current marketplace performance endpoint value and by Create Conversation (the latter is forbidden here).
-- `creator_user_id`: persisted separately when marketplace data returns it. It is never silently substituted for another identity.
-- `creator_im_id`: messaging identity returned by Conversation List and used to classify message direction by `sender_id`. It is stored separately and is rejected by the performance adapter.
-- `conversation_id`: only identifies an affiliate conversation.
-
-History may contain a creator known only by `creator_im_id`. Such a record gets a local `creatorOpenId` namespace of `im:<creator_im_id>` until a documented mapping is available. Runtime guards prevent that local/messaging identity from entering creator-performance calls.
+When Marketplace later returns the exact legacy Open ID, `ensureMarketplaceCreator()` upgrades the identity to `VERIFIED` with `MARKETPLACE_EXACT_FIELD` evidence. Exact identity merging takes the shared creator-eligibility locks in deterministic shop/creator order before contact-state rebuilding and reservation/campaign reassignment.
 
 ## Signing, authorization, and token lifecycle
 
-TikTok Shop requests use HMAC-SHA256. Query keys excluding `sign` and `access_token` are sorted, concatenated as `{key}{value}`, prefixed by the exact request path, followed by the exact JSON body for non-multipart requests, wrapped with the app secret, and HMAC-signed with that secret. UTC epoch seconds are generated for each attempt. Signing is centralized and covered by TikTok's published fixed fixture.
+TikTok Shop requests use HMAC-SHA256 over the documented canonical path, sorted query, and exact JSON body. Seller authorization uses a 32-random-byte state stored only as SHA-256, expiring after ten minutes and consumed atomically once. The callback rejects missing, mismatched, expired, reused, denied, or malformed callbacks. Authorization-code exchange and refresh occur server-side.
 
-Seller authorization uses the ROW link `https://services.tiktokshop.com/open/authorize?service_id=...&state=...`. State is 32 random bytes, stored only as SHA-256, expires after ten minutes, and is consumed atomically once. The callback rejects missing, mismatched, expired, reused, denied, or malformed callbacks. The authorization code is exchanged server-side at `GET https://auth.tiktok-shops.com/api/v2/token/get`; refresh uses `/api/v2/token/refresh`. The official authorization code expires after 30 minutes and is single-use.
+Access and refresh tokens are encrypted independently with AES-256-GCM. The 32-byte master key comes only from `TIKTOK_TOKEN_ENCRYPTION_KEY`; PostgreSQL stores versioned IV/tag/ciphertext envelopes. Refresh uses a persisted lease plus token-generation compare-and-set, so concurrent or stale processes cannot overwrite newer authorization data.
 
-Access and refresh tokens are encrypted independently with AES-256-GCM. The 32-byte master key comes only from `TIKTOK_TOKEN_ENCRYPTION_KEY`; PostgreSQL stores versioned IV/tag/ciphertext envelopes. Refresh occurs before access-token expiry using a configurable margin and a PostgreSQL advisory lock. A failed refresh rolls back token rotation, records a redacted failure, marks reauthorization required, and never falls back indefinitely to stale tokens.
+A valid provider response that explicitly rejects refresh transitions to `FAILED`, preserves the previous token pair, records a redacted error, and blocks automatic retry. A network loss, timeout, unreadable or malformed response, expired lease, or successful rotation that cannot be persisted transitions to `OUTCOME_UNCERTAIN`; local access and refresh tokens and expiries are cleared, retry with the old refresh token is blocked, and seller reauthorization is required.
 
-Normal API responses expose token expiry, granted scopes, health, shop identity, refresh counts, request IDs, and errors—but never access token, refresh token, app secret, authorization code, encryption key, ciphertext, or shop cipher.
+Normal API responses expose health metadata but never access tokens, refresh tokens, app secrets, authorization codes, encryption keys, ciphertext, or shop cipher. TikTok credentials are supplied only to the API container; worker and web containers do not receive them.
 
-## History synchronization
+## History synchronization and readiness
 
-Conversation pages and every message page are processed idempotently. The sync persists the conversation page token, conversation index, and message page token after each unit of work. A crash resumes the same run. Provider message IDs deduplicate imports; creator eligibility locks protect contact-state rebuilds. Both inbound and outbound messages are stored, while only confirmed outbound history increments contact/cooldown state. Readiness becomes complete only after all advertised conversation and message pagination is exhausted successfully; partial and failed runs remain blocked.
+Conversation and message pages are processed idempotently. The sync persists the conversation page token, conversation index, and message page token after each unit of work, so a crash resumes the same run. Provider message IDs deduplicate imports. Both inbound and outbound messages are stored; only confirmed outbound history increments contact/cooldown state.
 
-The current conversation/message references do not document a time-range filter or message ordering guarantee. The implementation therefore does not invent a newest-first early-stop rule. Later syncs are idempotent but may revisit provider pages. A truly bounded incremental optimization remains dependent on TikTok documenting an ordering/cursor contract; completeness is favored over an unsafe assumption.
+Pagination completeness and identity completeness are separate. Discovery analysis requires a complete, recent pagination run. Future outbound readiness additionally requires trusted exact Marketplace identity coverage, with no unresolved historical contacts or current import conflicts. Partial and failed pagination stays blocked. The provider does not document a safe time-range or ordering contract, so later syncs may revisit pages rather than assume an unsafe newest-first cutoff.
 
-## Local configuration and validation
+## Local configuration and controlled validation
 
-Set secrets only in the server environment, never in Git or browser configuration:
+Set secrets only in the API/server environment, never in Git, browser configuration, worker, or web:
 
 ```text
 APP_MODE=read_only
@@ -74,6 +67,6 @@ TIKTOK_TOKEN_ENCRYPTION_KEY=<base64 or 64-hex characters encoding 32 random byte
 TIKTOK_REDIRECT_URI=http://127.0.0.1:4000/api/v1/integrations/tiktok/callback
 ```
 
-Configure the exact redirect URI and required scopes in Partner Center. Start the application, open Integration & safety, authorize the seller, inspect the authorized shops, and explicitly select the Indonesian shop. If configuration is absent, read-only mode starts as `READ_ONLY_NOT_CONFIGURED`.
+Configure the exact redirect URI and scopes in Partner Center, authorize the seller, inspect authorized shops, and explicitly select the Indonesian shop. Without credentials, read-only mode starts as `READ_ONLY_NOT_CONFIGURED`.
 
-Real-world validation, when credentials are locally available, must progress through authorized-shop GET, a tiny creator search, one performance GET, one conversation page, one message page, resumable backfill, sample comparison, and campaign preview. Do not call a mutation endpoint.
+Controlled real validation may progress only through authorized-shop GET, a tiny creator search, one performance GET, one conversation page, one message page, resumable backfill, sample comparison, and campaign preview. Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.

@@ -334,11 +334,16 @@ export class HistoryService {
     const historicalContacts = await this.prisma.creatorShopContactState.findMany({
       where: { shopId: shop.id, contactCount: { gt: 0 } }, select: { contactCount: true, creator: { select: {
         creatorOpenId: true, creatorImId: true,
-        providerIdentities: { where: { provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED" }, select: { identifier: true } }
+        providerIdentities: { where: { provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED" }, select: { identifier: true, evidenceType: true } }
       } } }
     });
+    const trustedMarketplaceEvidence = new Set([
+      "MARKETPLACE_EXACT_FIELD", "CONVERSATION_EXACT_FIELD", "CONVERSATION_RETURNED_BOTH_IDENTIFIERS", "DOCUMENTED_PROVIDER_MAPPING"
+    ]);
     const marketplaceLinked = (item: (typeof historicalContacts)[number]) => Boolean(
-      item.creator.creatorOpenId && item.creator.providerIdentities.some((identity) => identity.identifier === item.creator.creatorOpenId)
+      item.creator.creatorOpenId && item.creator.providerIdentities.some((identity) =>
+        identity.identifier === item.creator.creatorOpenId && trustedMarketplaceEvidence.has(identity.evidenceType)
+      )
     );
     const totalHistoricalCreators = historicalContacts.length;
     const fullyLinkedHistoricalCreators = historicalContacts.filter(marketplaceLinked).length;

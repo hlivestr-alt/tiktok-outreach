@@ -36,7 +36,10 @@ export class TikTokSellerAuthClient {
     try { payload = await response.json() as JsonObject; }
     catch { throw new TikTokAuthorizationError("TOKEN_MALFORMED_RESPONSE", "TikTok token response was not valid JSON"); }
     const code = numeric(payload.code);
-    if (!response.ok || code !== 0) throw new TikTokAuthorizationError(`TIKTOK_TOKEN_${Number.isFinite(code) ? code : response.status}`, text(payload.message) ?? "TikTok token request failed");
+    if (!Number.isFinite(code) || (!response.ok && code === 0)) {
+      throw new TikTokAuthorizationError("TOKEN_MALFORMED_RESPONSE", "TikTok token response did not contain a trustworthy outcome");
+    }
+    if (code !== 0) throw new TikTokAuthorizationError(`TIKTOK_TOKEN_${code}`, text(payload.message) ?? "TikTok token request failed");
     const data = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data) ? payload.data as JsonObject : payload;
     const accessToken = text(data.access_token), refreshToken = text(data.refresh_token);
     const accessExpiry = numeric(data.access_token_expire_in), refreshExpiry = numeric(data.refresh_token_expire_in), userType = numeric(data.user_type);

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { PrismaClient } from "@affiliate/db";
+import { lockCreatorEligibility, PrismaClient } from "@affiliate/db";
 import { CreatorIdentityResolver } from "./creator-identity-resolver.service";
 import { HistoryService } from "../history/history.service";
 
@@ -74,6 +74,38 @@ describe.sequential("creator provider identity reconciliation", () => {
     })).rejects.toThrow(/does not match/i);
   });
 
+  it("takes the shared eligibility lock before exact-identity reassignment", async () => {
+    const resolver = new CreatorIdentityResolver(prisma as any);
+    const selectedShop = await shop();
+    const imId = stamp(); const openId = stamp();
+    const source = await resolver.ensureConversationCreator({ id: stamp(), creatorImId: imId });
+    const target = await resolver.ensureMarketplaceCreator({
+      creatorOpenId: openId, categoryIds: [], followerCount: null, gmv: null, unitsSold: null,
+      avgVideoViews: null, avgLiveViewers: null, selectionRegion: "ID", discoveryOrdinal: 0
+    });
+    await prisma.creatorShopContactState.create({ data: { shopId: selectedShop.id, creatorId: source.id } });
+    let release!: () => void;
+    let locked!: () => void;
+    const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+    const lockedSignal = new Promise<void>((resolve) => { locked = resolve; });
+    const blocker = prisma.$transaction(async (tx) => {
+      await lockCreatorEligibility(tx, selectedShop.id, [source.id]);
+      locked();
+      await releaseSignal;
+    });
+    await lockedSignal;
+    let settled = false;
+    const linking = resolver.linkExactProviderIdentities(source.id, target.id, {
+      evidenceType: "DOCUMENTED_PROVIDER_MAPPING", creatorImId: imId, creatorOpenId: openId, mappingReference: "lock-test"
+    }).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const settledBeforeRelease = settled;
+    release();
+    await blocker;
+    expect(settledBeforeRelease).toBe(false);
+    await expect(linking).resolves.toMatchObject({ id: target.id, creatorImId: imId });
+  });
+
   it("rejects attempts to overwrite an existing exact identifier link", async () => {
     const resolver = new CreatorIdentityResolver(prisma as any);
     const openId = stamp(); const userId = stamp(); const imId = stamp();
@@ -88,6 +120,51 @@ describe.sequential("creator provider identity reconciliation", () => {
 });
 
 describe.sequential("identity-aware history readiness", () => {
+  it("does not trust a migrated Open ID until Marketplace observes the same exact identity", async () => {
+    const selectedShop = await shop();
+    const openId = stamp();
+    const creator = await prisma.creator.create({ data: { creatorOpenId: openId, selectionRegion: "ID" } });
+    await prisma.creatorProviderIdentity.create({ data: {
+      creatorId: creator.id, identityType: "TIKTOK_CREATOR_OPEN_ID", identifier: openId,
+      linkState: "VERIFIED", evidenceType: "MIGRATED_EXACT_FIELD"
+    } });
+    await prisma.creatorShopContactState.create({ data: {
+      shopId: selectedShop.id, creatorId: creator.id, contactCount: 1,
+      firstContactedAt: new Date(), lastContactedAt: new Date()
+    } });
+    await prisma.contactHistorySyncRun.create({ data: {
+      shopId: selectedShop.id, source: "TEST_MIGRATED", state: "COMPLETE", completedAt: new Date(), conversationsScanned: 1, messagesImported: 1
+    } });
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any);
+    expect(await service.readiness()).toMatchObject({ identityReconciliationComplete: false, futureOutboundSafe: false });
+
+    const resolver = new CreatorIdentityResolver(prisma as any);
+    await resolver.ensureMarketplaceCreator({
+      creatorOpenId: openId, categoryIds: [], followerCount: null, gmv: null, unitsSold: null,
+      avgVideoViews: null, avgLiveViewers: null, selectionRegion: "ID", discoveryOrdinal: 0
+    });
+    expect(await prisma.creatorProviderIdentity.findUniqueOrThrow({ where: {
+      provider_identityType_identifier: { provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", identifier: openId }
+    } })).toMatchObject({ linkState: "VERIFIED", evidenceType: "MARKETPLACE_EXACT_FIELD" });
+    expect(await service.readiness()).toMatchObject({ identityReconciliationComplete: true, futureOutboundSafe: true });
+  });
+
+  it("does not claim provider verification for a CSV-only Creator Open ID", async () => {
+    const selectedShop = await shop();
+    const openId = stamp();
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any);
+    await service.importCsv({
+      sourceName: `${stamp()}.csv`,
+      csv: `source_system,source_record_id,creator_open_id,contacted_at,send_status\nlegacy,${stamp()},${openId},2026-08-01T00:00:00Z,SENT\n`
+    });
+    const creator = await prisma.creator.findUniqueOrThrow({ where: { creatorOpenId: openId } });
+    expect(await prisma.creatorProviderIdentity.count({ where: { creatorId: creator.id } })).toBe(0);
+    await prisma.contactHistorySyncRun.create({ data: {
+      shopId: selectedShop.id, source: "TEST_CSV_ONLY", state: "COMPLETE", completedAt: new Date(), conversationsScanned: 1, messagesImported: 1
+    } });
+    expect(await service.readiness()).toMatchObject({ identityReconciliationComplete: false, futureOutboundSafe: false });
+  });
+
   it("does not report complete pagination with unresolved outbound history as future outbound-safe", async () => {
     const selectedShop = await shop();
     const resolver = new CreatorIdentityResolver(prisma as any);
