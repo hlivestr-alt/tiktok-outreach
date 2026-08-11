@@ -65,6 +65,7 @@ export class HistoryService {
   }
 
   async syncMockHistory(adapter?: TikTokReadAdapter, source = config.APP_MODE === "mock" ? "MOCK_TIKTOK" : "REAL_TIKTOK_READ_ONLY", validationMode = false) {
+    if (validationMode) return this.validateConversationList(adapter);
     const effectiveAdapter = adapter ?? await this.tiktok.adapter({ validationMode });
     const shop = await this.tiktok.activeShop();
     const resumable = await this.prisma.contactHistorySyncRun.findFirst({
@@ -391,5 +392,26 @@ export class HistoryService {
       ...(outboundContactsOnUnresolvedIdentities ? [`${outboundContactsOnUnresolvedIdentities} outbound historical contacts are attached to unresolved identities`] : []),
       config.APP_MODE === "mock" ? "Only mock outbound dispatch is available" : "Real TikTok outbound is physically unavailable in Phase 2A"
     ] };
+  }
+
+  async validateConversationList(adapter?: TikTokReadAdapter) {
+    const effectiveAdapter = adapter ?? await this.tiktok.adapter({ validationMode: true });
+    const page = await effectiveAdapter.listConversations({ pageSize: 50 });
+    return {
+      validationMode: true, providerCallCeiling: 1, providerPagesInspected: 1,
+      intentionallyTruncated: true, providerHasMore: page.hasMore,
+      nextPageToken: page.nextPageToken, conversations: page.items
+    };
+  }
+
+  async validateMessageList(conversationId: string, creatorImId?: string, adapter?: TikTokReadAdapter) {
+    if (!conversationId?.trim()) throw new BadRequestException("A specific conversationId is required for message validation");
+    const effectiveAdapter = adapter ?? await this.tiktok.adapter({ validationMode: true });
+    const page = await effectiveAdapter.listMessages(conversationId, { pageSize: 20, creatorImId });
+    return {
+      validationMode: true, providerCallCeiling: 1, providerPagesInspected: 1,
+      intentionallyTruncated: true, providerHasMore: page.hasMore,
+      nextPageToken: page.nextPageToken, conversationId, messages: page.items
+    };
   }
 }

@@ -10,6 +10,7 @@ let serial = 0;
 let nowMs = Date.now();
 const scope = (suffix = "shop") => `${prefix}_${suffix}_${serial++}`;
 const response = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+const rawResponse = (body: string, status: number, headers: Record<string, string> = {}) => new Response(body, { status, headers });
 
 function governor() {
   return new TikTokReadGovernor(prisma as any, { now: () => new Date(nowMs), random: () => 0, spacingMs: 0, leaseMs: 30_000 });
@@ -83,6 +84,29 @@ describe.sequential("durable TikTok read governor", () => {
     const { row } = await throttleOnce(scope(), "30");
     expect(row.retryAfterMs).toBe(30_000);
     expect(row.nextPermittedAt!.getTime()).toBeGreaterThanOrEqual(nowMs + 30_000);
+  });
+
+  it("persists a throttle for HTTP 429 with malformed JSON and never exposes the body", async () => {
+    const shop = scope();
+    const fetcher = vi.fn(async () => rawResponse("raw-secret-truncated{", 429, { "retry-after": "45", "x-tts-request-id": "header-request-id" }));
+    let caught: unknown;
+    try { await request(client(fetcher as typeof fetch), shop); } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ kind: "RATE_LIMIT", httpStatus: 429, providerCode: undefined, requestId: "header-request-id", retryAfterMs: 45_000 });
+    expect(JSON.stringify(caught)).not.toContain("raw-secret-truncated");
+    const row = await prisma.providerReadThrottle.findUniqueOrThrow({ where: { provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: shop, operation: "SEARCH_CREATORS" } } });
+    expect(row).toMatchObject({ consecutiveThrottleCount: 1, retryAfterMs: 45_000, lastProviderRequestId: "header-request-id", leaseId: null });
+    expect(row.nextPermittedAt!.getTime()).toBeGreaterThanOrEqual(nowMs + 45_000);
+    expect(JSON.stringify(row)).not.toContain("raw-secret-truncated");
+    await expect(request(client(fetcher as typeof fetch), shop)).rejects.toMatchObject({ kind: "RATE_LIMIT", locallyBlocked: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a throttle for HTTP 429 with an empty body", async () => {
+    const shop = scope();
+    const fetcher = vi.fn(async () => rawResponse("", 429));
+    await expect(request(client(fetcher as typeof fetch), shop)).rejects.toMatchObject({ kind: "RATE_LIMIT", httpStatus: 429 });
+    expect(await prisma.providerReadThrottle.findUniqueOrThrow({ where: { provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: shop, operation: "SEARCH_CREATORS" } } }))
+      .toMatchObject({ consecutiveThrottleCount: 1, leaseId: null });
   });
 
   it("increases exponential cooldown after repeated 429s", async () => {

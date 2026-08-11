@@ -103,7 +103,7 @@ export class TikTokIntegrationService {
     this.credentials();
     return new RealTikTokReadOnlyAffiliateAdapter({
       http: this.http(options.validationMode === true),
-      accessToken: () => this.validAccessToken(),
+      accessToken: () => this.validAccessToken(options.validationMode === true),
       shopCipher: async () => (await this.selectedShop()).shopCipher!,
       shopScope: async () => (await this.selectedShop()).id,
       authorizationScope: this.authorizationScope()
@@ -229,11 +229,25 @@ export class TikTokIntegrationService {
     return shop;
   }
 
-  async validAccessToken(): Promise<string> {
+  async validAccessToken(validationMode = false): Promise<string> {
     const shop = await this.selectedShop();
     const credentials = this.credentials();
     const margin = config.TIKTOK_TOKEN_REFRESH_MARGIN_SECONDS * 1000;
     const connection = await this.prisma.integrationConnection.findUniqueOrThrow({ where: { shopId_provider: { shopId: shop.id, provider: "TIKTOK_SHOP" } } });
+    if (validationMode) {
+      const safelyUsable = connection.status === "HEALTHY"
+        && connection.refreshState === "IDLE"
+        && Boolean(connection.accessTokenCiphertext)
+        && Boolean(connection.accessTokenExpiresAt)
+        && connection.accessTokenExpiresAt!.getTime() > Date.now() + margin;
+      if (!safelyUsable) {
+        throw new ServiceUnavailableException("CONTROLLED_VALIDATION_TOKEN_NOT_READY: the current TikTok access token is not safely usable without refresh; reauthorize or manually prepare a healthy token before validation");
+      }
+      try { return decryptTikTokToken(connection.accessTokenCiphertext!, credentials.encryptionKey); }
+      catch {
+        throw new ServiceUnavailableException("CONTROLLED_VALIDATION_TOKEN_NOT_READY: the current TikTok access token is unreadable; reauthorization is required before validation");
+      }
+    }
     if (connection.refreshState === "IN_PROGRESS") return this.waitForRefresh(connection.id, connection.tokenVersion);
     if (connection.refreshState === "OUTCOME_UNCERTAIN" || connection.status !== "HEALTHY") throw new ServiceUnavailableException("TikTok read capabilities are not healthy; reauthorization is required");
     if (!connection.accessTokenCiphertext || !connection.accessTokenExpiresAt) throw new ServiceUnavailableException("TikTok access token is unavailable; reauthorization required");

@@ -95,14 +95,19 @@ export class OutreachService {
     let pageToken: string | undefined;
     let searchKey: string | undefined;
     let hasMore = true;
+    let providerHasMore = false;
+    let providerPagesInspected = 0;
     const adapter = await this.tiktok.adapter({ validationMode });
     while (hasMore && creators.length < campaign.candidateLimit) {
       const page = await adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
+      providerPagesInspected++;
       const remaining = campaign.candidateLimit - creators.length;
       creators.push(...page.creators.slice(0, remaining).map((creator, index) => ({ ...creator, discoveryOrdinal: creators.length + index })));
       pageToken = page.nextPageToken;
       searchKey = page.searchKey;
       hasMore = page.hasMore;
+      providerHasMore = page.hasMore;
+      if (validationMode) break;
     }
     const openIds = [...new Set(creators.map((creator) => creator.creatorOpenId))];
     const existingCreators = await this.prisma.creator.findMany({ where: { creatorOpenId: { in: openIds } }, include: { contacts: { where: { shopId: campaign.shopId } } } });
@@ -120,7 +125,7 @@ export class OutreachService {
       activeReservations: new Set(reservations.flatMap((reservation) => reservation.creator.creatorOpenId ? [reservation.creator.creatorOpenId] : [])),
       requested: campaign.targetCount, cooldownDays: campaign.cooldownDays,
       rankingMetric: campaign.rankingMetric as RankingMetric, rankingDirection: campaign.rankingDirection as "ASC" | "DESC",
-      now: new Date(), truncated: hasMore
+      now: new Date(), truncated: validationMode || hasMore
     });
     const unresolvedHistory = await this.prisma.creatorShopContactState.aggregate({
       where: { shopId: campaign.shopId, contactCount: { gt: 0 }, creator: { creatorOpenId: null } },
@@ -130,7 +135,13 @@ export class OutreachService {
       ...preview.summary,
       historyIdentityCoverageIncomplete: unresolvedHistory._count._all > 0,
       unresolvedHistoricalCreators: unresolvedHistory._count._all,
-      unresolvedHistoricalOutboundContacts: unresolvedHistory._sum.contactCount ?? 0
+      unresolvedHistoricalOutboundContacts: unresolvedHistory._sum.contactCount ?? 0,
+      ...(validationMode ? {
+        validation: {
+          controlled: true, intentionallyTruncated: true, discoveryComplete: false,
+          providerHasMore, providerPagesInspected, providerCallCeiling: 1
+        }
+      } : {})
     };
 
     const canonical = new Map<string, (typeof preview.creators)[number]>();
@@ -158,7 +169,7 @@ export class OutreachService {
       }
       await tx.campaign.update({ where: { id }, data: {
         state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue, searchKey, nextPageToken: pageToken,
-        truncated: hasMore, version: { increment: 1 }
+        truncated: validationMode || hasMore, version: { increment: 1 }
       }});
       await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: summary as unknown as Prisma.InputJsonValue } });
     });

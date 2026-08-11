@@ -34,9 +34,9 @@ Every real TikTok read passes through a PostgreSQL-backed governor keyed by prov
 
 Each row stores only request/success/throttle times, consecutive throttle count, next permitted time, optional sanitized Retry-After milliseconds, most recent provider request ID, pacing time, and a short-lived single-flight lease. It never stores tokens, App Secret, App Key, shop cipher, headers, or raw responses.
 
-Reads are smoothly spaced and a database compare-and-set lease prevents simultaneous approved reads for the same shop across processes, while cooldown history remains separate by operation. An HTTP `429` or provider code `36009002` immediately stops the request and pagination path, persists exponential backoff with jitter and a cap, and performs no immediate retry. A valid `Retry-After` can lengthen the cooldown. Successful calls clear the consecutive throttle count and provider cooldown. The API returns a redacted `TIKTOK_READ_THROTTLED` result with the next safe attempt time; locally blocked attempts perform zero provider HTTP calls.
+Reads are smoothly spaced and a database compare-and-set lease prevents simultaneous approved reads for the same shop across processes, while cooldown history remains separate by operation. An HTTP `429` or provider code `36009002` immediately stops the request and pagination path, persists exponential backoff with jitter and a cap, and performs no immediate retry. HTTP status `429` is sufficient to activate throttling even when TikTok or an intermediary returns empty, truncated, malformed, or non-JSON content. A safe request ID and valid `Retry-After` header are retained when present; unreadable response bodies are never persisted or returned. A valid `Retry-After` can lengthen the cooldown. Successful calls clear the consecutive throttle count and provider cooldown. The API returns a redacted `TIKTOK_READ_THROTTLED` result with the next safe attempt time; locally blocked attempts perform zero provider HTTP calls.
 
-Normal reads retain bounded retries for temporary/network failures only. Controlled validation mode disables every hidden retry, so one adapter request produces at most one physical provider request. Provider throttles are never retried immediately in either mode.
+Normal reads retain bounded retries for temporary/network failures only. Controlled validation mode applies the stronger invariant **one requested provider read = at most one physical TikTok API request**. It disables HTTP retries, pagination beyond the validation page, automatic token refresh, refresh-time Authorized Shops revalidation, and hidden secondary provider calls. The validation HTTP client also enforces a one-request action budget as a final backstop. Provider throttles are never retried immediately in either mode.
 
 ## Search filters and GMV
 
@@ -89,4 +89,17 @@ Configure the exact redirect URI and scopes in Partner Center, authorize the sel
 
 These four values must belong to the dedicated Outreach app: `TIKTOK_APP_KEY`, `TIKTOK_APP_SECRET`, `TIKTOK_SERVICE_ID`, and `TIKTOK_TOKEN_ENCRYPTION_KEY`. The encryption key protects Outreach token storage and should be newly generated and retained securely; it is not a TikTok-issued credential. The existing TikTok Orders application, its credentials, schedules, n8n workflows, and rate-limit behavior are out of scope and must remain unchanged.
 
-Controlled real validation may progress only through authorized-shop GET, a tiny creator search, one performance GET, one conversation page, one message page, resumable backfill, sample comparison, and campaign preview. Use the adapter/service `validationMode` option; creator-performance, discovery-run, and history-sync endpoints accept `?validationMode=true` to disable hidden retries. Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.
+Controlled real validation may progress only through separately requested read actions with these ceilings:
+
+| Controlled action | API entry point | Physical TikTok request ceiling |
+| --- | --- | --- |
+| Marketplace discovery | `POST /api/v1/outreach/campaigns/:id/discovery-runs?validationMode=true` | One Marketplace Search page; page 2 is never fetched and the preview is always marked validation-truncated/incomplete. |
+| Creator performance | `GET /api/v1/integrations/tiktok/creators/:creatorOpenId/performance?validationMode=true` | One Creator Performance read. |
+| Conversation list | `POST /api/v1/contact-history/sync-runs?validationMode=true` or `POST /api/v1/contact-history/validation/conversations` | One Conversation List page; no conversations or messages are iterated. |
+| Selected conversation messages | `POST /api/v1/contact-history/validation/conversations/:conversationId/messages` | One Message List page for the explicitly selected conversation. |
+
+The conversation and message steps are intentionally separate. Validation history is not a resumable backfill, does not call the unread-message workflow, and reports whether the provider has more pages. Normal non-validation history sync retains its resumable multi-page behavior.
+
+Before any validation read, the service checks the selected connection and access-token expiry only from local storage. The connection must be healthy and idle, and its decryptable access token must remain valid beyond the configured automatic refresh margin. Missing, expired, unhealthy, unreadable, or near-expiry tokens fail locally with a controlled-validation preparation error. That failure performs no token refresh, Authorized Shops validation, or requested provider read; the operator must reauthorize or explicitly prepare the connection outside the validation action.
+
+Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.

@@ -66,6 +66,42 @@ function successfulFetch(shopId: string, scopes = ["seller.creator_marketplace.r
 }
 
 describe.sequential("persisted TikTok refresh lease", () => {
+  it("uses a locally healthy validation token without refresh or Authorized Shops calls", async () => {
+    const seed = await connection({ accessTokenExpiresAt: new Date(Date.now() + (config.TIKTOK_TOKEN_REFRESH_MARGIN_SECONDS * 1000) + 60_000) });
+    await prisma.shop.updateMany({ where: { id: { in: [...shopIds] } }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: seed.shop.id }, data: { selectedForReadOnly: true } });
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.validAccessToken(true)).resolves.toBe("known-access");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("fails locally for near-expiry and expired validation tokens without refresh or Authorized Shops calls", async () => {
+    const nearExpiry = await connection({ accessTokenExpiresAt: new Date(Date.now() + (config.TIKTOK_TOKEN_REFRESH_MARGIN_SECONDS * 1000) - 1) });
+    const expired = await connection({ accessTokenExpiresAt: new Date(Date.now() - 1) });
+    await prisma.shop.updateMany({ where: { id: { in: [...shopIds] } }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: nearExpiry.shop.id }, data: { selectedForReadOnly: true } });
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.validAccessToken(true)).rejects.toThrow(/CONTROLLED_VALIDATION_TOKEN_NOT_READY/);
+    await prisma.shop.update({ where: { id: nearExpiry.shop.id }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: expired.shop.id }, data: { selectedForReadOnly: true } });
+    await expect(service.validAccessToken(true)).rejects.toThrow(/CONTROLLED_VALIDATION_TOKEN_NOT_READY/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("retains normal automatic refresh and refresh-time Authorized Shops validation", async () => {
+    const seed = await connection();
+    await prisma.shop.updateMany({ where: { id: { in: [...shopIds] } }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: seed.shop.id }, data: { selectedForReadOnly: true } });
+    const fetcher = successfulFetch(seed.shop.externalShopId!);
+    vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    await expect(service.validAccessToken()).resolves.toBe("rotated-access");
+    const paths = fetcher.mock.calls.map(([value]) => new URL(String(value)).pathname);
+    expect(paths).toEqual(["/api/v2/token/refresh", "/authorization/202309/shops"]);
+  });
+
   it("serializes concurrent refresh calls and performs one token rotation request", async () => {
     const seed = await connection();
     const fetcher = successfulFetch(seed.shop.externalShopId!, undefined, 75);

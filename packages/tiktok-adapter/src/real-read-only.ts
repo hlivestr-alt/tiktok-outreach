@@ -91,6 +91,8 @@ function errorKind(status: number, code?: number, message = ""): TikTokErrorKind
 }
 
 export class TikTokReadOnlyHttpClient {
+  private validationActionClaimed = false;
+
   constructor(private readonly options: {
     baseUrl: string; appKey: string; appSecret: string; fetch?: FetchLike; now?: () => number;
     sleep?: (ms: number) => Promise<void>; random?: () => number; diagnostics?: (event: TikTokDiagnostics) => void;
@@ -102,6 +104,12 @@ export class TikTokReadOnlyHttpClient {
     accessToken: string; query?: Record<string, string | number | boolean | undefined>; body?: JsonObject; shopScope?: string;
   }): Promise<T> {
     assertAllowedTikTokReadRequest(input.operation, input.method, input.path);
+    if (this.options.validationMode) {
+      if (this.validationActionClaimed) {
+        throw new TikTokApiError("PROVIDER", input.operation, undefined, undefined, undefined, "Controlled validation permits at most one physical TikTok API request per action");
+      }
+      this.validationActionClaimed = true;
+    }
     const lease = this.options.governor
       ? await this.options.governor.acquire({ provider: "TIKTOK_SHOP", shopScope: input.shopScope ?? "AUTHORIZATION", operation: input.operation })
       : undefined;
@@ -128,10 +136,27 @@ export class TikTokReadOnlyHttpClient {
       }
       const requestIdHeader = response.headers.get("x-tts-request-id") ?? undefined;
       const retryAfter = retryAfterMs(response.headers.get("retry-after"), now());
+      let decoded: unknown;
+      try { decoded = await response.json(); }
+      catch {
+        if (response.status === 429) {
+          this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, requestId: requestIdHeader, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
+          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter }) : undefined;
+          finalized = Boolean(lease);
+          throw new TikTokApiError("RATE_LIMIT", input.operation, response.status, undefined, requestIdHeader, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
+        }
+        throw new TikTokApiError("MALFORMED_RESPONSE", input.operation, response.status, undefined, requestIdHeader, "TikTok response was not valid JSON");
+      }
       let payload: JsonObject;
-      try { payload = object(await response.json(), input.operation); }
-      catch (cause) {
-        throw cause instanceof TikTokApiError ? cause : new TikTokApiError("MALFORMED_RESPONSE", input.operation, response.status, undefined, requestIdHeader, "TikTok response was not valid JSON");
+      try { payload = object(decoded, input.operation); }
+      catch {
+        if (response.status === 429) {
+          this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, requestId: requestIdHeader, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
+          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter }) : undefined;
+          finalized = Boolean(lease);
+          throw new TikTokApiError("RATE_LIMIT", input.operation, response.status, undefined, requestIdHeader, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
+        }
+        throw new TikTokApiError("MALFORMED_RESPONSE", input.operation, response.status, undefined, requestIdHeader, `${input.operation}: expected object`);
       }
       const code = number(payload.code) ?? undefined;
       const requestId = string(payload.request_id) ?? requestIdHeader;

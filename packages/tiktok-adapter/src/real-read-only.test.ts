@@ -93,6 +93,42 @@ describe("real read-only adapter", () => {
     await expect(cipher.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" })).rejects.toMatchObject({ kind: "INVALID_SHOP_CIPHER" });
   });
 
+  it("enforces one physical request across a controlled-validation adapter", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: {
+      search_key: "validation-key", next_page_token: "page-2",
+      creators: [{ creator_open_id: "creator-open-1", selection_region: "ID", category_ids: [] }]
+    } }));
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch, validationMode: true }),
+      accessToken: async () => "token", shopCipher: async () => "cipher"
+    });
+    await expect(adapter.searchCreators({}, { pageSize: 20 })).resolves.toMatchObject({ hasMore: true, nextPageToken: "page-2" });
+    await expect(adapter.searchCreators({}, { pageSize: 20, pageToken: "page-2", searchKey: "validation-key" })).rejects.toThrow(/at most one physical/i);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses one physical request for controlled creator-performance validation", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: { creator: {
+      creator_open_id: "creator-open-1", selection_region: "ID", category_ids: []
+    } } }));
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch, validationMode: true }),
+      accessToken: async () => "token", shopCipher: async () => "cipher"
+    });
+    await expect(adapter.getCreatorPerformance("creator-open-1")).resolves.toMatchObject({ creatorOpenId: "creator-open-1" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps malformed non-429 responses out of the throttle classification", async () => {
+    const http = new TikTokReadOnlyHttpClient({
+      baseUrl: "https://example.test", appKey: "a", appSecret: "s",
+      fetch: (async () => new Response("truncated{", { status: 500 })) as typeof fetch,
+      validationMode: true
+    });
+    await expect(http.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" }))
+      .rejects.toMatchObject({ kind: "MALFORMED_RESPONSE", httpStatus: 500 });
+  });
+
   it("fails closed before fetch for every known mutation path", async () => {
     const fetcher = vi.fn();
     const http = new TikTokReadOnlyHttpClient({ baseUrl: "https://open-api.tiktokglobalshop.com", appKey: "app", appSecret: "secret", fetch: fetcher as typeof fetch });
