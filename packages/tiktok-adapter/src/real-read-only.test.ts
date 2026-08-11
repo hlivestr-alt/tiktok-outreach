@@ -80,13 +80,13 @@ describe("real read-only adapter", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("maps provider errors and retries only bounded read requests", async () => {
+  it("maps provider errors and never immediately retries a provider throttle", async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ code: 36009002, message: "too many", request_id: "r-rate" }, 429, { "retry-after": "0" }))
       .mockResolvedValueOnce(jsonResponse({ code: 0, data: { shops: [] }, request_id: "r-ok" }));
     const http = new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch, sleep: async () => undefined, random: () => 0 });
-    await expect(http.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" })).resolves.toMatchObject({ code: 0 });
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    await expect(http.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" })).rejects.toMatchObject({ kind: "RATE_LIMIT", providerCode: 36009002 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
     const permission = new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: (async () => jsonResponse({ code: 105005, message: "scope", request_id: "r" }, 403)) as typeof fetch });
     await expect(permission.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" })).rejects.toMatchObject({ kind: "PERMISSION", providerCode: 105005 });
     const cipher = new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: (async () => jsonResponse({ code: 106013, message: "shop_cipher is required", request_id: "r" }, 400)) as typeof fetch });

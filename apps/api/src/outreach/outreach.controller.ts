@@ -9,7 +9,7 @@ export class OutreachController {
   constructor(private readonly service: OutreachService) {}
   @Get() list() { return this.service.list(); }
   @Post() create(@Body() body: CampaignCreateInput) { return this.service.create(body); }
-  @Post(":id/discovery-runs") discover(@Param("id") id: string) { return this.service.discover(id); }
+  @Post(":id/discovery-runs") discover(@Param("id") id: string, @Query("validationMode") validationMode?: string) { return this.service.discover(id, validationMode === "true"); }
   @Get(":id/preview") preview(@Param("id") id: string) { return this.service.preview(id); }
   @Get(":id/recipients") recipients(@Param("id") id: string, @Query("view") view?: string) { return this.service.recipients(id, view); }
   @Get(":id") get(@Param("id") id: string) { return this.service.get(id); }
@@ -18,4 +18,3 @@ export class OutreachController {
   @Post(":id/pause") pause(@Param("id") id: string) { return this.service.pause(id); }
   @Post(":id/resume") resume(@Param("id") id: string) { return this.service.resume(id); }
 }
-

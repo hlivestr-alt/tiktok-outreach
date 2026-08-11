@@ -64,8 +64,8 @@ export class HistoryService {
     });
   }
 
-  async syncMockHistory(adapter?: TikTokReadAdapter, source = config.APP_MODE === "mock" ? "MOCK_TIKTOK" : "REAL_TIKTOK_READ_ONLY") {
-    const effectiveAdapter = adapter ?? await this.tiktok.adapter();
+  async syncMockHistory(adapter?: TikTokReadAdapter, source = config.APP_MODE === "mock" ? "MOCK_TIKTOK" : "REAL_TIKTOK_READ_ONLY", validationMode = false) {
+    const effectiveAdapter = adapter ?? await this.tiktok.adapter({ validationMode });
     const shop = await this.tiktok.activeShop();
     const resumable = await this.prisma.contactHistorySyncRun.findFirst({
       where: { shopId: shop.id, source, state: { in: ["PARTIAL", "FAILED"] }, cursor: { not: Prisma.DbNull } },

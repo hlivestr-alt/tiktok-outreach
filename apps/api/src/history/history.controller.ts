@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post } from "@nestjs/common";
+import { Body, Controller, Get, Post, Query } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { HistoryService } from "./history.service";
 
@@ -7,7 +7,7 @@ import { HistoryService } from "./history.service";
 export class HistoryController {
   constructor(private readonly service: HistoryService) {}
   @Get() contacts() { return this.service.contacts(); }
-  @Post("sync-runs") sync() { return this.service.syncMockHistory(); }
+  @Post("sync-runs") sync(@Query("validationMode") validationMode?: string) { return this.service.syncMockHistory(undefined, undefined, validationMode === "true"); }
   @Post("imports") importCsv(@Body() body: { sourceName: string; csv: string }) { return this.service.importCsv(body); }
   @Get("readiness") readiness() { return this.service.readiness(); }
 }

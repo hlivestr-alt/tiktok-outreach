@@ -85,7 +85,7 @@ export class OutreachService {
     return campaign;
   }
 
-  async discover(id: string) {
+  async discover(id: string, validationMode = false) {
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
@@ -95,7 +95,7 @@ export class OutreachService {
     let pageToken: string | undefined;
     let searchKey: string | undefined;
     let hasMore = true;
-    const adapter = await this.tiktok.adapter();
+    const adapter = await this.tiktok.adapter({ validationMode });
     while (hasMore && creators.length < campaign.candidateLimit) {
       const page = await adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
       const remaining = campaign.candidateLimit - creators.length;

@@ -20,6 +20,24 @@ Official references: [authorization overview](https://partner.tiktokshop.com/doc
 
 TikTok currently requires the write-named `seller.affiliate_messages.write` scope for the two history GET operations. The scope does not authorize this application to send. Create Conversation, Send IM Message, Mark Conversation Read, targeted/open collaborations, invitations, and sample actions are absent from the allowlist; deny tests prove they fail before `fetch`. Get Latest Unread Messages is not called because its exact active version/path could not be verified.
 
+## Real validation findings and dedicated application
+
+Controlled production validation confirmed that seller authorization and Get Authorized Shops succeeded and returned the intended Indonesian shop. The `seller.creator_marketplace.read` scope was present, and Marketplace request construction and signing passed validation. Marketplace Search then returned repeated `429 / 36009002` responses. Investigation found that TikTok Outreach and the separately operated TikTok Orders/n8n stack were using the same TikTok App Key, while the Orders stack was actively issuing API requests. The observed rate-limit isolation was App × Authorized Shop.
+
+The production recommendation is therefore **one dedicated TikTok developer app for TikTok Outreach**, separate from TikTok Orders. A human operator must create and approve it in Partner Center, then authorize the same Indonesian shop to that dedicated app. Do not copy credentials from Orders, and do not create or invent credentials in application code.
+
+The `429` is not treated as evidence that endpoint, signing, or authorization semantics should change. TikTok quotas are dynamic; this application does not claim or hardcode a TikTok QPS limit.
+
+## Durable read governor
+
+Every real TikTok read passes through a PostgreSQL-backed governor keyed by provider, a safe local shop scope, and operation. Marketplace Search, Creator Performance, Conversation List, and Conversation Messages have distinct per-shop buckets; Authorized Shops uses a separate non-secret authorization bucket. Unrelated shops and operations do not block each other.
+
+Each row stores only request/success/throttle times, consecutive throttle count, next permitted time, optional sanitized Retry-After milliseconds, most recent provider request ID, pacing time, and a short-lived single-flight lease. It never stores tokens, App Secret, App Key, shop cipher, headers, or raw responses.
+
+Reads are smoothly spaced and a database compare-and-set lease prevents simultaneous approved reads for the same shop across processes, while cooldown history remains separate by operation. An HTTP `429` or provider code `36009002` immediately stops the request and pagination path, persists exponential backoff with jitter and a cap, and performs no immediate retry. A valid `Retry-After` can lengthen the cooldown. Successful calls clear the consecutive throttle count and provider cooldown. The API returns a redacted `TIKTOK_READ_THROTTLED` result with the next safe attempt time; locally blocked attempts perform zero provider HTTP calls.
+
+Normal reads retain bounded retries for temporary/network failures only. Controlled validation mode disables every hidden retry, so one adapter request produces at most one physical provider request. Provider throttles are never retried immediately in either mode.
+
 ## Search filters and GMV
 
 The provider documents fields including `keyword`, `category`, `gmv_ranges`, `units_sold_ranges`, `follower_demographics`, `content_performance`, `affiliate_data`, and country-dependent `advanced_filters`. This implementation sends only shapes it can map without guessing: keyword, category IDs, and exact documented discrete units-sold ranges.
@@ -69,4 +87,6 @@ TIKTOK_REDIRECT_URI=http://127.0.0.1:4000/api/v1/integrations/tiktok/callback
 
 Configure the exact redirect URI and scopes in Partner Center, authorize the seller, inspect authorized shops, and explicitly select the Indonesian shop. Without credentials, read-only mode starts as `READ_ONLY_NOT_CONFIGURED`.
 
-Controlled real validation may progress only through authorized-shop GET, a tiny creator search, one performance GET, one conversation page, one message page, resumable backfill, sample comparison, and campaign preview. Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.
+These four values must belong to the dedicated Outreach app: `TIKTOK_APP_KEY`, `TIKTOK_APP_SECRET`, `TIKTOK_SERVICE_ID`, and `TIKTOK_TOKEN_ENCRYPTION_KEY`. The encryption key protects Outreach token storage and should be newly generated and retained securely; it is not a TikTok-issued credential. The existing TikTok Orders application, its credentials, schedules, n8n workflows, and rate-limit behavior are out of scope and must remain unchanged.
+
+Controlled real validation may progress only through authorized-shop GET, a tiny creator search, one performance GET, one conversation page, one message page, resumable backfill, sample comparison, and campaign preview. Use the adapter/service `validationMode` option; creator-performance, discovery-run, and history-sync endpoints accept `?validationMode=true` to disable hidden retries. Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.

@@ -63,6 +63,8 @@ Selected fixture IDs occasionally return `DELIVERY_UNKNOWN`. They are never rese
 
 Set `APP_MODE=read_only` and provide the four server-only `TIKTOK_*` credential variables described in [TikTok integration](docs/tiktok-integration.md). Do not paste credentials into chat or commit them. Without credentials the app starts normally as `READ_ONLY_NOT_CONFIGURED`.
 
+Production should use one dedicated TikTok developer app for Outreach so its App × Shop API quota is isolated from order reporting and other systems. Provider throttles are persisted per shop and read operation; dynamic `429` cooldown uses exponential backoff with jitter rather than a hardcoded TikTok QPS claim.
+
 ## Current boundaries
 
 - Authentication and multi-user authorization are intentionally deferred; all services bind to localhost.

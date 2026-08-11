@@ -9,6 +9,7 @@ import {
 import { config, ensureMockShop, PrismaService } from "../shared";
 import { Prisma } from "@affiliate/db";
 import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
+import { TikTokReadGovernor } from "./tiktok-read-governor";
 
 const stateHash = (state: string) => createHash("sha256").update(state).digest("hex");
 export const REQUIRED_RETURNED_READ_SCOPES = ["seller.creator_marketplace.read", "seller.affiliate_messages.write"] as const;
@@ -60,7 +61,8 @@ export class TikTokIntegrationService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly identities: CreatorIdentityResolver = new CreatorIdentityResolver(prisma)
+    private readonly identities: CreatorIdentityResolver = new CreatorIdentityResolver(prisma),
+    private readonly governor: TikTokReadGovernor = new TikTokReadGovernor(prisma)
   ) {}
 
   private credentials() {
@@ -70,14 +72,25 @@ export class TikTokIntegrationService {
     return { appKey: config.TIKTOK_APP_KEY, appSecret: config.TIKTOK_APP_SECRET, encryptionKey: config.TIKTOK_TOKEN_ENCRYPTION_KEY, serviceId: config.TIKTOK_SERVICE_ID };
   }
 
-  private http(): TikTokReadOnlyHttpClient {
+  private authorizationScope(): string {
+    return `AUTHORIZATION:${stateHash(this.credentials().serviceId).slice(0, 16)}`;
+  }
+
+  private http(validationMode = false): TikTokReadOnlyHttpClient {
     const credentials = this.credentials();
-    return new TikTokReadOnlyHttpClient({ baseUrl: config.TIKTOK_API_BASE_URL, appKey: credentials.appKey, appSecret: credentials.appSecret, diagnostics: (event) => this.recordDiagnostics(event) });
+    return new TikTokReadOnlyHttpClient({
+      baseUrl: config.TIKTOK_API_BASE_URL,
+      appKey: credentials.appKey,
+      appSecret: credentials.appSecret,
+      diagnostics: (event) => this.recordDiagnostics(event),
+      governor: this.governor,
+      validationMode
+    });
   }
 
   private recordDiagnostics(event: TikTokDiagnostics): void {
-    if (!event.shopReference) return;
-    void this.prisma.shop.findFirst({ where: { OR: [{ id: event.shopReference }, { shopCipher: event.shopReference }] }, select: { id: true } }).then((shop) => {
+    if (!event.shopScope || event.shopScope.startsWith("AUTHORIZATION:")) return;
+    void this.prisma.shop.findUnique({ where: { id: event.shopScope }, select: { id: true } }).then((shop) => {
       if (!shop) return;
       return this.prisma.integrationConnection.updateMany({ where: { shopId: shop.id, provider: "TIKTOK_SHOP" }, data: event.providerCode === 0 ? {
         lastApiRequestAt: new Date(event.timestamp), lastRequestId: event.requestId, lastErrorCode: null
@@ -85,10 +98,16 @@ export class TikTokIntegrationService {
     }).catch(() => undefined);
   }
 
-  async adapter(): Promise<TikTokReadAdapter> {
+  async adapter(options: { validationMode?: boolean } = {}): Promise<TikTokReadAdapter> {
     if (config.APP_MODE === "mock") return this.mock;
     this.credentials();
-    return new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(), accessToken: () => this.validAccessToken(), shopCipher: async () => (await this.selectedShop()).shopCipher! });
+    return new RealTikTokReadOnlyAffiliateAdapter({
+      http: this.http(options.validationMode === true),
+      accessToken: () => this.validAccessToken(),
+      shopCipher: async () => (await this.selectedShop()).shopCipher!,
+      shopScope: async () => (await this.selectedShop()).id,
+      authorizationScope: this.authorizationScope()
+    });
   }
 
   async activeShop() {
@@ -123,7 +142,7 @@ export class TikTokIntegrationService {
     try { tokens = await auth.exchange(input.code!); }
     catch (error) { throw new BadRequestException(error instanceof Error ? error.message : "TikTok token exchange failed"); }
 
-    const transient = new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(), accessToken: async () => tokens.accessToken, shopCipher: async () => { throw new Error("Shop not selected"); } });
+    const transient = new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(true), accessToken: async () => tokens.accessToken, shopCipher: async () => { throw new Error("Shop not selected"); }, authorizationScope: this.authorizationScope() });
     const shops = await transient.getAuthorizedShops();
     if (!shops.length) throw new BadRequestException("TikTok returned no authorized shops");
     const indonesia = shops.filter((shop) => shop.region === "ID");
@@ -181,9 +200,9 @@ export class TikTokIntegrationService {
     return this.status();
   }
 
-  async creatorPerformance(creatorOpenId: string) {
+  async creatorPerformance(creatorOpenId: string, validationMode = false) {
     const shop = await this.activeShop();
-    const candidate = await (await this.adapter()).getCreatorPerformance(creatorOpenId);
+    const candidate = await (await this.adapter({ validationMode })).getCreatorPerformance(creatorOpenId);
     const creator = await this.identities.ensureMarketplaceCreator(candidate);
     const snapshot = await this.prisma.creatorMetricSnapshot.create({ data: {
       creatorId: creator.id, followerCount: candidate.followerCount, categoryIds: candidate.categoryIds,
@@ -340,7 +359,7 @@ export class TikTokIntegrationService {
     let authorizedShopVerified = false;
     let authorizedShopDetail = "Authorized-shop capability validation failed after refresh";
     try {
-      const validationAdapter = new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(), accessToken: async () => refreshed.accessToken, shopCipher: async () => { throw new Error("Shop cipher is not used for authorized-shop validation"); } });
+      const validationAdapter = new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(true), accessToken: async () => refreshed.accessToken, shopCipher: async () => { throw new Error("Shop cipher is not used for authorized-shop validation"); }, authorizationScope: this.authorizationScope() });
       const shops = await validationAdapter.getAuthorizedShops();
       authorizedShopVerified = Boolean(target.externalShopId && shops.some((shop) => shop.id === target.externalShopId));
       authorizedShopDetail = authorizedShopVerified
@@ -382,6 +401,10 @@ export class TikTokIntegrationService {
     const shops = await this.prisma.shop.findMany({ where: { connectionMode: "READ_ONLY" }, orderBy: { createdAt: "asc" } });
     const selected = shops.find((shop) => shop.selectedForReadOnly);
     const connection = selected ? await this.prisma.integrationConnection.findUnique({ where: { shopId_provider: { shopId: selected.id, provider: "TIKTOK_SHOP" } } }) : await this.prisma.integrationConnection.findFirst({ where: { mode: "READ_ONLY" }, orderBy: { updatedAt: "desc" } });
+    const marketplace = selected ? await this.prisma.providerReadThrottle.findUnique({ where: {
+      provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: selected.id, operation: "SEARCH_CREATORS" }
+    } }) : null;
+    const now = new Date();
     return {
       mode: "READ_ONLY", configurationState: this.configured ? connection ? connection.status : "AUTHORIZATION_REQUIRED" : "READ_ONLY_NOT_CONFIGURED",
       outboundEnabled: false, outboundProvider: "PHYSICALLY_UNAVAILABLE", readOnlyStatus: "REAL TIKTOK — READ ONLY",
@@ -390,7 +413,20 @@ export class TikTokIntegrationService {
         currency: selected.currency, currencyEvidence: selected.currency === "UNKNOWN" ? "NOT_RETURNED_BY_AUTHORIZED_SHOPS" : "LOCAL_CONFIGURATION"
       } : null,
       authorizedShops: shops.map((shop) => ({ id: shop.id, externalShopId: shop.externalShopId, name: shop.name, region: shop.region, code: shop.shopCode, selected: shop.selectedForReadOnly })),
-      connection: connection ? publicTikTokConnection(connection) : null
+      connection: connection ? publicTikTokConnection(connection) : null,
+      marketplaceRateLimit: marketplace ? {
+        lastSuccessAt: marketplace.lastSuccessAt,
+        last429At: marketplace.lastThrottleAt,
+        cooldownActive: Boolean(marketplace.nextPermittedAt && marketplace.nextPermittedAt > now),
+        consecutiveThrottles: marketplace.consecutiveThrottleCount,
+        nextSafeAttemptAt: marketplace.nextPermittedAt,
+        retryAfterMs: marketplace.retryAfterMs,
+        lastProviderRequestId: marketplace.lastProviderRequestId
+      } : {
+        lastSuccessAt: null, last429At: null, cooldownActive: false, consecutiveThrottles: 0,
+        nextSafeAttemptAt: null, retryAfterMs: null, lastProviderRequestId: null
+      },
+      dedicatedAppRecommendation: "Use a dedicated TikTok developer app for Outreach to isolate its App × Shop API quota from other systems such as order reporting."
     };
   }
 }

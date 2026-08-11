@@ -168,6 +168,32 @@ model TikTokAuthorizationState {
   @@index([expiresAt, consumedAt])
 }
 
+/// Durable provider pacing and single-flight state. shopScope contains only a
+/// local Shop.id or a non-secret authorization bucket; provider credentials,
+/// shop ciphers, headers, and response bodies must never be stored here.
+model ProviderReadThrottle {
+  id                       String   @id @default(uuid())
+  provider                 String
+  shopScope                String
+  operation                String
+  lastRequestAt            DateTime?
+  lastSuccessAt            DateTime?
+  lastThrottleAt           DateTime?
+  consecutiveThrottleCount Int      @default(0)
+  nextPermittedAt          DateTime?
+  spacingUntil             DateTime?
+  lastProviderRequestId    String?
+  retryAfterMs             Int?
+  leaseId                  String?
+  leaseExpiresAt           DateTime?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([provider, shopScope, operation])
+  @@index([provider, shopScope, nextPermittedAt])
+  @@index([leaseExpiresAt])
+}
+
 model Creator {
   id              String                    @id @default(uuid())
   creatorOpenId   String?                   @unique

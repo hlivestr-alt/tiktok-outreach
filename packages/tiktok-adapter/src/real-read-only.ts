@@ -37,14 +37,26 @@ export class TikTokApiError extends Error {
     readonly providerCode: number | undefined,
     readonly requestId: string | undefined,
     message: string,
-    readonly retryAfterMs?: number
+    readonly retryAfterMs?: number,
+    readonly nextPermittedAt?: Date,
+    readonly locallyBlocked: boolean = false
   ) { super(message); }
 }
 
 export type TikTokDiagnostics = {
   operation: string; httpStatus?: number; providerCode?: number; requestId?: string; durationMs: number;
-  retryCount: number; shopReference?: string; timestamp: string;
+  retryCount: number; shopScope?: string; timestamp: string;
 };
+
+export type TikTokReadLease = { provider: "TIKTOK_SHOP"; shopScope: string; operation: TikTokReadOperation; leaseOperation: string; leaseId: string };
+export type TikTokReadGovernorEvent = { requestId?: string; retryAfterMs?: number };
+export interface TikTokReadRequestGovernor {
+  acquire(input: Omit<TikTokReadLease, "leaseId" | "leaseOperation">): Promise<TikTokReadLease>;
+  requestStarted(lease: TikTokReadLease): Promise<void>;
+  succeeded(lease: TikTokReadLease, event: TikTokReadGovernorEvent): Promise<void>;
+  throttled(lease: TikTokReadLease, event: TikTokReadGovernorEvent): Promise<Date>;
+  release(lease: TikTokReadLease): Promise<void>;
+}
 
 type FetchLike = typeof fetch;
 type JsonObject = Record<string, unknown>;
@@ -56,6 +68,16 @@ const object = (value: unknown, label: string): JsonObject => {
 const string = (value: unknown): string | undefined => typeof value === "string" && value.length ? value : undefined;
 const number = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && value.trim() && Number.isFinite(Number(value)) ? Number(value) : null;
 const array = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+
+function retryAfterMs(value: string | null, now: number): number | undefined {
+  if (!value?.trim()) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const milliseconds = Number(value) * 1000;
+    return Number.isFinite(milliseconds) && milliseconds >= 0 ? milliseconds : undefined;
+  }
+  const date = Date.parse(value);
+  return Number.isFinite(date) && date > now ? date - now : undefined;
+}
 
 function errorKind(status: number, code?: number, message = ""): TikTokErrorKind {
   if (status === 429 || code === 45101004 || code === 36009002) return "RATE_LIMIT";
@@ -72,20 +94,26 @@ export class TikTokReadOnlyHttpClient {
   constructor(private readonly options: {
     baseUrl: string; appKey: string; appSecret: string; fetch?: FetchLike; now?: () => number;
     sleep?: (ms: number) => Promise<void>; random?: () => number; diagnostics?: (event: TikTokDiagnostics) => void;
+    governor?: TikTokReadRequestGovernor; validationMode?: boolean;
   }) {}
 
   async requestRaw<T>(input: {
     operation: TikTokReadOperation; method: "GET" | "POST"; path: string;
-    accessToken: string; query?: Record<string, string | number | boolean | undefined>; body?: JsonObject; shopReference?: string;
+    accessToken: string; query?: Record<string, string | number | boolean | undefined>; body?: JsonObject; shopScope?: string;
   }): Promise<T> {
     assertAllowedTikTokReadRequest(input.operation, input.method, input.path);
+    const lease = this.options.governor
+      ? await this.options.governor.acquire({ provider: "TIKTOK_SHOP", shopScope: input.shopScope ?? "AUTHORIZATION", operation: input.operation })
+      : undefined;
     const started = Date.now();
     const body = input.body === undefined ? undefined : JSON.stringify(input.body);
     const now = this.options.now ?? Date.now;
     const baseQuery = { ...(input.query ?? {}), app_key: this.options.appKey };
     const fetcher = this.options.fetch ?? fetch;
     let retryCount = 0;
-    for (;;) {
+    let finalized = false;
+    try { for (;;) {
+      if (lease) await this.options.governor!.requestStarted(lease);
       const timestamp = Math.floor(now() / 1000);
       const query = { ...baseQuery, timestamp };
       const sign = signTikTokShopRequest({ path: input.path, query, body, contentType: "application/json", appSecret: this.options.appSecret });
@@ -95,11 +123,11 @@ export class TikTokReadOnlyHttpClient {
       try {
         response = await fetcher(url, { method: input.method, headers: { "content-type": "application/json", "x-tts-access-token": input.accessToken }, body });
       } catch (cause) {
-        if (retryCount < 2) { await this.backoff(retryCount++); continue; }
+        if (!this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++); continue; }
         throw new TikTokApiError("TEMPORARY", input.operation, undefined, undefined, undefined, cause instanceof Error ? cause.message : "TikTok network error");
       }
       const requestIdHeader = response.headers.get("x-tts-request-id") ?? undefined;
-      const retryAfter = Number(response.headers.get("retry-after") ?? 0) * 1000 || undefined;
+      const retryAfter = retryAfterMs(response.headers.get("retry-after"), now());
       let payload: JsonObject;
       try { payload = object(await response.json(), input.operation); }
       catch (cause) {
@@ -107,11 +135,22 @@ export class TikTokReadOnlyHttpClient {
       }
       const code = number(payload.code) ?? undefined;
       const requestId = string(payload.request_id) ?? requestIdHeader;
-      this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, providerCode: code, requestId, durationMs: Date.now() - started, retryCount, shopReference: input.shopReference, timestamp: new Date().toISOString() });
-      if (response.ok && code === 0) return payload as T;
+      this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, providerCode: code, requestId, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
+      if (response.ok && code === 0) {
+        if (lease) await this.options.governor!.succeeded(lease, { requestId });
+        finalized = true;
+        return payload as T;
+      }
       const kind = errorKind(response.status, code, string(payload.message) ?? "");
-      if ((kind === "RATE_LIMIT" || kind === "TEMPORARY") && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
+      if (kind === "RATE_LIMIT") {
+        const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId, retryAfterMs: retryAfter }) : undefined;
+        finalized = Boolean(lease);
+        throw new TikTokApiError(kind, input.operation, response.status, code, requestId, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
+      }
+      if (kind === "TEMPORARY" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
       throw new TikTokApiError(kind, input.operation, response.status, code, requestId, string(payload.message) ?? "TikTok API request failed", retryAfter);
+    } } finally {
+      if (lease && !finalized) await this.options.governor!.release(lease).catch(() => undefined);
     }
   }
 
@@ -157,7 +196,7 @@ function discreteRanges(min: number | undefined, max: number | undefined, bounda
 }
 
 export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
-  constructor(private readonly options: { http: TikTokReadOnlyHttpClient; accessToken: () => Promise<string>; shopCipher: () => Promise<string> }) {}
+  constructor(private readonly options: { http: TikTokReadOnlyHttpClient; accessToken: () => Promise<string>; shopCipher: () => Promise<string>; shopScope?: () => Promise<string>; authorizationScope?: string }) {}
 
   async getCapabilities(): Promise<AdapterCapabilities> {
     return { mode: "READ_ONLY", market: "ID", currency: null, currencySource: "PROVIDER_RESPONSE_REQUIRED", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 0,
@@ -166,7 +205,7 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
   }
 
   async getAuthorizedShops(): Promise<AuthorizedTikTokShop[]> {
-    const response = await this.options.http.requestRaw<JsonObject>({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: await this.options.accessToken() });
+    const response = await this.options.http.requestRaw<JsonObject>({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: await this.options.accessToken(), shopScope: this.options.authorizationScope ?? "AUTHORIZATION" });
     const data = object(response.data, "GET_AUTHORIZED_SHOPS.data");
     return array(data.shops).map((item) => {
       const shop = object(item, "authorized shop");
@@ -178,14 +217,14 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
 
   async searchCreators(filters: CreatorFilters, cursor: { pageToken?: string; searchKey?: string; pageSize: number } = { pageSize: 20 }): Promise<CreatorSearchPage> {
     if (![12, 20].includes(cursor.pageSize)) throw new TikTokApiError("PROVIDER", "SEARCH_CREATORS", undefined, undefined, undefined, "Creator search page_size must be 12 or 20");
-    const shopCipher = await this.options.shopCipher();
+    const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
     const body: JsonObject = {};
     if (cursor.searchKey) body.search_key = cursor.searchKey;
     if (filters.keyword) body.keyword = filters.keyword;
     if (filters.categoryIds?.length) body.category = filters.categoryIds.map((id) => ({ id }));
     const unitRanges = discreteRanges(filters.minUnitsSold, undefined, [["UNITS_SOLD_RANGE_0_10", 0, 10], ["UNITS_SOLD_RANGE_10_100", 10, 100], ["UNITS_SOLD_RANGE_100_1000", 100, 1000], ["UNITS_SOLD_RANGE_1000_AND_ABOVE", 1000, Number.POSITIVE_INFINITY]]);
     if (unitRanges) body.units_sold_ranges = unitRanges;
-    const response = await this.options.http.requestRaw<JsonObject>({ operation: "SEARCH_CREATORS", method: "POST", path: "/affiliate_seller/202508/marketplace_creators/search", accessToken: await this.options.accessToken(), shopReference: shopCipher,
+    const response = await this.options.http.requestRaw<JsonObject>({ operation: "SEARCH_CREATORS", method: "POST", path: "/affiliate_seller/202508/marketplace_creators/search", accessToken: await this.options.accessToken(), shopScope,
       query: { shop_cipher: shopCipher, page_size: cursor.pageSize, page_token: cursor.pageToken }, body });
     const data = object(response.data, "SEARCH_CREATORS.data");
     const next = string(data.next_page_token);
@@ -195,9 +234,9 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
 
   async getCreatorPerformance(creatorOpenId: string): Promise<CreatorCandidate> {
     if (!creatorOpenId || creatorOpenId.startsWith("im:")) throw new TikTokApiError("UNSUPPORTED_IDENTIFIER", "GET_CREATOR_PERFORMANCE", undefined, undefined, undefined, "Creator performance requires creator_open_id, not creator_im_id");
-    const shopCipher = await this.options.shopCipher();
+    const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
     const path = `/affiliate_seller/202508/marketplace_creators/${encodeURIComponent(creatorOpenId)}`;
-    const response = await this.options.http.requestRaw<JsonObject>({ operation: "GET_CREATOR_PERFORMANCE", method: "GET", path, accessToken: await this.options.accessToken(), shopReference: shopCipher, query: { shop_cipher: shopCipher } });
+    const response = await this.options.http.requestRaw<JsonObject>({ operation: "GET_CREATOR_PERFORMANCE", method: "GET", path, accessToken: await this.options.accessToken(), shopScope, query: { shop_cipher: shopCipher } });
     const data = object(response.data, "GET_CREATOR_PERFORMANCE.data");
     const providerCreator = object(data.creator, "GET_CREATOR_PERFORMANCE.data.creator");
     const mapped = mapCreator({ ...providerCreator, creator_open_id: providerCreator.creator_open_id ?? creatorOpenId }, 0);
@@ -207,8 +246,8 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
 
   async listConversations(cursor: { pageToken?: string; pageSize: number } = { pageSize: 50 }): Promise<ProviderPage<ProviderConversation>> {
     if (cursor.pageSize < 1 || cursor.pageSize > 50) throw new TikTokApiError("PROVIDER", "LIST_CONVERSATIONS", undefined, undefined, undefined, "Conversation page_size must be 1..50");
-    const shopCipher = await this.options.shopCipher();
-    const response = await this.options.http.requestRaw<JsonObject>({ operation: "LIST_CONVERSATIONS", method: "GET", path: "/affiliate_seller/202412/conversations", accessToken: await this.options.accessToken(), shopReference: shopCipher,
+    const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
+    const response = await this.options.http.requestRaw<JsonObject>({ operation: "LIST_CONVERSATIONS", method: "GET", path: "/affiliate_seller/202412/conversations", accessToken: await this.options.accessToken(), shopScope,
       query: { shop_cipher: shopCipher, page_size: cursor.pageSize, page_token: cursor.pageToken, only_need_conversation_id: false, conversation_status: "ALL" } });
     const data = object(response.data, "LIST_CONVERSATIONS.data");
     const items = array(data.conversations).map((item): ProviderConversation => {
@@ -224,9 +263,9 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
 
   async listMessages(conversationId: string, cursor: { pageToken?: string; pageSize: number; creatorImId?: string } = { pageSize: 20 }): Promise<ProviderPage<ProviderMessage>> {
     if (!conversationId || cursor.pageSize < 1 || cursor.pageSize > 20) throw new TikTokApiError("PROVIDER", "LIST_MESSAGES", undefined, undefined, undefined, "Message history requires a conversation and page_size 1..20");
-    const shopCipher = await this.options.shopCipher();
+    const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
     const path = `/affiliate_seller/202412/conversation/${encodeURIComponent(conversationId)}/messages`;
-    const response = await this.options.http.requestRaw<JsonObject>({ operation: "LIST_MESSAGES", method: "GET", path, accessToken: await this.options.accessToken(), shopReference: shopCipher,
+    const response = await this.options.http.requestRaw<JsonObject>({ operation: "LIST_MESSAGES", method: "GET", path, accessToken: await this.options.accessToken(), shopScope,
       query: { shop_cipher: shopCipher, page_size: cursor.pageSize, page_token: cursor.pageToken } });
     const data = object(response.data, "LIST_MESSAGES.data");
     const items = array(data.messages).map((item): ProviderMessage => {

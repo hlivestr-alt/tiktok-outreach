@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { PrismaClient } from "@affiliate/db";
 import { encryptTikTokToken } from "@affiliate/tiktok-adapter";
@@ -14,12 +14,14 @@ const originalConfig = {
   TIKTOK_AUTH_BASE_URL: config.TIKTOK_AUTH_BASE_URL, TIKTOK_API_BASE_URL: config.TIKTOK_API_BASE_URL
 };
 const stamp = () => `refresh_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const authorizationScope = `AUTHORIZATION:${createHash("sha256").update("test-service").digest("hex").slice(0, 16)}`;
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 beforeAll(() => Object.assign(config, {
   TIKTOK_APP_KEY: "test-app", TIKTOK_APP_SECRET: "test-secret", TIKTOK_SERVICE_ID: "test-service",
   TIKTOK_TOKEN_ENCRYPTION_KEY: encryptionKey, TIKTOK_AUTH_BASE_URL: "https://auth.example.test", TIKTOK_API_BASE_URL: "https://api.example.test"
 }));
+beforeEach(async () => { await prisma.providerReadThrottle.deleteMany({ where: { shopScope: authorizationScope } }); });
 afterEach(() => vi.unstubAllGlobals());
 afterAll(async () => {
   Object.assign(config, originalConfig);
