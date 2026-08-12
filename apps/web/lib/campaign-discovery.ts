@@ -14,25 +14,21 @@ export type CampaignCreatePayload = {
   rankingDirection: "ASC" | "DESC";
 };
 
-export type CampaignDiscoveryResult = { campaignId: string; discoveryError?: string };
+export type CampaignDiscoveryResult = { campaignId: string };
 
-const discoveryPath = (campaignId: string, validationMode: boolean) => `/outreach/campaigns/${campaignId}/discovery-runs${validationMode ? "?validationMode=true" : ""}`;
+const discoveryPath = (campaignId: string) => `/outreach/campaigns/${campaignId}/discovery-runs`;
 
-export async function createCampaignAndDiscover(payload: CampaignCreatePayload, validationMode = false, request: Requester = api): Promise<CampaignDiscoveryResult> {
+export async function createCampaignAndDiscover(payload: CampaignCreatePayload, _validationMode = false, request: Requester = api): Promise<CampaignDiscoveryResult> {
   const campaign = await request<{ id: string }>("/outreach/campaigns", { method: "POST", body: JSON.stringify(payload) });
-  try {
-    await request(discoveryPath(campaign.id, validationMode), { method: "POST" });
-    return { campaignId: campaign.id };
-  } catch (error) {
-    return { campaignId: campaign.id, discoveryError: error instanceof Error ? error.message : "Creator discovery failed" };
-  }
+  await request(discoveryPath(campaign.id), { method: "POST" });
+  return { campaignId: campaign.id };
 }
 
 export function campaignDetailUrl(result: CampaignDiscoveryResult): string {
   const base = `/campaigns/${result.campaignId}`;
-  return result.discoveryError ? `${base}?discoveryError=${encodeURIComponent(result.discoveryError)}` : base;
+  return base;
 }
 
-export async function retryCampaignDiscovery(campaignId: string, validationMode = false, request: Requester = api): Promise<void> {
-  await request(discoveryPath(campaignId, validationMode), { method: "POST" });
+export async function retryCampaignDiscovery(campaignId: string, _validationMode = false, request: Requester = api): Promise<void> {
+  await request(discoveryPath(campaignId), { method: "POST" });
 }

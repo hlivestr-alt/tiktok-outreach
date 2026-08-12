@@ -2,13 +2,12 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 import { TikTokApiError, type TikTokReadGovernorEvent, type TikTokReadLease, type TikTokReadRequestGovernor } from "@affiliate/tiktok-adapter";
 import { PrismaService } from "../shared";
+import { config } from "../shared";
 
-const BASE_THROTTLE_MS = 5_000;
-const MAX_THROTTLE_MS = 15 * 60_000;
 const DEFAULT_SPACING_MS = 750;
 const LEASE_MS = 120_000;
 
-type GovernorOptions = { now?: () => Date; random?: () => number; spacingMs?: number; leaseMs?: number };
+type GovernorOptions = { now?: () => Date; random?: () => number; spacingMs?: number; marketplaceSpacingMs?: number; leaseMs?: number; timezone?: string };
 
 function safeDelay(value: number | undefined): number | undefined {
   if (value == null || !Number.isFinite(value) || value < 0) return undefined;
@@ -21,7 +20,31 @@ function latestDate(...values: Array<Date | null | undefined>): Date | undefined
 }
 
 function leaseOperation(operation: TikTokReadLease["operation"]): string {
-  return operation === "GET_AUTHORIZED_SHOPS" ? "__LEASE__:AUTHORIZED_SHOPS" : "__LEASE__:SHOP_READS";
+  if (operation === "GET_AUTHORIZED_SHOPS") return "__LEASE__:AUTHORIZED_SHOPS";
+  if (operation === "SEARCH_CREATORS") return "__LEASE__:SEARCH_CREATORS";
+  return "__LEASE__:SHOP_HISTORY_READS";
+}
+
+export function marketplaceBackoffMs(count: number, random = Math.random): number {
+  const base = Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(Math.max(0, count - 1), 20));
+  return Math.min(6 * 60 * 60_000, base + Math.floor(base * 0.2 * random()));
+}
+
+function spacingMs(operation: TikTokReadLease["operation"], options: GovernorOptions): number {
+  return operation === "SEARCH_CREATORS"
+    ? options.marketplaceSpacingMs ?? config.MARKETPLACE_SUCCESS_SPACING_MS
+    : options.spacingMs ?? DEFAULT_SPACING_MS;
+}
+
+function nextLocalDay(now: Date, timezone: string): Date {
+  const dateParts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" })
+    .formatToParts(now).reduce<Record<string, string>>((all, part) => ({ ...all, [part.type]: part.value }), {});
+  const nominalUtc = Date.UTC(Number(dateParts.year), Number(dateParts.month) - 1, Number(dateParts.day) + 1);
+  const localAtNominal = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date(nominalUtc)).reduce<Record<string, string>>((all, part) => ({ ...all, [part.type]: part.value }), {});
+  const offset = Date.UTC(Number(localAtNominal.year), Number(localAtNominal.month) - 1, Number(localAtNominal.day), Number(localAtNominal.hour), Number(localAtNominal.minute), Number(localAtNominal.second)) - nominalUtc;
+  return new Date(nominalUtc - offset + 5 * 60_000);
 }
 
 @Injectable()
@@ -67,7 +90,7 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
       data: {
         leaseId,
         leaseExpiresAt: new Date(now.getTime() + (this.options.leaseMs ?? LEASE_MS)),
-        spacingUntil: new Date(now.getTime() + (this.options.spacingMs ?? DEFAULT_SPACING_MS))
+        spacingUntil: new Date(now.getTime() + spacingMs(input.operation, this.options))
       }
     });
     if (claimed.count === 1) return { ...input, leaseOperation: groupOperation, leaseId };
@@ -107,6 +130,10 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
         lastProviderRequestId: event.requestId
       }
     });
+    await this.prisma.providerReadThrottle.updateMany({
+      where: { provider: lease.provider, shopScope: lease.shopScope, operation: lease.leaseOperation, leaseId: lease.leaseId },
+      data: { spacingUntil: new Date(now.getTime() + spacingMs(lease.operation, this.options)) }
+    });
     await this.release(lease);
   }
 
@@ -115,12 +142,15 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
       where: { provider_shopScope_operation: { provider: lease.provider, shopScope: lease.shopScope, operation: lease.operation } }
     });
     const count = current.consecutiveThrottleCount + 1;
-    const exponential = Math.min(MAX_THROTTLE_MS, BASE_THROTTLE_MS * 2 ** Math.min(count - 1, 20));
-    const jitter = Math.floor(exponential * 0.2 * (this.options.random?.() ?? Math.random()));
+    const exponential = lease.operation === "SEARCH_CREATORS"
+      ? marketplaceBackoffMs(count, this.options.random)
+      : Math.min(15 * 60_000, 5_000 * 2 ** Math.min(count - 1, 20));
     const retryAfterMs = safeDelay(event.retryAfterMs);
-    const cooldownMs = Math.max(exponential + jitter, retryAfterMs ?? 0);
+    const cooldownMs = Math.max(exponential, retryAfterMs ?? 0);
     const now = this.now();
-    const nextPermittedAt = new Date(now.getTime() + cooldownMs);
+    const nextPermittedAt = event.providerCode === 45101004
+      ? nextLocalDay(now, this.options.timezone ?? config.SHOP_TIMEZONE)
+      : new Date(now.getTime() + cooldownMs);
     await this.prisma.providerReadThrottle.updateMany({
       where: { id: current.id },
       data: {

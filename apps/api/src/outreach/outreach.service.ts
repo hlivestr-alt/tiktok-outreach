@@ -1,30 +1,18 @@
-import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCreateInput } from "@affiliate/contracts";
-import { assertCampaignWithinLimit, buildPreview, renderMessage, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
-import { TikTokApiError } from "@affiliate/tiktok-adapter";
+import { assertCampaignWithinLimit, renderMessage, type CreatorFilters } from "@affiliate/domain";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
-import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
-
-function redactedDiscoveryFailure(error: unknown): { category: string; message: string } {
-  if (error instanceof TikTokApiError) {
-    return { category: error.kind, message: `TikTok creator discovery failed (${error.kind}); retry is available.` };
-  }
-  if (error instanceof ServiceUnavailableException) {
-    return { category: "TOKEN_HEALTH", message: "TikTok creator discovery could not obtain a healthy access token; retry after restoring authorization health." };
-  }
-  return { category: "READ_PROVIDER_FAILURE", message: "TikTok creator discovery failed before a complete preview was produced; retry is available." };
-}
+import { publicDiscoveryRun } from "./discovery-processor";
 
 @Injectable()
 export class OutreachService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
-    private readonly tiktok: TikTokIntegrationService,
-    private readonly identities: CreatorIdentityResolver = new CreatorIdentityResolver(prisma)
+    private readonly tiktok: TikTokIntegrationService
   ) {}
 
   async list() {
@@ -85,108 +73,24 @@ export class OutreachService {
     return campaign;
   }
 
-  async discover(id: string, validationMode = false) {
+  async discover(id: string) {
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
-    if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
-    await this.prisma.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
-    try {
-    const creators: CreatorCandidate[] = [];
-    let pageToken: string | undefined;
-    let searchKey: string | undefined;
-    let hasMore = true;
-    let providerHasMore = false;
-    let providerPagesInspected = 0;
-    const adapter = await this.tiktok.adapter({ validationMode });
-    while (hasMore && creators.length < campaign.candidateLimit) {
-      const page = await adapter.searchCreators(campaign.filters as CreatorFilters, { pageToken, searchKey, pageSize: 20 });
-      providerPagesInspected++;
-      const remaining = campaign.candidateLimit - creators.length;
-      creators.push(...page.creators.slice(0, remaining).map((creator, index) => ({ ...creator, discoveryOrdinal: creators.length + index })));
-      pageToken = page.nextPageToken;
-      searchKey = page.searchKey;
-      hasMore = page.hasMore;
-      providerHasMore = page.hasMore;
-      if (validationMode) break;
-    }
-    const openIds = [...new Set(creators.map((creator) => creator.creatorOpenId))];
-    const existingCreators = await this.prisma.creator.findMany({ where: { creatorOpenId: { in: openIds } }, include: { contacts: { where: { shopId: campaign.shopId } } } });
-    const contacts = new Map<string, ContactState>(existingCreators.filter((creator) => creator.creatorOpenId).map((creator) => [creator.creatorOpenId!, {
-      contactCount: creator.contacts[0]?.contactCount ?? 0,
-      lastContactedAt: creator.contacts[0]?.lastContactedAt ?? undefined,
-      firstContactedAt: creator.contacts[0]?.firstContactedAt ?? undefined,
-      doNotContact: creator.contacts[0]?.doNotContact,
-      unresolvedDelivery: creator.contacts[0]?.unresolvedDelivery,
-      historical: Boolean(creator.contacts[0]?.historyCoverageStart)
-    }]));
-    const reservations = await this.prisma.outreachReservation.findMany({ where: { shopId: campaign.shopId, expiresAt: { gt: new Date() } }, include: { creator: true } });
-    const preview = buildPreview({
-      creators, filters: campaign.filters as CreatorFilters, contacts,
-      activeReservations: new Set(reservations.flatMap((reservation) => reservation.creator.creatorOpenId ? [reservation.creator.creatorOpenId] : [])),
-      requested: campaign.targetCount, cooldownDays: campaign.cooldownDays,
-      rankingMetric: campaign.rankingMetric as RankingMetric, rankingDirection: campaign.rankingDirection as "ASC" | "DESC",
-      now: new Date(), truncated: validationMode || hasMore
-    });
-    const unresolvedHistory = await this.prisma.creatorShopContactState.aggregate({
-      where: { shopId: campaign.shopId, contactCount: { gt: 0 }, creator: { creatorOpenId: null } },
-      _count: { _all: true }, _sum: { contactCount: true }
-    });
-    const summary = {
-      ...preview.summary,
-      historyIdentityCoverageIncomplete: unresolvedHistory._count._all > 0,
-      unresolvedHistoricalCreators: unresolvedHistory._count._all,
-      unresolvedHistoricalOutboundContacts: unresolvedHistory._sum.contactCount ?? 0,
-      ...(validationMode ? {
-        validation: {
-          controlled: true, intentionallyTruncated: true, discoveryComplete: false,
-          providerHasMore, providerPagesInspected, providerCallCeiling: 1
-        }
-      } : {})
-    };
-
-    const canonical = new Map<string, (typeof preview.creators)[number]>();
-    for (const evaluated of preview.creators) if (!canonical.has(evaluated.creatorOpenId)) canonical.set(evaluated.creatorOpenId, evaluated);
-    const canonicalCreatorIds = new Map<string, string>();
-    for (const evaluated of canonical.values()) canonicalCreatorIds.set(evaluated.creatorOpenId, (await this.identities.ensureMarketplaceCreator(evaluated)).id);
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.campaignRecipient.deleteMany({ where: { campaignId: id } });
-      for (const evaluated of canonical.values()) {
-        const creator = await tx.creator.findUniqueOrThrow({ where: { id: canonicalCreatorIds.get(evaluated.creatorOpenId)! } });
-        const snapshot = await tx.creatorMetricSnapshot.create({ data: {
-          creatorId: creator.id, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
-          gmvAmount: evaluated.gmv ? new Prisma.Decimal(evaluated.gmv.amount) : null, gmvCurrency: evaluated.gmv?.currency, unitsSold: evaluated.unitsSold,
-          avgVideoViews: evaluated.avgVideoViews, avgLiveViewers: evaluated.avgLiveViewers,
-          engagementRate: evaluated.engagementRate == null ? null : new Prisma.Decimal(evaluated.engagementRate),
-          sourceFetchedAt: new Date(), rawPayload: evaluated as unknown as Prisma.InputJsonValue
-        }});
-        await tx.campaignRecipient.create({ data: {
-          campaignId: id, creatorId: creator.id, snapshotId: snapshot.id, discoveryOrdinal: evaluated.discoveryOrdinal,
-          eligibility: evaluated.eligibility, skipReason: evaluated.skipReason, skipDetail: evaluated.skipDetail,
-          rankingValue: new Prisma.Decimal(evaluated.rankingValue), selected: evaluated.selected,
-          state: evaluated.selected ? "SELECTED" : evaluated.eligibility === "ELIGIBLE" ? "ELIGIBLE" : "DISCOVERED"
-        }});
+    const existing = await this.prisma.discoveryRun.findUnique({ where: { campaignId: id } });
+    if (existing) {
+      if (existing.state === "FAILED" && ["DRAFT", "PREVIEW_EXPIRED", "PREVIEW_READY"].includes(campaign.state)) {
+        const resumed = await this.prisma.discoveryRun.update({ where: { id: existing.id }, data: { state: "QUEUED", failureCategory: null, nextAttemptAt: null, completedAt: null } });
+        await this.prisma.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
+        return publicDiscoveryRun(resumed);
       }
-      await tx.campaign.update({ where: { id }, data: {
-        state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue, searchKey, nextPageToken: pageToken,
-        truncated: validationMode || hasMore, version: { increment: 1 }
-      }});
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "PREVIEW_READY", payload: summary as unknown as Prisma.InputJsonValue } });
-    });
-    return this.preview(id);
-    } catch (error) {
-      const restoredState = campaign.state === "PREVIEW_READY" ? "PREVIEW_READY" : campaign.state === "PREVIEW_EXPIRED" ? "PREVIEW_EXPIRED" : "DRAFT";
-      const failure = redactedDiscoveryFailure(error);
-      await this.prisma.campaign.updateMany({
-        where: { id, state: "DISCOVERING", version: campaign.version + 1 },
-        data: { state: restoredState, version: { increment: 1 } }
-      });
-      await this.prisma.auditEvent.create({ data: {
-        shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_DISCOVERY_FAILED",
-        payload: { ...failure, retryable: true, restoredState }
-      } });
-      throw error;
+      return publicDiscoveryRun(existing);
     }
+    if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
+    const run = await this.prisma.$transaction(async (tx) => {
+      await tx.campaign.update({ where: { id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
+      return tx.discoveryRun.create({ data: { campaignId: id, shopId: campaign.shopId, requestedTarget: campaign.targetCount, candidateLimit: campaign.candidateLimit } });
+    });
+    return publicDiscoveryRun(run);
   }
 
   async preview(id: string) {
@@ -207,11 +111,23 @@ export class OutreachService {
   async get(id: string) {
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.prisma.campaign.findUnique({ where: { id }, include: {
-      shop: true, recipients: { include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 250 },
+      shop: true, discoveryRun: true, recipients: { include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 250 },
       _count: { select: { recipients: true, deliveries: true } }
     }});
     if (!campaign) throw new NotFoundException("Campaign not found");
-    return campaign;
+    const { discoveryRun, shop, ...publicCampaign } = campaign;
+    const { shopCipher: _shopCipher, ...publicShop } = shop;
+    return { ...publicCampaign, shop: publicShop, discovery: discoveryRun ? publicDiscoveryRun(discoveryRun) : null };
+  }
+
+  async cancelDiscovery(id: string) {
+    const campaign = await this.requiredCampaign(id);
+    const run = await this.prisma.discoveryRun.findUnique({ where: { campaignId: id } });
+    if (!run) throw new BadRequestException("Campaign has no discovery run");
+    if (["COMPLETE", "FAILED", "CANCELLED"].includes(run.state)) return publicDiscoveryRun(run);
+    const cancelled = await this.prisma.discoveryRun.update({ where: { id: run.id }, data: { state: "CANCELLED", nextAttemptAt: null, leaseId: null, leaseExpiresAt: null, completedAt: new Date() } });
+    await this.prisma.campaign.updateMany({ where: { id: campaign.id, state: "DISCOVERING" }, data: { state: "DRAFT", version: { increment: 1 } } });
+    return publicDiscoveryRun(cancelled);
   }
 
   async freeze(id: string, version: number) {

@@ -93,6 +93,16 @@ describe("real read-only adapter", () => {
     await expect(cipher.requestRaw({ operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: "/authorization/202309/shops", accessToken: "token" })).rejects.toMatchObject({ kind: "INVALID_SHOP_CIPHER" });
   });
 
+  it("never internally retries Marketplace temporary failures", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ code: 36009003, message: "temporary", request_id: "r-temp" }, 503));
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch, sleep: async () => undefined }),
+      accessToken: async () => "token", shopCipher: async () => "cipher"
+    });
+    await expect(adapter.searchCreators({}, { pageSize: 20 })).rejects.toMatchObject({ kind: "TEMPORARY", providerCode: 36009003 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("enforces one physical request across a controlled-validation adapter", async () => {
     const fetcher = vi.fn(async () => jsonResponse({ code: 0, data: {
       search_key: "validation-key", next_page_token: "page-2",

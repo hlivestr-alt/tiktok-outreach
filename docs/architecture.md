@@ -64,3 +64,10 @@ The readiness endpoint reports whether a complete, recent conversation sync exis
 ## Extension points
 
 Add future modules as new API modules, UI route groups, domain services, and queue names. Creator identity, shop contact state, conversations, and audit events are shared foundations; leads, clip delivery, attribution, and workflow monitoring should not be added to the outreach worker.
+# Resumable Marketplace discovery
+
+Real TikTok Marketplace discovery is a persistent read-only workflow. The API creates one `DiscoveryRun` per campaign and returns immediately. A dedicated discovery process claims due runs in PostgreSQL, performs at most one `SEARCH_CREATORS` page per step, persists exact-Open-ID staging rows and opaque pagination state, then schedules the next page. The process has no outreach queue and receives only the adapter's `searchCreators` capability.
+
+`providerSearchKey` and `providerNextPageToken` live only on `DiscoveryRun`; campaign responses project a sanitized discovery status. `ProviderReadThrottle` provides a separate per-shop `SEARCH_CREATORS` lane with one in-flight request, at least 1,000 ms post-success spacing, and durable adaptive cooldown. Conversation and message-history reads use a distinct history lane.
+
+Provider throttles are resumable. Marketplace 36009002/HTTP 429 uses 15/30/60/120 minute exponential cooldown with 0–20% bounded jitter and a six-hour cap, while valid `Retry-After` is a lower bound. Daily quota 45101004 waits until the next shop-local day plus five minutes. Terminal authorization, permission, signature, and shop-context failures require operator action.

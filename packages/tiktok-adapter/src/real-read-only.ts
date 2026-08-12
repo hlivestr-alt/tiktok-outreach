@@ -49,7 +49,7 @@ export type TikTokDiagnostics = {
 };
 
 export type TikTokReadLease = { provider: "TIKTOK_SHOP"; shopScope: string; operation: TikTokReadOperation; leaseOperation: string; leaseId: string };
-export type TikTokReadGovernorEvent = { requestId?: string; retryAfterMs?: number };
+export type TikTokReadGovernorEvent = { requestId?: string; retryAfterMs?: number; providerCode?: number };
 export interface TikTokReadRequestGovernor {
   acquire(input: Omit<TikTokReadLease, "leaseId" | "leaseOperation">): Promise<TikTokReadLease>;
   requestStarted(lease: TikTokReadLease): Promise<void>;
@@ -131,7 +131,7 @@ export class TikTokReadOnlyHttpClient {
       try {
         response = await fetcher(url, { method: input.method, headers: { "content-type": "application/json", "x-tts-access-token": input.accessToken }, body });
       } catch (cause) {
-        if (!this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++); continue; }
+        if (input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++); continue; }
         throw new TikTokApiError("TEMPORARY", input.operation, undefined, undefined, undefined, cause instanceof Error ? cause.message : "TikTok network error");
       }
       const requestIdHeader = response.headers.get("x-tts-request-id") ?? undefined;
@@ -162,17 +162,17 @@ export class TikTokReadOnlyHttpClient {
       const requestId = string(payload.request_id) ?? requestIdHeader;
       this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, providerCode: code, requestId, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
       if (response.ok && code === 0) {
-        if (lease) await this.options.governor!.succeeded(lease, { requestId });
+        if (lease) await this.options.governor!.succeeded(lease, { requestId, providerCode: code });
         finalized = true;
         return payload as T;
       }
       const kind = errorKind(response.status, code, string(payload.message) ?? "");
       if (kind === "RATE_LIMIT") {
-        const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId, retryAfterMs: retryAfter }) : undefined;
+        const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId, retryAfterMs: retryAfter, providerCode: code }) : undefined;
         finalized = Boolean(lease);
         throw new TikTokApiError(kind, input.operation, response.status, code, requestId, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
       }
-      if (kind === "TEMPORARY" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
+      if (kind === "TEMPORARY" && input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
       throw new TikTokApiError(kind, input.operation, response.status, code, requestId, string(payload.message) ?? "TikTok API request failed", retryAfter);
     } } finally {
       if (lease && !finalized) await this.options.governor!.release(lease).catch(() => undefined);

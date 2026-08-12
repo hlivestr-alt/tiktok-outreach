@@ -9,7 +9,8 @@ export class OutreachController {
   constructor(private readonly service: OutreachService) {}
   @Get() list() { return this.service.list(); }
   @Post() create(@Body() body: CampaignCreateInput) { return this.service.create(body); }
-  @Post(":id/discovery-runs") discover(@Param("id") id: string, @Query("validationMode") validationMode?: string) { return this.service.discover(id, validationMode === "true"); }
+  @Post(":id/discovery-runs") discover(@Param("id") id: string) { return this.service.discover(id); }
+  @Post(":id/discovery-runs/cancel") cancelDiscovery(@Param("id") id: string) { return this.service.cancelDiscovery(id); }
   @Get(":id/preview") preview(@Param("id") id: string) { return this.service.preview(id); }
   @Get(":id/recipients") recipients(@Param("id") id: string, @Query("view") view?: string) { return this.service.recipients(id, view); }
   @Get(":id") get(@Param("id") id: string) { return this.service.get(id); }

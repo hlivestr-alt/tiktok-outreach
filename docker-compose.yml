@@ -58,6 +58,17 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
+  discovery-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.discovery-worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+
   web:
     build:
       context: .

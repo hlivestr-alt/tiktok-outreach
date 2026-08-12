@@ -7,7 +7,8 @@ import { api, formatIdr, formatMoney, formatNumber } from "../../../lib/api";
 import { retryCampaignDiscovery } from "../../../lib/campaign-discovery";
 
 type Recipient = { id: string; selected: boolean; eligibility: string; skipReason?: string; state: string; creator: { creatorOpenId: string; username?: string; nickname?: string }; snapshot?: { followerCount: number; gmvAmount: string | null; gmvCurrency: string | null; unitsSold: number } };
-type Campaign = { id: string; name: string; productName: string; targetCount: number; cooldownDays: number; state: string; version: number; summary: any; dispatchCount: number; safetyPauseReason?: string; shop: any; recipients: Recipient[] };
+type Discovery = { state: string; candidateLimit: number; candidatesFetched: number; pagesFetched: number; nextAttemptAt?: string; failureCategory?: string };
+type Campaign = { id: string; name: string; productName: string; targetCount: number; cooldownDays: number; state: string; version: number; summary: any; dispatchCount: number; safetyPauseReason?: string; shop: any; recipients: Recipient[]; discovery?: Discovery };
 
 export default function CampaignPage() {
   const { id } = useParams<{ id: string }>();
@@ -18,8 +19,6 @@ export default function CampaignPage() {
   const [confirmCount, setConfirmCount] = useState("");
   const load = () => api<Campaign>(`/outreach/campaigns/${id}`).then(setCampaign).catch((e) => setError(e.message));
   useEffect(() => {
-    const discoveryError = new URLSearchParams(window.location.search).get("discoveryError");
-    if (discoveryError) setError(`Creator discovery failed: ${discoveryError}`);
     load(); const timer = setInterval(load, 5000); return () => clearInterval(timer);
   }, [id]);
   async function action(name: string, body: unknown = {}) {
@@ -38,6 +37,8 @@ export default function CampaignPage() {
   const selectedCount = Number(summary.selected ?? campaign.recipients.filter((r) => r.selected).length);
   const readOnly = campaign.shop?.connectionMode === "READ_ONLY";
   const currencies = Object.entries(summary.gmvCurrencyCounts ?? {}).map(([currency, count]) => `${currency}: ${count}`).join(" · ");
+  const discovery = campaign.discovery;
+  const cooldownActive = discovery?.state === "BACKING_OFF" && Boolean(discovery.nextAttemptAt && new Date(discovery.nextAttemptAt) > new Date());
   return <div className="page"><Link className="back-link" href="/campaigns"><ArrowLeft size={16}/>Campaigns</Link>
     <header className="page-header"><div><span className="eyebrow">{campaign.productName}</span><h1>{campaign.name}</h1><p>{campaign.cooldownDays}-day cooldown · {readOnly ? `Real Marketplace · GMV context ${summary.expectedGmvCurrency ?? "provider-returned currencies"}` : "Mock Indonesian marketplace · IDR performance"}</p></div><div className="header-actions">{["QUEUED", "RUNNING"].includes(campaign.state) && <button className="button secondary" onClick={() => action("pause")}><Pause size={16}/>Pause</button>}{["PAUSED", "PAUSE_REQUESTED"].includes(campaign.state) && <button className="button primary" onClick={() => action("resume")}><Play size={16}/>Resume</button>}<span className={`status large ${campaign.state.toLowerCase()}`}>{campaign.state.replaceAll("_", " ")}</span></div></header>
     <section className="metric-strip"><div><span>Requested</span><strong>{formatNumber(summary.requested ?? campaign.targetCount)}</strong></div><div><span>Fetched</span><strong>{formatNumber(summary.fetchedOccurrences)}</strong></div><div><span>Excluded</span><strong>{formatNumber((summary.fetchedOccurrences ?? 0) - (summary.eligible ?? 0))}</strong></div><div><span>Eligible</span><strong>{formatNumber(summary.eligible)}</strong></div><div className="accent"><span>Selected</span><strong>{formatNumber(summary.selected)}</strong></div><div><span>Dispatched</span><strong>{formatNumber(campaign.dispatchCount)}</strong></div></section>
@@ -47,7 +48,10 @@ export default function CampaignPage() {
     {summary.gmvMixedCurrency && <div className="alert warning"><AlertTriangle/><div><strong>Mixed Marketplace GMV currencies observed</strong><span>{currencies}. Values were not compared across currencies and no FX conversion was performed.</span></div></div>}
     {summary.gmvExcludedCurrencyMismatch > 0 && <div className="alert neutral"><AlertTriangle/><div><strong>Unexpected GMV currency excluded</strong><span>{formatNumber(summary.gmvExcludedCurrencyMismatch)} candidate values did not match {summary.expectedGmvCurrency}.</span></div></div>}
     {summary.freezeAdjustment > 0 && <div className="alert warning"><ShieldAlert/><div><strong>Frozen recipient count changed</strong><span>{formatNumber(summary.freezeAdjustment)} creator(s) became ineligible after preview.</span></div></div>}
-    {campaign.state === "DRAFT" && <div className="alert error"><AlertTriangle/><div><strong>Creator discovery has not completed</strong><span>This campaign was created, but no creator preview is available. Retry discovery to use the normal campaign discovery service.</span></div><button disabled={discovering} className="button secondary" onClick={retryDiscovery}>{discovering ? "Discovering…" : "Retry discovery"}</button></div>}
+    {discovery && ["QUEUED", "RUNNING", "BACKING_OFF"].includes(discovery.state) && <div className={`alert ${discovery.state === "BACKING_OFF" ? "warning" : "neutral"}`}><Clock/><div><strong>{discovery.state === "QUEUED" ? "Discovery queued" : discovery.state === "RUNNING" ? "Fetching creators" : "Temporarily rate-limited by TikTok"}</strong><span>{formatNumber(discovery.candidatesFetched)} / {formatNumber(discovery.candidateLimit)} candidates fetched. Progress is saved.{discovery.nextAttemptAt ? ` Discovery resumes automatically around ${new Date(discovery.nextAttemptAt).toLocaleString()}.` : ""}</span></div></div>}
+    {discovery?.state === "COMPLETE" && <div className="alert neutral"><Check/><div><strong>Discovery complete</strong><span>{formatNumber(discovery.candidatesFetched)} provider candidates were considered.</span></div></div>}
+    {discovery?.state === "FAILED" && <div className="alert error"><AlertTriangle/><div><strong>Discovery failed — operator action required</strong><span>The failure was sanitized as {discovery.failureCategory ?? "provider failure"}.</span></div><button disabled={discovering} className="button secondary" onClick={retryDiscovery}>Retry discovery</button></div>}
+    {campaign.state === "DRAFT" && !discovery && <div className="alert error"><AlertTriangle/><div><strong>Creator discovery has not started</strong><span>This legacy campaign has no persisted discovery run.</span></div><button disabled={discovering || cooldownActive} className="button secondary" onClick={retryDiscovery}>{discovering ? "Queueing…" : "Start discovery"}</button></div>}
     {campaign.state === "PREVIEW_EXPIRED" && <div className="alert warning"><Clock/><div><strong>Frozen preview expired</strong><span>Creator reservations were released.</span></div><button className="button secondary" onClick={() => action("discovery-runs")}>Rediscover</button></div>}
     {campaign.state === "SAFETY_PAUSED" && <div className="alert error"><ShieldAlert/><div><strong>Campaign stopped at its dispatch-attempt safety limit</strong><span>{campaign.safetyPauseReason}</span></div></div>}
     {error && <div className="alert error">{error}</div>}

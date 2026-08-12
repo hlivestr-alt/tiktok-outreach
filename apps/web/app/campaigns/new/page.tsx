@@ -47,7 +47,7 @@ export default function NewCampaignPage() {
       <section className="panel form-section"><div className="section-icon"><MessageSquareText/></div><div className="section-content"><h2>Outreach message</h2><p>The exact rendered text is frozen in PostgreSQL for each selected creator.</p><label>Plain-text template<textarea rows={5} required value={form.messageTemplate} onChange={(e) => set("messageTemplate", e.target.value)}/><small>Allowed: {"{{creator_display_name}} · {{product_name}} · {{campaign_name}}"}</small></label></div></section>
       <div className="safety-note"><ShieldCheck/><div><strong>Filters are never weakened</strong><span>If only 873 of 1,000 requested creators are eligible, the preview will select and allow confirmation of those 873.</span></div></div>
       {error && <div className="alert error">{error}</div>}
-      <div className="form-actions"><Link className="button secondary" href="/campaigns">Cancel</Link><button disabled={busy} className="button primary" type="submit">{busy ? "Discovering creators…" : "Create & discover"}<ArrowRight size={17}/></button></div>
+      <div className="form-actions"><Link className="button secondary" href="/campaigns">Cancel</Link><button disabled={busy} className="button primary" type="submit">{busy ? "Queueing discovery…" : "Create & discover"}<ArrowRight size={17}/></button></div>
     </form>
   </div>;
 }

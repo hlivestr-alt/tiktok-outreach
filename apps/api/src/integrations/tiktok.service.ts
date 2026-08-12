@@ -110,6 +110,12 @@ export class TikTokIntegrationService {
     });
   }
 
+  /** The discovery process is deliberately handed only Marketplace Search. */
+  async discoveryAdapter(): Promise<Pick<TikTokReadAdapter, "searchCreators">> {
+    const adapter = await this.adapter();
+    return { searchCreators: adapter.searchCreators.bind(adapter) };
+  }
+
   async activeShop() {
     if (config.APP_MODE === "mock") return ensureMockShop(this.prisma);
     return this.selectedShop();

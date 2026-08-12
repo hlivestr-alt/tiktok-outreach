@@ -76,6 +76,15 @@ enum ReconciliationState {
   UNRESOLVED
 }
 
+enum DiscoveryRunState {
+  QUEUED
+  RUNNING
+  BACKING_OFF
+  COMPLETE
+  FAILED
+  CANCELLED
+}
+
 enum CreatorIdentityType {
   TIKTOK_CREATOR_OPEN_ID
   TIKTOK_CREATOR_USER_ID
@@ -120,6 +129,7 @@ model Shop {
   imports                        HistoricalContactImport[]
   dailyUsage                     ShopOutboundDailyUsage[]
   dispatchEvents                 OutboundDispatchEvent[]
+  discoveryRuns                  DiscoveryRun[]
   historicalFacts                HistoricalContactFact[]
   safetySettingsChanges          SafetySettingsAudit[]
 }
@@ -414,8 +424,6 @@ model Campaign {
   state             CampaignState           @default(DRAFT)
   version           Int                     @default(1)
   summary           Json                    @default("{}")
-  searchKey         String?
-  nextPageToken     String?
   truncated         Boolean                 @default(false)
   frozenAt          DateTime?
   freezeExpiresAt   DateTime?
@@ -428,8 +436,59 @@ model Campaign {
   deliveries        OutreachDelivery[]
   dispatchEvents    OutboundDispatchEvent[]
   outboxEntries     QueueOutbox[]
+  discoveryRun      DiscoveryRun?
 
   @@index([shopId, state])
+}
+
+/// Durable, private Marketplace discovery progress. Provider pagination values
+/// are intentionally isolated from Campaign, which is a public API object.
+model DiscoveryRun {
+  id                       String            @id @default(uuid())
+  campaignId               String            @unique
+  shopId                   String
+  state                    DiscoveryRunState @default(QUEUED)
+  requestedTarget          Int
+  candidateLimit           Int
+  pagesFetched             Int               @default(0)
+  candidatesFetched        Int               @default(0)
+  consecutiveThrottleCount Int               @default(0)
+  totalProviderRequests    Int               @default(0)
+  lastProviderCode         String?
+  lastProviderRequestAt    DateTime?
+  nextAttemptAt            DateTime?
+  providerSearchKey        String?
+  providerNextPageToken    String?
+  providerHasMore          Boolean           @default(true)
+  failureCategory          String?
+  leaseId                  String?
+  leaseExpiresAt           DateTime?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+  completedAt              DateTime?
+  campaign                 Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  shop                     Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  candidates               DiscoveryCandidate[]
+
+  @@index([state, nextAttemptAt])
+  @@index([shopId, state])
+  @@index([leaseExpiresAt])
+}
+
+/// Private staging rows make provider-page replay safe and creator persistence
+/// idempotent by exact TikTok Creator Open ID.
+model DiscoveryCandidate {
+  id               String       @id @default(uuid())
+  discoveryRunId   String
+  creatorOpenId    String
+  discoveryOrdinal Int
+  candidate        Json
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  discoveryRun     DiscoveryRun @relation(fields: [discoveryRunId], references: [id], onDelete: Cascade)
+
+  @@unique([discoveryRunId, creatorOpenId])
+  @@index([discoveryRunId, discoveryOrdinal])
 }
 
 model CampaignRecipient {

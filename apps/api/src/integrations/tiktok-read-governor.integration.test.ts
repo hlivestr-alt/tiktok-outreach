@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrismaClient } from "@affiliate/db";
 import { TikTokApiError, TikTokReadOnlyBoundaryError, TikTokReadOnlyHttpClient, type TikTokReadOperation } from "@affiliate/tiktok-adapter";
 import { TikTokApiExceptionFilter } from "./tiktok-api-exception.filter";
-import { TikTokReadGovernor } from "./tiktok-read-governor";
+import { marketplaceBackoffMs, TikTokReadGovernor } from "./tiktok-read-governor";
 
 const prisma = new PrismaClient();
 const prefix = `rate_limit_test_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -13,7 +13,7 @@ const response = (body: unknown, status = 200, headers: Record<string, string> =
 const rawResponse = (body: string, status: number, headers: Record<string, string> = {}) => new Response(body, { status, headers });
 
 function governor() {
-  return new TikTokReadGovernor(prisma as any, { now: () => new Date(nowMs), random: () => 0, spacingMs: 0, leaseMs: 30_000 });
+  return new TikTokReadGovernor(prisma as any, { now: () => new Date(nowMs), random: () => 0, spacingMs: 0, marketplaceSpacingMs: 1000, leaseMs: 30_000 });
 }
 
 function client(fetcher: typeof fetch, readGovernor = governor(), validationMode = false) {
@@ -47,6 +47,11 @@ afterAll(async () => {
 });
 
 describe.sequential("durable TikTok read governor", () => {
+  it("uses conservative bounded Marketplace cooldowns", () => {
+    expect([1, 2, 3, 4].map((count) => marketplaceBackoffMs(count, () => 0))).toEqual([15, 30, 60, 120].map((minutes) => minutes * 60_000));
+    expect(marketplaceBackoffMs(1, () => 1)).toBe(18 * 60_000);
+    expect(marketplaceBackoffMs(20, () => 1)).toBe(6 * 60 * 60_000);
+  });
   it("persists Marketplace throttle state after HTTP 429 / 36009002", async () => {
     const { row } = await throttleOnce(scope());
     expect(row).toMatchObject({ provider: "TIKTOK_SHOP", operation: "SEARCH_CREATORS", consecutiveThrottleCount: 1, lastProviderRequestId: "safe-request-id" });
@@ -74,6 +79,17 @@ describe.sequential("durable TikTok read governor", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("paces successful Marketplace requests from completion by at least the configured floor", async () => {
+    const shop = scope(); const fetcher = vi.fn(async () => response({ code: 0, request_id: "success" }));
+    await request(client(fetcher as typeof fetch), shop);
+    const lane = await prisma.providerReadThrottle.findUniqueOrThrow({ where: { provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: shop, operation: "__LEASE__:SEARCH_CREATORS" } } });
+    expect(lane.spacingUntil!.getTime()).toBe(nowMs + 1000);
+    await expect(request(client(fetcher as typeof fetch), shop)).rejects.toMatchObject({ locallyBlocked: true });
+    nowMs += 1000;
+    await expect(request(client(fetcher as typeof fetch), shop)).resolves.toMatchObject({ code: 0 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps different operation buckets independent", async () => {
     const shop = scope(); await throttleOnce(shop);
     const fetcher = vi.fn(async () => response({ code: 0, request_id: "performance-ok" }));
@@ -81,9 +97,18 @@ describe.sequential("durable TikTok read governor", () => {
   });
 
   it("honors a valid Retry-After value", async () => {
-    const { row } = await throttleOnce(scope(), "30");
-    expect(row.retryAfterMs).toBe(30_000);
-    expect(row.nextPermittedAt!.getTime()).toBeGreaterThanOrEqual(nowMs + 30_000);
+    const { row } = await throttleOnce(scope(), "7200");
+    expect(row.retryAfterMs).toBe(7_200_000);
+    expect(row.nextPermittedAt!.getTime()).toBeGreaterThanOrEqual(nowMs + 7_200_000);
+  });
+
+  it("holds daily Marketplace quota until the next shop-local day plus a safety margin", async () => {
+    const shop = scope(); const fetcher = vi.fn(async () => response({ code: 45101004, message: "daily quota", request_id: "daily" }, 429));
+    await expect(request(client(fetcher as typeof fetch), shop)).rejects.toMatchObject({ kind: "RATE_LIMIT", providerCode: 45101004 });
+    const row = await prisma.providerReadThrottle.findUniqueOrThrow({ where: { provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: shop, operation: "SEARCH_CREATORS" } } });
+    expect(row.nextPermittedAt!.getTime()).toBeGreaterThan(nowMs + 5 * 60_000);
+    expect(row.nextPermittedAt!.getUTCHours()).toBe(17);
+    expect(row.nextPermittedAt!.getUTCMinutes()).toBe(5);
   });
 
   it("persists a throttle for HTTP 429 with malformed JSON and never exposes the body", async () => {
@@ -141,10 +166,21 @@ describe.sequential("durable TikTok read governor", () => {
     const http = client(fetcher as typeof fetch);
     const first = request(http, shop);
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
-    await expect(request(client(fetcher as typeof fetch, governor()), shop, "GET_CREATOR_PERFORMANCE")).rejects.toMatchObject({ locallyBlocked: true });
+    await expect(request(client(fetcher as typeof fetch, governor()), shop)).rejects.toMatchObject({ locallyBlocked: true });
     expect(fetcher).toHaveBeenCalledTimes(1);
     resolveFirst(response({ code: 0, request_id: "first-ok" }));
     await expect(first).resolves.toMatchObject({ code: 0 });
+  });
+
+  it("isolates Marketplace cooldown from Conversation List and Message History", async () => {
+    const shop = scope(); await throttleOnce(shop);
+    const historyGovernor = governor();
+    const conversationLease = await historyGovernor.acquire({ provider: "TIKTOK_SHOP", shopScope: shop, operation: "LIST_CONVERSATIONS" });
+    await historyGovernor.release(conversationLease);
+    nowMs += 751;
+    const messageLease = await historyGovernor.acquire({ provider: "TIKTOK_SHOP", shopScope: shop, operation: "LIST_MESSAGES" });
+    await historyGovernor.release(messageLease);
+    await expect(historyGovernor.acquire({ provider: "TIKTOK_SHOP", shopScope: shop, operation: "SEARCH_CREATORS" })).rejects.toMatchObject({ locallyBlocked: true });
   });
 
   it("stores and returns no access token, cipher, app secret, headers, or raw provider message", async () => {

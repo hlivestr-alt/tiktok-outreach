@@ -15,13 +15,11 @@ describe("campaign discovery workflow", () => {
     expect(request).toHaveBeenNthCalledWith(2, "/outreach/campaigns/campaign-1/discovery-runs", { method: "POST" });
   });
 
-  it("retains created campaign context when discovery fails", async () => {
+  it("surfaces a local enqueue failure", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ id: "campaign-2" })
       .mockRejectedValueOnce(new Error("Marketplace unavailable"));
-    const result = await createCampaignAndDiscover(payload, false, request);
-    expect(result).toEqual({ campaignId: "campaign-2", discoveryError: "Marketplace unavailable" });
-    expect(campaignDetailUrl(result)).toBe("/campaigns/campaign-2?discoveryError=Marketplace%20unavailable");
+    await expect(createCampaignAndDiscover(payload, false, request)).rejects.toThrow("Marketplace unavailable");
   });
 
   it("retries a DRAFT through the normal discovery endpoint", async () => {
@@ -30,9 +28,9 @@ describe("campaign discovery workflow", () => {
     expect(request).toHaveBeenCalledWith("/outreach/campaigns/campaign-3/discovery-runs", { method: "POST" });
   });
 
-  it("uses controlled validation mode for real READ_ONLY discovery", async () => {
+  it("real READ_ONLY enqueue uses the same local endpoint", async () => {
     const request = vi.fn().mockResolvedValue({ state: "PREVIEW_READY" });
     await retryCampaignDiscovery("campaign-4", true, request);
-    expect(request).toHaveBeenCalledWith("/outreach/campaigns/campaign-4/discovery-runs?validationMode=true", { method: "POST" });
+    expect(request).toHaveBeenCalledWith("/outreach/campaigns/campaign-4/discovery-runs", { method: "POST" });
   });
 });

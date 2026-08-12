@@ -15,6 +15,8 @@ const schema = z.object({
   TIKTOK_AUTH_BASE_URL: z.string().url().default("https://auth.tiktok-shops.com"),
   TIKTOK_AUTHORIZATION_BASE_URL: z.string().url().default("https://services.tiktokshop.com/open/authorize"),
   TIKTOK_TOKEN_REFRESH_MARGIN_SECONDS: z.coerce.number().int().min(60).default(1800),
+  MARKETPLACE_SUCCESS_SPACING_MS: z.coerce.number().int().min(1000).default(1000),
+  DISCOVERY_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1000),
   SHOP_TIMEZONE: z.string().default("Asia/Jakarta"),
   MAX_RECIPIENTS_PER_CAMPAIGN: z.coerce.number().int().positive().default(1000),
   MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: z.coerce.number().int().positive().default(4000),
