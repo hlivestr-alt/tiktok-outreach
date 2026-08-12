@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft, Check, Clock, Pause, Play, RefreshCw, ShieldAlert, UserCheck, Users, XCircle } from "lucide-react";
 import { api, formatIdr, formatMoney, formatNumber } from "../../../lib/api";
+import { retryCampaignDiscovery } from "../../../lib/campaign-discovery";
 
 type Recipient = { id: string; selected: boolean; eligibility: string; skipReason?: string; state: string; creator: { creatorOpenId: string; username?: string; nickname?: string }; snapshot?: { followerCount: number; gmvAmount: string | null; gmvCurrency: string | null; unitsSold: number } };
 type Campaign = { id: string; name: string; productName: string; targetCount: number; cooldownDays: number; state: string; version: number; summary: any; dispatchCount: number; safetyPauseReason?: string; shop: any; recipients: Recipient[] };
@@ -12,14 +13,25 @@ export default function CampaignPage() {
   const { id } = useParams<{ id: string }>();
   const [campaign, setCampaign] = useState<Campaign>();
   const [error, setError] = useState("");
+  const [discovering, setDiscovering] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [confirmCount, setConfirmCount] = useState("");
   const load = () => api<Campaign>(`/outreach/campaigns/${id}`).then(setCampaign).catch((e) => setError(e.message));
-  useEffect(() => { load(); const timer = setInterval(load, 5000); return () => clearInterval(timer); }, [id]);
+  useEffect(() => {
+    const discoveryError = new URLSearchParams(window.location.search).get("discoveryError");
+    if (discoveryError) setError(`Creator discovery failed: ${discoveryError}`);
+    load(); const timer = setInterval(load, 5000); return () => clearInterval(timer);
+  }, [id]);
   async function action(name: string, body: unknown = {}) {
     setError("");
     try { await api(`/outreach/campaigns/${id}/${name}`, { method: "POST", body: JSON.stringify(body) }); await load(); }
     catch (e) { setError(e instanceof Error ? e.message : "Action failed"); }
+  }
+  async function retryDiscovery() {
+    setDiscovering(true); setError("");
+    try { await retryCampaignDiscovery(id, readOnly); await load(); }
+    catch (e) { setError(e instanceof Error ? `Creator discovery failed: ${e.message}` : "Creator discovery failed"); }
+    finally { setDiscovering(false); }
   }
   if (!campaign) return <div className="page"><div className="loading">Loading campaign…</div>{error && <div className="alert error">{error}</div>}</div>;
   const summary = campaign.summary ?? {};
@@ -35,6 +47,7 @@ export default function CampaignPage() {
     {summary.gmvMixedCurrency && <div className="alert warning"><AlertTriangle/><div><strong>Mixed Marketplace GMV currencies observed</strong><span>{currencies}. Values were not compared across currencies and no FX conversion was performed.</span></div></div>}
     {summary.gmvExcludedCurrencyMismatch > 0 && <div className="alert neutral"><AlertTriangle/><div><strong>Unexpected GMV currency excluded</strong><span>{formatNumber(summary.gmvExcludedCurrencyMismatch)} candidate values did not match {summary.expectedGmvCurrency}.</span></div></div>}
     {summary.freezeAdjustment > 0 && <div className="alert warning"><ShieldAlert/><div><strong>Frozen recipient count changed</strong><span>{formatNumber(summary.freezeAdjustment)} creator(s) became ineligible after preview.</span></div></div>}
+    {campaign.state === "DRAFT" && <div className="alert error"><AlertTriangle/><div><strong>Creator discovery has not completed</strong><span>This campaign was created, but no creator preview is available. Retry discovery to use the normal campaign discovery service.</span></div><button disabled={discovering} className="button secondary" onClick={retryDiscovery}>{discovering ? "Discovering…" : "Retry discovery"}</button></div>}
     {campaign.state === "PREVIEW_EXPIRED" && <div className="alert warning"><Clock/><div><strong>Frozen preview expired</strong><span>Creator reservations were released.</span></div><button className="button secondary" onClick={() => action("discovery-runs")}>Rediscover</button></div>}
     {campaign.state === "SAFETY_PAUSED" && <div className="alert error"><ShieldAlert/><div><strong>Campaign stopped at its dispatch-attempt safety limit</strong><span>{campaign.safetyPauseReason}</span></div></div>}
     {error && <div className="alert error">{error}</div>}

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowRight, CheckCircle2, Filter, MessageSquareText, Search, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { api } from "../../../lib/api";
+import { campaignDetailUrl, createCampaignAndDiscover } from "../../../lib/campaign-discovery";
 
 const fields = [
   ["Minimum followers", "minFollowers", "1000"], ["Maximum followers", "maxFollowers", "500000"],
@@ -30,13 +31,12 @@ export default function NewCampaignPage() {
       const filters: Record<string, unknown> = { categoryIds: form.category ? [form.category] : undefined };
       for (const [, key] of fields) if (form[key] !== "" && form[key] != null) filters[key] = Number(form[key]);
       if (form.gmvCurrency) filters.gmvCurrency = form.gmvCurrency.toUpperCase();
-      const campaign = await api<{ id: string }>("/outreach/campaigns", { method: "POST", body: JSON.stringify({
+      const result = await createCampaignAndDiscover({
         name: form.name, productName: form.productName, targetCount: Number(form.targetCount), candidateLimit: Number(form.candidateLimit),
         cooldownDays: Number(form.cooldownDays), messageTemplate: form.messageTemplate, filters,
         rankingMetric: form.rankingMetric, rankingDirection: "DESC"
-      }) });
-      await api(`/outreach/campaigns/${campaign.id}/discovery-runs`, { method: "POST" });
-      router.push(`/campaigns/${campaign.id}`);
+      }, readOnly);
+      router.push(campaignDetailUrl(result));
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to create campaign"); setBusy(false); }
   }
   return <div className="page narrow"><Link className="back-link" href="/campaigns"><ArrowLeft size={16}/>Campaigns</Link>
