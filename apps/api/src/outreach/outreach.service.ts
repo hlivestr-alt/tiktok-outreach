@@ -213,8 +213,13 @@ export class OutreachService {
     if (!campaign) throw new NotFoundException("Campaign not found");
     const { discoveryRun, shop, ...publicCampaign } = campaign;
     const { shopCipher: _shopCipher, ...publicShop } = shop;
+    const heartbeat = discoveryRun && ["QUEUED", "RUNNING", "BACKING_OFF"].includes(discoveryRun.state)
+      ? await this.prisma.workerHeartbeat.findUnique({ where: { role: "discovery-worker" } }) : null;
+    const discoveryWorkerState = heartbeat?.status === "RUNNING"
+      ? (Date.now() - heartbeat.lastSeenAt.getTime() <= config.WORKER_STALE_AFTER_MS ? "RUNNING" : "STALE") : "STOPPED";
     return {
       ...publicCampaign, shop: publicShop, discovery: discoveryRun ? publicDiscoveryRun(discoveryRun) : null,
+      discoveryWorkerState,
       outboundMode: config.OUTBOUND_MODE.toUpperCase(), outboundEnabled: config.OUTBOUND_MODE === "mock"
         || (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES"),
       cooldownCapability: {

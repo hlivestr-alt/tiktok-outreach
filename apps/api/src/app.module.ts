@@ -10,9 +10,12 @@ import { CreatorIdentityResolver } from "./identity/creator-identity-resolver.se
 import { TikTokReadGovernor } from "./integrations/tiktok-read-governor";
 import { DiscoveryProcessor } from "./outreach/discovery-processor";
 import { HistoryProcessor } from "./history/history-processor";
+import { SystemStatusController } from "./system/system-status.controller";
+import { SystemStatusService } from "./system/system-status.service";
+import { TokenMaintenanceService } from "./system/token-maintenance.service";
 
 @Module({
-  controllers: [OutreachController, HistoryController, IntegrationsController],
-  providers: [PrismaService, QueueService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, DiscoveryProcessor, HistoryProcessor, OutreachService, HistoryService]
+  controllers: [OutreachController, HistoryController, IntegrationsController, SystemStatusController],
+  providers: [PrismaService, QueueService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, DiscoveryProcessor, HistoryProcessor, OutreachService, HistoryService, SystemStatusService, TokenMaintenanceService]
 })
 export class AppModule {}

@@ -150,12 +150,12 @@ model Shop {
   currency                       String                    @default("IDR")
   timezone                       String                    @default("Asia/Jakarta")
   connectionMode                 ConnectionMode            @default(MOCK)
-  maxRecipientsPerCampaign       Int                       @default(1000)
-  maxDispatchAttemptsPerCampaign Int                       @default(4000)
-  maxSendsPerDay                 Int                       @default(1000)
-  maxSendsPerHour                Int                       @default(50)
-  maxDispatchesPerMinute         Int                       @default(10)
-  outboundPacingMs               Int                       @default(5000)
+  maxRecipientsPerCampaign       Int                       @default(100)
+  maxDispatchAttemptsPerCampaign Int                       @default(400)
+  maxSendsPerDay                 Int                       @default(100)
+  maxSendsPerHour                Int                       @default(20)
+  maxDispatchesPerMinute         Int                       @default(5)
+  outboundPacingMs               Int                       @default(10000)
   outboundNextAllowedAt          DateTime?
   createdAt                      DateTime                  @default(now())
   updatedAt                      DateTime                  @updatedAt
@@ -219,6 +219,20 @@ model IntegrationConnection {
   updatedAt              DateTime       @updatedAt
 
   @@unique([shopId, provider])
+}
+
+/// Low-frequency liveness signal for the single production instance of each
+/// worker role. No provider credentials or payloads are stored here.
+model WorkerHeartbeat {
+  role       String   @id
+  instanceId String
+  status     String   @default("RUNNING")
+  startedAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  metadata   Json     @default("{}")
+  updatedAt  DateTime @updatedAt
+
+  @@index([lastSeenAt])
 }
 
 /// Private, durable history-worker state. Opaque provider cursors in this

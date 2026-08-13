@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DelayedError, Job, Queue, Worker } from "bullmq";
 import { lockCreatorEligibility, Prisma, PrismaClient } from "@affiliate/db";
 import { liveOutboundExplicitlyEnabled, loadConfig } from "@affiliate/config";
@@ -13,6 +13,7 @@ const config = loadConfig();
 const redisUrl = new URL(config.REDIS_URL);
 const connection = { host: redisUrl.hostname, port: Number(redisUrl.port || 6379), password: redisUrl.password || undefined };
 const prisma = new PrismaClient();
+const workerInstanceId = randomUUID();
 function required(name: "TIKTOK_APP_KEY" | "TIKTOK_APP_SECRET" | "TIKTOK_TOKEN_ENCRYPTION_KEY"): string {
   const value = config[name];
   if (!value) throw new Error(`LIVE_OUTBOUND_NOT_CONFIGURED: ${name} is required`);
@@ -43,6 +44,15 @@ const adapter: TikTokOutboundAdapter = config.OUTBOUND_MODE === "mock" ? new Moc
 const queue = new Queue("outreach", { connection });
 const reconciliationDelays = config.MOCK_RECONCILIATION_DELAYS_MS.split(",").map(Number);
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+
+async function publishHeartbeat(status: "RUNNING" | "STOPPED"): Promise<void> {
+  const now = new Date();
+  await prisma.workerHeartbeat.upsert({
+    where: { role: "outbound-worker" },
+    update: { instanceId: workerInstanceId, status, lastSeenAt: now, metadata: { outboundMode: config.OUTBOUND_MODE, mutationCapability: config.OUTBOUND_MODE === "live" } },
+    create: { role: "outbound-worker", instanceId: workerInstanceId, status, startedAt: now, lastSeenAt: now, metadata: { outboundMode: config.OUTBOUND_MODE, mutationCapability: config.OUTBOUND_MODE === "live" } }
+  });
+}
 
 async function maintenanceSweep(): Promise<void> {
   const now = new Date();
@@ -372,17 +382,22 @@ const worker = new Worker("outreach", async (job) => {
   limiter: { max: config.MAX_DISPATCHES_PER_MINUTE, duration: 60_000 }
 });
 
-worker.on("failed", (job, error) => console.error("Outreach job failed", { jobId: job?.id, error: error.message }));
-worker.on("error", (error) => console.error("Worker error", { error: error.message }));
-void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error));
-const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error)), 5_000);
+worker.on("failed", (job, error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "job_failed", jobId: job?.id, error: error.message })));
+worker.on("error", (error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "worker_error", error: error.message })));
+void maintenanceSweep().catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "maintenance_failed", error: error instanceof Error ? error.message : "unknown" })));
+const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "maintenance_failed", error: error instanceof Error ? error.message : "unknown" }))), 5_000);
 maintenanceTimer.unref();
-console.log(config.OUTBOUND_MODE === "mock" ? "Mock outreach worker ready" : config.OUTBOUND_MODE === "live" ? "Live TikTok outbound worker ready" : "TikTok worker idle: outbound disabled", { appMode: config.APP_MODE, outboundMode: config.OUTBOUND_MODE });
+void publishHeartbeat("RUNNING").catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "heartbeat_failed", error: error instanceof Error ? error.message : "unknown" })));
+const heartbeatTimer = setInterval(() => void publishHeartbeat("RUNNING").catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "heartbeat_failed", error: error instanceof Error ? error.message : "unknown" }))), config.WORKER_HEARTBEAT_INTERVAL_MS ?? 15_000);
+heartbeatTimer.unref();
+console.log(JSON.stringify({ level: "info", worker: "outbound-worker", event: "ready", appMode: config.APP_MODE, outboundMode: config.OUTBOUND_MODE }));
 
 async function shutdown() {
   clearInterval(maintenanceTimer);
+  clearInterval(heartbeatTimer);
   await worker.close();
   await queue.close();
+  await publishHeartbeat("STOPPED").catch(() => undefined);
   await prisma.$disconnect();
 }
 process.on("SIGINT", shutdown);

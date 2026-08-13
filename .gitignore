@@ -9,3 +9,4 @@ coverage/
 *.tsbuildinfo
 .pnpm-store/
 packages/db/generated/
+backups/

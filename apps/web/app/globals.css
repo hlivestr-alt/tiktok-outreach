@@ -2,3 +2,4 @@
 
 .button-row{display:flex;flex-wrap:wrap;gap:10px;padding:4px 20px 18px}.panel>.button-row .button{margin:0}.muted{color:var(--muted);font-size:12px;line-height:1.5;padding:0 20px 18px;margin:0}
 .clone-form{padding:20px;display:grid;gap:18px}.clone-form .form-grid{grid-template-columns:2fr 1fr 160px;margin-top:0}.clone-panel .panel-heading p{max-width:720px}
+.status-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:18px 20px}.status-grid>div{border:1px solid var(--line);border-radius:11px;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;text-transform:capitalize;font-size:12px}.status.healthy,.status.running{background:var(--green-2);color:var(--green)}.status.unhealthy,.status.stopped{background:#fbe8e8;color:var(--red)}.status.stale{background:#fff0df;color:var(--orange)}

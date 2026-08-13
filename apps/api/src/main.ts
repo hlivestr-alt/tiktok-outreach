@@ -13,5 +13,6 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, new DocumentBuilder().setTitle("Affiliate Outreach Operations API").setVersion("1.0").build());
   SwaggerModule.setup("api/docs", app, document);
   await app.listen(config.PORT, config.HOST);
+  console.log(JSON.stringify({ level: "info", service: "api", event: "ready", version: config.APP_VERSION, buildTimestamp: config.BUILD_TIMESTAMP }));
 }
-bootstrap();
+void bootstrap().catch((error) => { console.error(JSON.stringify({ level: "fatal", service: "api", event: "startup_failed", error: error instanceof Error ? error.message : "unknown" })); process.exitCode = 1; });

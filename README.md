@@ -1,5 +1,7 @@
 # Affiliate Outreach Operations
 
+For daily production operation, use the Docker-only workflow in [docs/PRODUCTION.md](docs/PRODUCTION.md). Safe startup is `.\scripts\start-production.cmd`; live outbound startup is `.\scripts\start-production.cmd -LiveOutbound` and retains the exact confirmation gate.
+
 TikTok Shop affiliate outreach operations with deterministic mock, real read-only, and explicitly gated live outbound modes. Real discovery/history and outbound mutation capabilities stay isolated in separate workers and adapters.
 
 Detailed design notes are in [Architecture and safety](docs/architecture.md), [Persistent historical synchronization](docs/historical-sync.md), and [Future TikTok integration](docs/tiktok-integration.md).

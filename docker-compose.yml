@@ -1,63 +1,122 @@
+x-build: &build
+  context: .
+  args:
+    APP_VERSION: ${APP_VERSION:-local}
+    BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+
+x-production-env: &production-env
+  RUNTIME_ENV: production
+  APP_MODE: read_only
+  DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
+  REDIS_URL: redis://redis:6379
+  APP_VERSION: ${APP_VERSION:-local}
+  BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+  WEB_INTERNAL_URL: http://web:3000
+
 services:
   postgres:
+    profiles: ["production", "outbound-live"]
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: affiliate
       POSTGRES_PASSWORD: affiliate
       POSTGRES_DB: affiliate_outreach
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U affiliate -d affiliate_outreach"]
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 10s
 
   redis:
+    profiles: ["production", "outbound-live"]
     image: redis:7-alpine
-    ports:
-      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis_data:/data"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
 
   api:
+    profiles: ["production", "outbound-live"]
     build:
-      context: .
+      <<: *build
       dockerfile: infra/docker/Dockerfile.api
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
-      REDIS_URL: redis://redis:6379
+      <<: *production-env
+      SERVICE_ROLE: api
       HOST: 0.0.0.0
-    ports:
-      - "127.0.0.1:4000:4000"
+      OUTBOUND_MODE: ${OUTBOUND_MODE:-read_only}
+      ENABLE_LIVE_TIKTOK_OUTBOUND: ${ENABLE_LIVE_TIKTOK_OUTBOUND:-NOT_ACKNOWLEDGED}
+    ports: ["127.0.0.1:4000:4000"]
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:4000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  web:
+    profiles: ["production", "outbound-live"]
+    build:
+      <<: *build
+      dockerfile: infra/docker/Dockerfile.web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
+      APP_VERSION: ${APP_VERSION:-local}
+      BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  discovery-worker:
+    profiles: ["production", "outbound-live"]
+    build:
+      <<: *build
+      dockerfile: infra/docker/Dockerfile.discovery-worker
+    env_file: .env
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: discovery-worker
+      OUTBOUND_MODE: ${OUTBOUND_MODE:-read_only}
+      ENABLE_LIVE_TIKTOK_OUTBOUND: ${ENABLE_LIVE_TIKTOK_OUTBOUND:-NOT_ACKNOWLEDGED}
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
-  worker:
-    profiles: ["outbound-mock"]
+  history-worker:
+    profiles: ["production", "outbound-live"]
     build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.worker
+      <<: *build
+      dockerfile: infra/docker/Dockerfile.history-worker
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
-      REDIS_URL: redis://redis:6379
-      APP_MODE: ${APP_MODE:-mock}
-      OUTBOUND_MODE: mock
-      SHOP_TIMEZONE: ${SHOP_TIMEZONE:-Asia/Jakarta}
-      MAX_RECIPIENTS_PER_CAMPAIGN: ${MAX_RECIPIENTS_PER_CAMPAIGN:-1000}
-      MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: ${MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN:-4000}
-      MAX_SENDS_PER_DAY: ${MAX_SENDS_PER_DAY:-1000}
-      MAX_SENDS_PER_HOUR: ${MAX_SENDS_PER_HOUR:-50}
-      MAX_DISPATCHES_PER_MINUTE: ${MAX_DISPATCHES_PER_MINUTE:-10}
-      OUTBOUND_PACING_MS: ${OUTBOUND_PACING_MS:-5000}
-      MOCK_RECONCILIATION_DELAYS_MS: ${MOCK_RECONCILIATION_DELAYS_MS:-300000,1800000,7200000}
+      <<: *production-env
+      SERVICE_ROLE: history-worker
+      OUTBOUND_MODE: ${OUTBOUND_MODE:-read_only}
+      ENABLE_LIVE_TIKTOK_OUTBOUND: ${ENABLE_LIVE_TIKTOK_OUTBOUND:-NOT_ACKNOWLEDGED}
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -65,53 +124,20 @@ services:
   outbound-live:
     profiles: ["outbound-live"]
     build:
-      context: .
+      <<: *build
       dockerfile: infra/docker/Dockerfile.worker
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
-      REDIS_URL: redis://redis:6379
-      APP_MODE: read_only
+      <<: *production-env
+      SERVICE_ROLE: outbound-worker
       OUTBOUND_MODE: live
       ENABLE_LIVE_TIKTOK_OUTBOUND: ${ENABLE_LIVE_TIKTOK_OUTBOUND:-NOT_ACKNOWLEDGED}
-      MAX_SENDS_PER_HOUR: ${MAX_SENDS_PER_HOUR:-50}
-      OUTBOUND_PACING_MS: ${OUTBOUND_PACING_MS:-5000}
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-
-  discovery-worker:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.discovery-worker
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      postgres: { condition: service_healthy }
-
-  history-worker:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.history-worker
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      postgres: { condition: service_healthy }
-
-  web:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.web
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
-    ports:
-      - "127.0.0.1:3000:3000"
-    depends_on:
-      - api
+      api: { condition: service_healthy }
 
 volumes:
   postgres_data:
+  redis_data:
