@@ -1,11 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
-import type { CampaignCreateInput } from "@affiliate/contracts";
+import type { CampaignCloneFromPreviewInput, CampaignCreateInput } from "@affiliate/contracts";
 import { assertCampaignWithinLimit, renderMessage, type CreatorFilters } from "@affiliate/domain";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { publicDiscoveryRun } from "./discovery-processor";
+import { rebuildLocalPreview } from "./local-preview";
 
 @Injectable()
 export class OutreachService {
@@ -91,6 +92,101 @@ export class OutreachService {
       return tx.discoveryRun.create({ data: { campaignId: id, shopId: campaign.shopId, requestedTarget: campaign.targetCount, candidateLimit: campaign.candidateLimit } });
     });
     return publicDiscoveryRun(run);
+  }
+
+  private validateCloneInput(input: CampaignCloneFromPreviewInput, shop: { maxRecipientsPerCampaign: number; maxDispatchAttemptsPerCampaign: number; maxSendsPerDay: number; maxDispatchesPerMinute: number }) {
+    try {
+      assertCampaignWithinLimit(input.targetCount, shop);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
+    }
+    if (!input.name?.trim() || !input.productName?.trim() || !input.messageTemplate?.trim()) {
+      throw new BadRequestException("Name, product, and message template are required");
+    }
+    if (input.messageTemplate.length > 2000) throw new BadRequestException("Message template exceeds the provider limit of 2,000 characters");
+    try {
+      renderMessage(input.messageTemplate, {
+        creatorDisplayName: "Creator", productName: input.productName, campaignName: input.name
+      });
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : "Invalid message template");
+    }
+  }
+
+  async cloneFromPreview(id: string, input: CampaignCloneFromPreviewInput, idempotencyKey?: string) {
+    const source = await this.prisma.campaign.findUnique({
+      where: { id }, include: { shop: true, discoveryRun: { include: { candidates: { orderBy: { discoveryOrdinal: "asc" } } } } }
+    });
+    if (!source) throw new NotFoundException("Source campaign not found");
+    if (source.state !== "PREVIEW_READY") throw new BadRequestException("Source campaign must be PREVIEW_READY");
+    if (source.discoveryRun?.state !== "COMPLETE" || !source.discoveryRun.completedAt) {
+      throw new BadRequestException("Source campaign must have a completed discovery run");
+    }
+    if (!source.discoveryRun.candidates.length) throw new BadRequestException("Source campaign must contain persisted discovery candidates");
+    this.validateCloneInput(input, source.shop);
+    const normalized = {
+      name: input.name.trim(), productName: input.productName.trim(),
+      messageTemplate: input.messageTemplate, targetCount: input.targetCount
+    };
+    const idempotencyDigest = createHash("sha256").update(JSON.stringify({
+      sourceCampaignId: id, submissionKey: idempotencyKey?.trim() || "CONTENT_DERIVED", request: normalized
+    })).digest("hex");
+    const now = new Date();
+    const campaignId = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`clone-preview:${idempotencyDigest}`}))`;
+      const duplicate = await tx.auditEvent.findFirst({
+        where: { eventType: "CAMPAIGN_CLONED_FROM_PREVIEW", payload: { path: ["idempotencyDigest"], equals: idempotencyDigest } },
+        select: { campaignId: true }
+      });
+      if (duplicate?.campaignId) return duplicate.campaignId;
+
+      const campaign = await tx.campaign.create({ data: {
+        shopId: source.shopId, name: normalized.name, productName: normalized.productName,
+        targetCount: normalized.targetCount, candidateLimit: source.candidateLimit,
+        cooldownDays: source.cooldownDays, messageTemplate: normalized.messageTemplate,
+        filters: source.filters as Prisma.InputJsonValue, rankingMetric: source.rankingMetric,
+        rankingDirection: source.rankingDirection, state: "DRAFT"
+      } });
+      const run = await tx.discoveryRun.create({ data: {
+        campaignId: campaign.id, shopId: source.shopId, state: "RUNNING",
+        requestedTarget: normalized.targetCount, candidateLimit: source.candidateLimit,
+        pagesFetched: 0, candidatesFetched: source.discoveryRun!.candidates.length,
+        totalProviderRequests: 0, providerHasMore: source.discoveryRun!.providerHasMore
+      } });
+      for (const row of source.discoveryRun!.candidates) {
+        const candidate = row.candidate as Record<string, unknown>;
+        if (!row.creatorOpenId || candidate.creatorOpenId !== row.creatorOpenId) {
+          throw new BadRequestException("Persisted candidates must contain exact matching Creator Open IDs");
+        }
+        await tx.discoveryCandidate.create({ data: {
+          discoveryRunId: run.id, creatorOpenId: row.creatorOpenId, discoveryOrdinal: row.discoveryOrdinal,
+          candidate: {
+            creatorOpenId: row.creatorOpenId, creatorUserId: candidate.creatorUserId,
+            username: candidate.username, nickname: candidate.nickname,
+            categoryIds: candidate.categoryIds, followerCount: candidate.followerCount,
+            gmv: candidate.gmv, unitsSold: candidate.unitsSold,
+            avgVideoViews: candidate.avgVideoViews, avgLiveViewers: candidate.avgLiveViewers,
+            engagementRate: candidate.engagementRate, selectionRegion: candidate.selectionRegion,
+            discoveryOrdinal: row.discoveryOrdinal
+          } as Prisma.InputJsonValue
+        } });
+      }
+      await tx.auditEvent.create({ data: {
+        shopId: source.shopId, campaignId: campaign.id, eventType: "CAMPAIGN_CLONED_FROM_PREVIEW",
+        payload: { sourceCampaignId: source.id, idempotencyDigest, candidateSource: "LOCAL_PERSISTED_PREVIEW", providerRequests: 0 }
+      } });
+      await rebuildLocalPreview(tx, run.id, now);
+      return campaign.id;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 20_000 });
+
+    const clone = await this.prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, include: { discoveryRun: true } });
+    const summary = clone.summary as Record<string, unknown>;
+    return {
+      id: clone.id, state: clone.state,
+      fetched: Number(summary.fetchedOccurrences ?? clone.discoveryRun?.candidatesFetched ?? 0),
+      eligible: Number(summary.eligible ?? 0), selected: Number(summary.selected ?? 0),
+      warnings: Number(summary.shortfall ?? 0) > 0 ? ["Target shortfall; filters and safety rules were not weakened"] : []
+    };
   }
 
   async preview(id: string) {

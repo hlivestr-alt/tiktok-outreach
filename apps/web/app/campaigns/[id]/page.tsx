@@ -1,10 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Check, Clock, Pause, Play, RefreshCw, ShieldAlert, UserCheck, Users, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Clock, Copy, Pause, Play, RefreshCw, ShieldAlert, UserCheck, Users, XCircle } from "lucide-react";
 import { api, formatIdr, formatMoney, formatNumber } from "../../../lib/api";
 import { retryCampaignDiscovery } from "../../../lib/campaign-discovery";
+import { cloneCampaignFromPreview, LOCAL_CLONE_EXPLANATION } from "../../../lib/campaign-clone";
 
 type Recipient = { id: string; selected: boolean; eligibility: string; skipReason?: string; skipDetail?: string; state: string; frozenMessage?: string; creatorOpenIdSnapshot?: string; delivery?: { state: string; externalMessageId?: string; attemptCount: number; lastErrorCode?: string }; creator: { creatorOpenId: string; username?: string; nickname?: string }; snapshot?: { followerCount: number; gmvAmount: string | null; gmvCurrency: string | null; unitsSold: number } };
 type Discovery = { state: string; candidateLimit: number; candidatesFetched: number; pagesFetched: number; nextAttemptAt?: string; failureCategory?: string };
@@ -12,11 +13,16 @@ type Campaign = { id: string; name: string; productName: string; messageTemplate
 
 export default function CampaignPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [campaign, setCampaign] = useState<Campaign>();
   const [error, setError] = useState("");
   const [discovering, setDiscovering] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [confirmCount, setConfirmCount] = useState("");
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloning, setCloning] = useState(false);
+  const [cloneKey, setCloneKey] = useState("");
+  const [cloneForm, setCloneForm] = useState({ name: "", productName: "", targetCount: 1, messageTemplate: "" });
   const load = () => api<Campaign>(`/outreach/campaigns/${id}`).then(setCampaign).catch((e) => setError(e.message));
   useEffect(() => {
     load(); const timer = setInterval(load, 5000); return () => clearInterval(timer);
@@ -31,6 +37,19 @@ export default function CampaignPage() {
     try { await retryCampaignDiscovery(id, readOnly); await load(); }
     catch (e) { setError(e instanceof Error ? `Creator discovery failed: ${e.message}` : "Creator discovery failed"); }
     finally { setDiscovering(false); }
+  }
+  function openClone() {
+    setCloneForm({ name: `${campaign!.name} - Copy`, productName: campaign!.productName, targetCount: campaign!.targetCount, messageTemplate: campaign!.messageTemplate });
+    setCloneKey(crypto.randomUUID());
+    setCloneOpen(true);
+  }
+  async function submitClone(event: React.FormEvent) {
+    event.preventDefault(); setCloning(true); setError("");
+    try {
+      const result = await cloneCampaignFromPreview(id, cloneForm, cloneKey);
+      if (result.state !== "PREVIEW_READY") throw new Error("Cloned campaign did not reach PREVIEW_READY");
+      router.push(`/campaigns/${result.id}`);
+    } catch (e) { setError(e instanceof Error ? e.message : "Campaign clone failed"); setCloning(false); }
   }
   if (!campaign) return <div className="page"><div className="loading">Loading campaign…</div>{error && <div className="alert error">{error}</div>}</div>;
   const summary = campaign.summary ?? {};
@@ -63,7 +82,8 @@ export default function CampaignPage() {
     {campaign.state === "PREVIEW_EXPIRED" && <div className="alert warning"><Clock/><div><strong>Frozen preview expired</strong><span>Creator reservations were released.</span></div><button className="button secondary" onClick={() => action("discovery-runs")}>Rediscover</button></div>}
     {campaign.state === "SAFETY_PAUSED" && <div className="alert error"><ShieldAlert/><div><strong>Campaign stopped at its dispatch-attempt safety limit</strong><span>{campaign.safetyPauseReason}</span></div></div>}
     {error && <div className="alert error">{error}</div>}
-    {campaign.state === "PREVIEW_READY" && <section className="confirmation-card"><div><h2>{readOnly ? "Read-only preview is ready" : "Review recipients"}</h2><p>{readOnly ? "Outbound is physically unavailable in the current configuration." : `Freeze exactly ${formatNumber(selectedCount)} selected creators and their rendered messages. Freeze makes no TikTok request.`}</p></div>{!readOnly && <button className="button primary" onClick={() => action("freeze", { version: campaign.version })}><Check size={17}/>Freeze recipients</button>}</section>}
+    {campaign.state === "PREVIEW_READY" && <section className="confirmation-card"><div><h2>{readOnly ? "Read-only preview is ready" : "Review recipients"}</h2><p>{readOnly ? "Outbound is physically unavailable in the current configuration." : `Freeze exactly ${formatNumber(selectedCount)} selected creators and their rendered messages. Freeze makes no TikTok request.`}</p></div><div className="header-actions"><button className="button secondary" onClick={openClone}><Copy size={17}/>Clone campaign</button>{!readOnly && <button className="button primary" onClick={() => action("freeze", { version: campaign.version })}><Check size={17}/>Freeze recipients</button>}</div></section>}
+    {cloneOpen && <section className="panel clone-panel"><div className="panel-heading"><div><h2>Clone campaign</h2><p>{LOCAL_CLONE_EXPLANATION}</p></div></div><form className="clone-form" onSubmit={submitClone}><div className="form-grid"><label>New campaign name<input required value={cloneForm.name} onChange={(e) => setCloneForm({ ...cloneForm, name: e.target.value })}/></label><label>Product<input required value={cloneForm.productName} onChange={(e) => setCloneForm({ ...cloneForm, productName: e.target.value })}/></label><label>Target count<input required type="number" min="1" step="1" value={cloneForm.targetCount} onChange={(e) => setCloneForm({ ...cloneForm, targetCount: Number(e.target.value) })}/></label></div><label>Message template<textarea required rows={4} value={cloneForm.messageTemplate} onChange={(e) => setCloneForm({ ...cloneForm, messageTemplate: e.target.value })}/></label><div className="form-actions"><button type="button" className="button secondary" onClick={() => setCloneOpen(false)} disabled={cloning}>Cancel</button><button type="submit" className="button primary" disabled={cloning}>{cloning ? "Cloning…" : "Create PREVIEW_READY clone"}</button></div></form></section>}
     {["PREVIEW_READY", "FROZEN"].includes(campaign.state) && <section className="panel"><div className="panel-heading"><div><h2>Message preview</h2><p>Previewed for {sample?.creator.nickname ?? sample?.creator.username ?? "the first selected creator"}; frozen messages are immutable.</p></div></div><p style={{whiteSpace: "pre-wrap"}}>{messagePreview}</p></section>}
     {campaign.state === "FROZEN" && <section className="panel confirmation"><div><h2>Explicit confirmation required</h2><p>You are about to queue {formatNumber(selectedCount)} TikTok Affiliate messages. Visiting or refreshing this page never sends.</p></div><div className="confirmation-inputs"><label>Campaign name<input value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={campaign.name}/></label><label>Selected count<input value={confirmCount} onChange={(e) => setConfirmCount(e.target.value)} placeholder={String(selectedCount)}/></label><button className="button primary" onClick={() => action("start", { version: campaign.version, confirmationName: confirmName, confirmationCount: Number(confirmCount) })}>Confirm & queue {formatNumber(selectedCount)} messages</button></div></section>}
     {campaign.dispatchCount > 0 && <section className="metric-strip"><div><span>Queued</span><strong>{formatNumber(deliveryCounts.QUEUED)}</strong></div><div><span>Sending</span><strong>{formatNumber(deliveryCounts.PROCESSING)}</strong></div><div className="accent"><span>Sent</span><strong>{formatNumber(deliveryCounts.SENT)}</strong></div><div><span>Restricted</span><strong>{formatNumber(deliveryCounts.RESTRICTED)}</strong></div><div><span>Failed</span><strong>{formatNumber(deliveryCounts.FAILED)}</strong></div><div><span>Unknown</span><strong>{formatNumber((deliveryCounts.DELIVERY_UNKNOWN ?? 0) + (deliveryCounts.DELIVERY_UNKNOWN_UNRESOLVED ?? 0))}</strong></div></section>}

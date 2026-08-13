@@ -12,6 +12,13 @@ export type CampaignCreateInput = {
   rankingDirection?: "ASC" | "DESC";
 };
 
+export type CampaignCloneFromPreviewInput = {
+  name: string;
+  productName: string;
+  messageTemplate: string;
+  targetCount: number;
+};
+
 export type CreatorSearchPage = {
   creators: CreatorCandidate[];
   nextPageToken?: string;

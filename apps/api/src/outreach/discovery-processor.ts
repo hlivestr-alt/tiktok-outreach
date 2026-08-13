@@ -2,11 +2,12 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 import { Prisma } from "@affiliate/db";
 import type { TikTokReadAdapter } from "@affiliate/contracts";
-import { buildPreview, type ContactState, type CreatorCandidate, type CreatorFilters, type RankingMetric } from "@affiliate/domain";
+import type { CreatorCandidate, CreatorFilters } from "@affiliate/domain";
 import { TikTokApiError } from "@affiliate/tiktok-adapter";
 import { config, PrismaService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
+import { rebuildLocalPreview } from "./local-preview";
 
 const RUN_LEASE_MS = 2 * 60_000;
 const TEMPORARY_BASE_MS = 5 * 60_000;
@@ -113,54 +114,9 @@ export class DiscoveryProcessor {
   private async finalize(runId: string, leaseId: string) {
     const run = await this.prisma.discoveryRun.findFirstOrThrow({ where: { id: runId, leaseId }, include: { campaign: true, candidates: { orderBy: { discoveryOrdinal: "asc" } } } });
     const creators = run.candidates.map((row) => row.candidate as unknown as CreatorCandidate);
-    const openIds = creators.map((creator) => creator.creatorOpenId);
-    const existingCreators = await this.prisma.creator.findMany({ where: { creatorOpenId: { in: openIds } }, include: { contacts: { where: { shopId: run.shopId } } } });
-    const contacts = new Map<string, ContactState>(existingCreators.flatMap((creator) => creator.creatorOpenId ? [[creator.creatorOpenId, {
-      contactCount: creator.contacts[0]?.contactCount ?? 0, lastContactedAt: creator.contacts[0]?.lastContactedAt ?? undefined,
-      firstContactedAt: creator.contacts[0]?.firstContactedAt ?? undefined, doNotContact: creator.contacts[0]?.doNotContact,
-      unresolvedDelivery: creator.contacts[0]?.unresolvedDelivery,
-      historical: Boolean(creator.contacts[0]?.historyCoverageStart) && !creator.contacts[0]?.lastCampaignId
-    }]] : []));
-    const reservations = await this.prisma.outreachReservation.findMany({ where: { shopId: run.shopId, expiresAt: { gt: this.now() } }, include: { creator: true } });
-    const preview = buildPreview({
-      creators, filters: run.campaign.filters as CreatorFilters, contacts,
-      activeReservations: new Set(reservations.flatMap((reservation) => reservation.creator.creatorOpenId ? [reservation.creator.creatorOpenId] : [])),
-      requested: run.requestedTarget, cooldownDays: run.campaign.cooldownDays,
-      rankingMetric: run.campaign.rankingMetric as RankingMetric, rankingDirection: run.campaign.rankingDirection as "ASC" | "DESC",
-      now: this.now(), truncated: run.providerHasMore
-    });
-    const unresolved = await this.prisma.creatorShopContactState.aggregate({ where: { shopId: run.shopId, contactCount: { gt: 0 }, creator: { creatorOpenId: null } }, _count: { _all: true }, _sum: { contactCount: true } });
-    const duplicateOccurrences = Math.max(0, run.candidatesFetched - creators.length);
-    const summary = {
-      ...preview.summary, fetchedOccurrences: run.candidatesFetched,
-      skippedDuplicates: preview.summary.skippedDuplicates + duplicateOccurrences,
-      historyIdentityCoverageIncomplete: unresolved._count._all > 0,
-      unresolvedHistoricalCreators: unresolved._count._all,
-      unresolvedHistoricalOutboundContacts: unresolved._sum.contactCount ?? 0
-    };
-    const ids = new Map<string, string>();
-    for (const creator of creators) ids.set(creator.creatorOpenId, (await this.identities.ensureMarketplaceCreator(creator)).id);
+    for (const creator of creators) await this.identities.ensureMarketplaceCreator(creator);
     await this.prisma.$transaction(async (tx) => {
-      await tx.campaignRecipient.deleteMany({ where: { campaignId: run.campaignId } });
-      for (const evaluated of preview.creators) {
-        const creatorId = ids.get(evaluated.creatorOpenId)!;
-        const snapshot = await tx.creatorMetricSnapshot.create({ data: {
-          creatorId, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
-          gmvAmount: evaluated.gmv ? new Prisma.Decimal(evaluated.gmv.amount) : null, gmvCurrency: evaluated.gmv?.currency,
-          unitsSold: evaluated.unitsSold, avgVideoViews: evaluated.avgVideoViews, avgLiveViewers: evaluated.avgLiveViewers,
-          engagementRate: evaluated.engagementRate == null ? null : new Prisma.Decimal(evaluated.engagementRate),
-          sourceFetchedAt: this.now(), rawPayload: evaluated as unknown as Prisma.InputJsonValue
-        } });
-        await tx.campaignRecipient.create({ data: {
-          campaignId: run.campaignId, creatorId, snapshotId: snapshot.id, discoveryOrdinal: evaluated.discoveryOrdinal,
-          eligibility: evaluated.eligibility, skipReason: evaluated.skipReason, skipDetail: evaluated.skipDetail,
-          rankingValue: new Prisma.Decimal(evaluated.rankingValue), selected: evaluated.selected,
-          state: evaluated.selected ? "SELECTED" : evaluated.eligibility === "ELIGIBLE" ? "ELIGIBLE" : "DISCOVERED"
-        } });
-      }
-      await tx.campaign.update({ where: { id: run.campaignId }, data: { state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue, truncated: run.providerHasMore, version: { increment: 1 } } });
-      await tx.discoveryRun.update({ where: { id: runId }, data: { state: "COMPLETE", completedAt: this.now(), nextAttemptAt: null, leaseId: null, leaseExpiresAt: null } });
-      await tx.auditEvent.create({ data: { shopId: run.shopId, campaignId: run.campaignId, eventType: "PREVIEW_READY", payload: summary as unknown as Prisma.InputJsonValue } });
+      await rebuildLocalPreview(tx, runId, this.now());
     });
   }
 
