@@ -76,7 +76,7 @@ export class TikTokIntegrationService {
     return `AUTHORIZATION:${stateHash(this.credentials().serviceId).slice(0, 16)}`;
   }
 
-  private http(validationMode = false): TikTokReadOnlyHttpClient {
+  private http(validationMode = false, automaticRetries = true): TikTokReadOnlyHttpClient {
     const credentials = this.credentials();
     return new TikTokReadOnlyHttpClient({
       baseUrl: config.TIKTOK_API_BASE_URL,
@@ -84,7 +84,7 @@ export class TikTokIntegrationService {
       appSecret: credentials.appSecret,
       diagnostics: (event) => this.recordDiagnostics(event),
       governor: this.governor,
-      validationMode
+      validationMode, automaticRetries
     });
   }
 
@@ -98,11 +98,11 @@ export class TikTokIntegrationService {
     }).catch(() => undefined);
   }
 
-  async adapter(options: { validationMode?: boolean } = {}): Promise<TikTokReadAdapter> {
+  async adapter(options: { validationMode?: boolean; automaticRetries?: boolean } = {}): Promise<TikTokReadAdapter> {
     if (config.APP_MODE === "mock") return this.mock;
     this.credentials();
     return new RealTikTokReadOnlyAffiliateAdapter({
-      http: this.http(options.validationMode === true),
+      http: this.http(options.validationMode === true, options.automaticRetries !== false),
       accessToken: () => this.validAccessToken(options.validationMode === true),
       shopCipher: async () => (await this.selectedShop()).shopCipher!,
       shopScope: async () => (await this.selectedShop()).id,
@@ -114,6 +114,15 @@ export class TikTokIntegrationService {
   async discoveryAdapter(): Promise<Pick<TikTokReadAdapter, "searchCreators">> {
     const adapter = await this.adapter();
     return { searchCreators: adapter.searchCreators.bind(adapter) };
+  }
+
+  /** The history process is deliberately handed only the two read-only history operations. */
+  async historyAdapter(): Promise<Pick<TikTokReadAdapter, "listConversations" | "listMessages">> {
+    const adapter = await this.adapter({ automaticRetries: false });
+    return {
+      listConversations: adapter.listConversations.bind(adapter),
+      listMessages: adapter.listMessages.bind(adapter)
+    };
   }
 
   async activeShop() {

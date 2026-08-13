@@ -96,7 +96,7 @@ export class TikTokReadOnlyHttpClient {
   constructor(private readonly options: {
     baseUrl: string; appKey: string; appSecret: string; fetch?: FetchLike; now?: () => number;
     sleep?: (ms: number) => Promise<void>; random?: () => number; diagnostics?: (event: TikTokDiagnostics) => void;
-    governor?: TikTokReadRequestGovernor; validationMode?: boolean;
+    governor?: TikTokReadRequestGovernor; validationMode?: boolean; automaticRetries?: boolean;
   }) {}
 
   async requestRaw<T>(input: {
@@ -131,7 +131,7 @@ export class TikTokReadOnlyHttpClient {
       try {
         response = await fetcher(url, { method: input.method, headers: { "content-type": "application/json", "x-tts-access-token": input.accessToken }, body });
       } catch (cause) {
-        if (input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++); continue; }
+        if (this.options.automaticRetries !== false && input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++); continue; }
         throw new TikTokApiError("TEMPORARY", input.operation, undefined, undefined, undefined, cause instanceof Error ? cause.message : "TikTok network error");
       }
       const requestIdHeader = response.headers.get("x-tts-request-id") ?? undefined;
@@ -172,7 +172,7 @@ export class TikTokReadOnlyHttpClient {
         finalized = Boolean(lease);
         throw new TikTokApiError(kind, input.operation, response.status, code, requestId, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
       }
-      if (kind === "TEMPORARY" && input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
+      if (kind === "TEMPORARY" && this.options.automaticRetries !== false && input.operation !== "SEARCH_CREATORS" && !this.options.validationMode && retryCount < 2) { await this.backoff(retryCount++, retryAfter); continue; }
       throw new TikTokApiError(kind, input.operation, response.status, code, requestId, string(payload.message) ?? "TikTok API request failed", retryAfter);
     } } finally {
       if (lease && !finalized) await this.options.governor!.release(lease).catch(() => undefined);

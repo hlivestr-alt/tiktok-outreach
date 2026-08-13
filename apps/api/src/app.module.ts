@@ -9,9 +9,10 @@ import { TikTokIntegrationService } from "./integrations/tiktok.service";
 import { CreatorIdentityResolver } from "./identity/creator-identity-resolver.service";
 import { TikTokReadGovernor } from "./integrations/tiktok-read-governor";
 import { DiscoveryProcessor } from "./outreach/discovery-processor";
+import { HistoryProcessor } from "./history/history-processor";
 
 @Module({
   controllers: [OutreachController, HistoryController, IntegrationsController],
-  providers: [PrismaService, QueueService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, DiscoveryProcessor, OutreachService, HistoryService]
+  providers: [PrismaService, QueueService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, DiscoveryProcessor, HistoryProcessor, OutreachService, HistoryService]
 })
 export class AppModule {}

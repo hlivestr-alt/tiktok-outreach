@@ -2,7 +2,7 @@
 
 TikTok Shop affiliate outreach operations with a deterministic Phase 1 mock workflow and a Phase 2A real TikTok read-only workflow. Real mode supports seller authorization, Indonesian shop selection, marketplace discovery/performance, and resumable history backfill while keeping TikTok outbound physically unavailable.
 
-Detailed design notes are in [Architecture and safety](docs/architecture.md) and [Future TikTok integration](docs/tiktok-integration.md).
+Detailed design notes are in [Architecture and safety](docs/architecture.md), [Persistent historical synchronization](docs/historical-sync.md), and [Future TikTok integration](docs/tiktok-integration.md).
 
 ## Safety boundary
 
@@ -22,6 +22,16 @@ Detailed design notes are in [Architecture and safety](docs/architecture.md) and
 4. API documentation is at `http://127.0.0.1:4000/api/docs`.
 
 The API container applies the checked-in Prisma migration before it starts.
+
+The `history-worker` is an independent continuously running read-only process. It is not the outbound `worker` and receives only Conversation List and Message History capabilities. Start only history automation with:
+
+```powershell
+docker compose up -d postgres redis api web history-worker
+```
+
+For local development, build packages first and run `cmd /c pnpm --filter @affiliate/api start:history`. The initial backfill is started from **History readiness**; after it reaches the end, a bounded three-page incremental pass runs every six hours by default. These values are configurable with the `HISTORY_SYNC_*` environment variables.
+
+The outbound mock worker is excluded from the default Compose profile. Start it only for an explicitly intended mock workflow with `docker compose --profile outbound-mock up worker`.
 
 ## Local development
 

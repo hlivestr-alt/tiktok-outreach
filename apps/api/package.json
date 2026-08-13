@@ -8,7 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "start:discovery": "node dist/discovery-worker.js"
+    "start:discovery": "node dist/discovery-worker.js",
+    "start:history": "node dist/history-worker.js"
   },
   "dependencies": {
     "@affiliate/config": "workspace:*",

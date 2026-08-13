@@ -85,6 +85,37 @@ enum DiscoveryRunState {
   CANCELLED
 }
 
+enum HistorySyncState {
+  QUEUED
+  RUNNING
+  BACKING_OFF
+  PAUSED
+  COMPLETE
+  FAILED
+}
+
+enum HistorySyncMode {
+  INITIAL_BACKFILL
+  INCREMENTAL
+}
+
+enum HistorySyncPassKind {
+  BACKFILL
+  HEAD
+  INCREMENTAL
+}
+
+enum HistorySyncPhase {
+  LIST
+  MESSAGES
+}
+
+enum HistoryConversationWorkState {
+  QUEUED
+  RUNNING
+  COMPLETE
+}
+
 enum CreatorIdentityType {
   TIKTOK_CREATOR_OPEN_ID
   TIKTOK_CREATOR_USER_ID
@@ -130,6 +161,7 @@ model Shop {
   dailyUsage                     ShopOutboundDailyUsage[]
   dispatchEvents                 OutboundDispatchEvent[]
   discoveryRuns                  DiscoveryRun[]
+  historySyncJob                 HistorySyncJob?
   historicalFacts                HistoricalContactFact[]
   safetySettingsChanges          SafetySettingsAudit[]
 }
@@ -166,6 +198,72 @@ model IntegrationConnection {
   updatedAt              DateTime       @updatedAt
 
   @@unique([shopId, provider])
+}
+
+/// Private, durable history-worker state. Opaque provider cursors in this
+/// model are never returned by an API projection.
+model HistorySyncJob {
+  id                                String              @id @default(uuid())
+  shopId                            String              @unique
+  state                             HistorySyncState    @default(QUEUED)
+  mode                              HistorySyncMode     @default(INITIAL_BACKFILL)
+  passKind                          HistorySyncPassKind @default(BACKFILL)
+  phase                             HistorySyncPhase    @default(LIST)
+  pageSequence                      Int                 @default(0)
+  pagesProcessed                    Int                 @default(0)
+  conversationsDiscovered           Int                 @default(0)
+  conversationsImported             Int                 @default(0)
+  conversationsCompleted            Int                 @default(0)
+  messagesImported                  Int                 @default(0)
+  totalProviderRequests             Int                 @default(0)
+  consecutiveFailureCount           Int                 @default(0)
+  cursorRecoveryCount               Int                 @default(0)
+  backfillPagesSinceHead             Int                 @default(0)
+  incrementalPageIndex              Int                 @default(0)
+  privateBackfillPageToken           String?
+  privateIncrementalPageToken        String?
+  privatePendingNextPageToken        String?
+  privatePendingHasMore              Boolean?
+  lastProviderCode                   String?
+  lastErrorCategory                  String?
+  lastSuccessfulProviderRequestAt    DateTime?
+  nextAttemptAt                      DateTime?
+  leaseOwner                         String?
+  leaseExpiresAt                     DateTime?
+  startedAt                          DateTime?
+  initialCompletedAt                 DateTime?
+  completedAt                        DateTime?
+  createdAt                          DateTime             @default(now())
+  updatedAt                          DateTime             @updatedAt
+  shop                               Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  conversations                      HistorySyncConversationWork[]
+
+  @@index([state, nextAttemptAt])
+  @@index([leaseExpiresAt])
+}
+
+/// A provider-list page is staged here before its durable cursor is advanced.
+/// Message cursors are private and exact conversation IDs make replay safe.
+model HistorySyncConversationWork {
+  id                         String                       @id @default(uuid())
+  historySyncJobId           String
+  pageSequence               Int
+  externalConversationId     String
+  creatorImId                String
+  username                   String?
+  avatarUrl                  String?
+  unreadCount                Int                          @default(0)
+  state                      HistoryConversationWorkState @default(QUEUED)
+  privateMessagePageToken    String?
+  messagesImported           Int                          @default(0)
+  providerRequests           Int                          @default(0)
+  completedAt                DateTime?
+  createdAt                  DateTime                     @default(now())
+  updatedAt                  DateTime                     @updatedAt
+  historySyncJob             HistorySyncJob               @relation(fields: [historySyncJobId], references: [id], onDelete: Cascade)
+
+  @@unique([historySyncJobId, pageSequence, externalConversationId])
+  @@index([historySyncJobId, pageSequence, state])
 }
 
 model TikTokAuthorizationState {

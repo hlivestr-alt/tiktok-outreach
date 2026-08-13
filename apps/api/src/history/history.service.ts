@@ -6,8 +6,16 @@ import type { TikTokReadAdapter } from "@affiliate/contracts";
 import { config, PrismaService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
+import { publicHistoryJob } from "./history-processor";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const publicLegacySync = (run: any) => run ? ({
+  id: run.id, shopId: run.shopId, source: run.source, state: run.state,
+  earliestCoveredAt: run.earliestCoveredAt, latestCoveredAt: run.latestCoveredAt,
+  conversationsScanned: run.conversationsScanned, messagesImported: run.messagesImported,
+  unmatchedCount: run.unmatchedCount, startedAt: run.startedAt,
+  completedAt: run.completedAt, createdAt: run.createdAt
+}) : null;
 
 @Injectable()
 export class HistoryService {
@@ -326,9 +334,13 @@ export class HistoryService {
 
   async readiness() {
     const shop = await this.tiktok.activeShop();
-    const latestSync = await this.prisma.contactHistorySyncRun.findFirst({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" } });
+    const [latestSync, historyJob] = await Promise.all([
+      this.prisma.contactHistorySyncRun.findFirst({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" } }),
+      this.prisma.historySyncJob.findUnique({ where: { shopId: shop.id } })
+    ]);
     const imports = await this.prisma.historicalContactImport.findMany({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" }, take: 10 });
-    const fresh = Boolean(latestSync?.completedAt && Date.now() - latestSync.completedAt.getTime() <= 86_400_000);
+    const latestSuccessfulSyncAt = historyJob?.lastSuccessfulProviderRequestAt ?? latestSync?.completedAt;
+    const fresh = Boolean(latestSuccessfulSyncAt && Date.now() - latestSuccessfulSyncAt.getTime() <= 86_400_000);
     const conflicts = await this.prisma.historicalContactRecord.count({ where: {
       shopId: shop.id, resolutionState: { in: ["UNMATCHED", "CONFLICT"] }, supersededByRecordId: null
     } });
@@ -356,7 +368,7 @@ export class HistoryService {
     const unresolvedCreatorIdentities = await this.prisma.creatorProviderIdentity.count({
       where: { linkState: "UNRESOLVED", creator: { contacts: { some: { shopId: shop.id, contactCount: { gt: 0 } } } } }
     });
-    const paginationComplete = latestSync?.state === "COMPLETE";
+    const paginationComplete = Boolean(historyJob?.initialCompletedAt) || latestSync?.state === "COMPLETE";
     const identityReconciliationComplete = unresolvedCreatorIdentities === 0 && outboundContactsOnUnresolvedIdentities === 0 && conflicts === 0;
     const discoveryUsableForAnalysis = paginationComplete && fresh;
     const futureOutboundSafe = discoveryUsableForAnalysis && identityReconciliationComplete;
@@ -370,7 +382,9 @@ export class HistoryService {
       futureOutboundSafe,
       cooldownDedupeCoverageComplete: futureOutboundSafe,
       outboundEnabled: false,
-      latestSync,
+      outboundProvider: "PHYSICALLY_UNAVAILABLE",
+      historicalSync: historyJob ? publicHistoryJob(historyJob) : null,
+      latestSync: publicLegacySync(latestSync),
       imports,
       unresolvedImportConflicts: conflicts,
       identityCoverage: {
@@ -384,7 +398,7 @@ export class HistoryService {
       },
       warning: identityReconciliationComplete ? null : "HISTORY IDENTITY COVERAGE INCOMPLETE",
       blockers: [
-      ...(latestSync?.state === "COMPLETE" ? [] : ["A complete TikTok conversation sync is required"]),
+      ...(paginationComplete ? [] : ["A complete TikTok conversation sync is required"]),
       ...(fresh ? [] : ["History sync must be less than 24 hours old"]),
       ...(conflicts ? [`${conflicts} imported rows require identity review`] : []),
       ...(imOnlyHistoricalCreators ? [`${imOnlyHistoricalCreators} IM-only historical creator identities cannot yet be safely linked to Marketplace identities`] : []),
@@ -400,8 +414,56 @@ export class HistoryService {
     return {
       validationMode: true, providerCallCeiling: 1, providerPagesInspected: 1,
       intentionallyTruncated: true, providerHasMore: page.hasMore,
-      nextPageToken: page.nextPageToken, conversations: page.items
+      conversations: page.items
     };
+  }
+
+  async historyStatus() {
+    const shop = await this.tiktok.activeShop();
+    const job = await this.prisma.historySyncJob.findUnique({ where: { shopId: shop.id } });
+    return job ? publicHistoryJob(job) : null;
+  }
+
+  async startHistorySync() {
+    const shop = await this.tiktok.activeShop();
+    const now = new Date();
+    const existing = await this.prisma.historySyncJob.findUnique({ where: { shopId: shop.id } });
+    if (existing && !["FAILED", "PAUSED"].includes(existing.state)) return publicHistoryJob(existing);
+    const job = existing
+      ? await this.prisma.historySyncJob.update({ where: { id: existing.id }, data: {
+          state: "QUEUED", nextAttemptAt: null, lastErrorCategory: null, lastProviderCode: null,
+          ...(existing.state === "FAILED" ? { leaseOwner: null, leaseExpiresAt: null } : {}), completedAt: null
+        } })
+      : await this.prisma.historySyncJob.create({ data: { shopId: shop.id, state: "QUEUED", nextAttemptAt: null } });
+    await this.prisma.auditEvent.create({ data: { shopId: shop.id, eventType: existing ? "HISTORY_SYNC_RESUMED" : "HISTORY_SYNC_STARTED", payload: { mode: job.mode } } });
+    return publicHistoryJob(job);
+  }
+
+  async pauseHistorySync() {
+    const shop = await this.tiktok.activeShop();
+    const job = await this.prisma.historySyncJob.findUnique({ where: { shopId: shop.id } });
+    if (!job) throw new BadRequestException("Historical sync has not been started");
+    const paused = await this.prisma.historySyncJob.update({ where: { id: job.id }, data: {
+      state: "PAUSED", nextAttemptAt: null
+    } });
+    await this.prisma.auditEvent.create({ data: { shopId: shop.id, eventType: "HISTORY_SYNC_PAUSED", payload: { mode: paused.mode } } });
+    return publicHistoryJob(paused);
+  }
+
+  async resumeHistorySync() { return this.startHistorySync(); }
+
+  async runIncrementalNow() {
+    const shop = await this.tiktok.activeShop();
+    const job = await this.prisma.historySyncJob.findUnique({ where: { shopId: shop.id } });
+    if (!job?.initialCompletedAt) throw new BadRequestException("Initial historical backfill is not complete");
+    if (["RUNNING", "BACKING_OFF"].includes(job.state)) throw new BadRequestException("Historical sync is already active");
+    const queued = await this.prisma.historySyncJob.update({ where: { id: job.id }, data: {
+      state: "QUEUED", mode: "INCREMENTAL", passKind: "INCREMENTAL", phase: "LIST",
+      privateIncrementalPageToken: null, incrementalPageIndex: 0, nextAttemptAt: null,
+      leaseOwner: null, leaseExpiresAt: null
+    } });
+    await this.prisma.auditEvent.create({ data: { shopId: shop.id, eventType: "HISTORY_INCREMENTAL_REQUESTED", payload: {} } });
+    return publicHistoryJob(queued);
   }
 
   async validateMessageList(conversationId: string, creatorImId?: string, adapter?: TikTokReadAdapter) {
@@ -411,7 +473,7 @@ export class HistoryService {
     return {
       validationMode: true, providerCallCeiling: 1, providerPagesInspected: 1,
       intentionallyTruncated: true, providerHasMore: page.hasMore,
-      nextPageToken: page.nextPageToken, conversationId, messages: page.items
+      conversationId, messages: page.items
     };
   }
 }
