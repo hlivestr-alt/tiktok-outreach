@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { DelayedError, Job, Queue, Worker } from "bullmq";
 import { lockCreatorEligibility, Prisma, PrismaClient } from "@affiliate/db";
-import { loadConfig } from "@affiliate/config";
+import { liveOutboundExplicitlyEnabled, loadConfig } from "@affiliate/config";
+import type { TikTokOutboundAdapter } from "@affiliate/contracts";
 import { reconcileUnknownDelivery } from "@affiliate/domain";
-import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
-import { reserveDispatchSlot, SafetyDelay } from "./dispatch-safety";
+import { decryptTikTokToken, MockTikTokAffiliateAdapter, RealTikTokOutboundAdapter, TikTokOutboundError } from "@affiliate/tiktok-adapter";
+import { releaseDispatchLease, reserveDispatchSlot, SafetyDelay } from "./dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "./delivery-policy";
 import { campaignCompletionSummary } from "./campaign-completion";
 
@@ -12,7 +13,33 @@ const config = loadConfig();
 const redisUrl = new URL(config.REDIS_URL);
 const connection = { host: redisUrl.hostname, port: Number(redisUrl.port || 6379), password: redisUrl.password || undefined };
 const prisma = new PrismaClient();
-const adapter = new MockTikTokAffiliateAdapter();
+function required(name: "TIKTOK_APP_KEY" | "TIKTOK_APP_SECRET" | "TIKTOK_TOKEN_ENCRYPTION_KEY"): string {
+  const value = config[name];
+  if (!value) throw new Error(`LIVE_OUTBOUND_NOT_CONFIGURED: ${name} is required`);
+  return value;
+}
+const disabledOutbound: TikTokOutboundAdapter = {
+  createOrGetConversation: async () => { throw new Error("OUTBOUND_DISABLED"); },
+  sendMessage: async () => { throw new Error("OUTBOUND_DISABLED"); }
+};
+const adapter: TikTokOutboundAdapter = config.OUTBOUND_MODE === "mock" ? new MockTikTokAffiliateAdapter()
+  : liveOutboundExplicitlyEnabled(config) ? new RealTikTokOutboundAdapter({
+    baseUrl: config.TIKTOK_API_BASE_URL, appKey: required("TIKTOK_APP_KEY"), appSecret: required("TIKTOK_APP_SECRET"),
+    shopCipher: async () => {
+      const shop = await prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true }, select: { shopCipher: true } });
+      if (!shop?.shopCipher) throw new Error("LIVE_OUTBOUND_NOT_CONFIGURED: selected shop cipher is unavailable");
+      return shop.shopCipher;
+    },
+    accessToken: async () => {
+      const shop = await prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true }, select: { id: true } });
+      if (!shop) throw new Error("LIVE_OUTBOUND_NOT_CONFIGURED: selected shop is unavailable");
+      const connection = await prisma.integrationConnection.findUnique({ where: { shopId_provider: { shopId: shop.id, provider: "TIKTOK_SHOP" } } });
+      if (!connection?.accessTokenCiphertext || connection.status !== "HEALTHY" || !connection.accessTokenExpiresAt || connection.accessTokenExpiresAt <= new Date()) {
+        throw new TikTokOutboundError("AUTH", "CREATE_CONVERSATION", undefined, undefined, "A healthy unexpired TikTok access token is required");
+      }
+      return decryptTikTokToken(connection.accessTokenCiphertext, required("TIKTOK_TOKEN_ENCRYPTION_KEY"));
+    }
+  }) : disabledOutbound;
 const queue = new Queue("outreach", { connection });
 const reconciliationDelays = config.MOCK_RECONCILIATION_DELAYS_MS.split(",").map(Number);
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -138,7 +165,8 @@ async function completeCampaignIfDone(campaignId: string) {
   if (unfinished) return;
   const recipients = await prisma.campaignRecipient.findMany({ where: { campaignId, selected: true }, select: { state: true } });
   const completion = campaignCompletionSummary(recipients.map((recipient) => recipient.state));
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { summary: true } });
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { state: true, summary: true } });
+  if (campaign.state === "CANCELLED") return;
   const previous = campaign.summary && typeof campaign.summary === "object" && !Array.isArray(campaign.summary) ? campaign.summary as Record<string, unknown> : {};
   await prisma.campaign.update({ where: { id: campaignId }, data: {
     state: completion.completedSuccessfully ? "COMPLETED" : "COMPLETED_WITH_ERRORS",
@@ -146,8 +174,26 @@ async function completeCampaignIfDone(campaignId: string) {
   } });
 }
 
+async function markRestricted(recipient: any, errorCode: string) {
+  await prisma.$transaction([
+    prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { state: "RESTRICTED", lastErrorCode: errorCode, lastErrorDetail: "Creator is not currently messageable" } }),
+    prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "RESTRICTED", skipReason: errorCode, skipDetail: "Creator is not currently messageable" } }),
+    prisma.outreachReservation.deleteMany({ where: { campaignRecipientId: recipient.id } }),
+    prisma.queueOutbox.updateMany({ where: { recipientId: recipient.id }, data: { state: "COMPLETED" } })
+  ]);
+}
+
+async function pauseShopForProviderFailure(recipient: any, error: TikTokOutboundError) {
+  const reason = `TikTok ${error.kind.toLowerCase()} failure paused outbound; operator action is required`;
+  await prisma.$transaction([
+    prisma.campaign.updateMany({ where: { shopId: recipient.campaign.shopId, state: { in: ["QUEUED", "RUNNING"] } }, data: { state: "SAFETY_PAUSED", safetyPauseReason: reason, version: { increment: 1 } } }),
+    prisma.queueOutbox.updateMany({ where: { campaign: { shopId: recipient.campaign.shopId }, state: { in: ["PENDING", "ENQUEUED"] } }, data: { state: "SAFETY_PAUSED", lastError: reason } }),
+    prisma.auditEvent.create({ data: { shopId: recipient.campaign.shopId, campaignId: recipient.campaignId, eventType: "OUTBOUND_PROVIDER_SAFETY_PAUSED", payload: { kind: error.kind, providerCode: error.providerCode, requestId: error.requestId } } })
+  ]);
+}
+
 async function processSend(job: Job<{ recipientId: string }>) {
-  if (config.APP_MODE !== "mock") throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable in read-only mode");
+  if (config.OUTBOUND_MODE === "read_only" || (config.OUTBOUND_MODE === "live" && !liveOutboundExplicitlyEnabled(config))) throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable");
   const recipient = await prisma.campaignRecipient.findUnique({
     where: { id: job.data.recipientId },
     include: { creator: true, campaign: { include: { shop: true } }, delivery: true, reservation: true }
@@ -165,7 +211,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
     return delayJob(job, 5000);
   }
   if (recipient.campaign.state === "SAFETY_PAUSED") return;
-  const creatorOpenId = recipient.creator.creatorOpenId;
+  const creatorOpenId = recipient.creatorOpenIdSnapshot;
   if (!creatorOpenId) {
     await markTerminalFailure(recipient, "INVALID_MESSAGING_ID", "Creator has no Marketplace Open ID");
     await completeCampaignIfDone(recipient.campaignId);
@@ -179,6 +225,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
     return;
   }
 
+  try {
   const attemptNumber = claim.attemptNumber;
   const attempt = await prisma.deliveryAttempt.create({ data: { deliveryId: recipient.delivery.id, attemptNumber, outcome: "STARTED", startedAt: new Date() } });
   let providerConversation: Awaited<ReturnType<typeof adapter.createOrGetConversation>>;
@@ -192,6 +239,16 @@ async function processSend(job: Job<{ recipientId: string }>) {
     await prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { conversationId: conversation.id } });
     recipient.delivery.conversationId = conversation.id;
   } catch (error) {
+    if (error instanceof TikTokOutboundError && ["AUTH", "PERMISSION"].includes(error.kind)) {
+      await pauseShopForProviderFailure(recipient, error);
+      return;
+    }
+    if (error instanceof TikTokOutboundError && error.kind === "RESTRICTED") {
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? "RESTRICTED"), providerRequestId: error.requestId, completedAt: new Date() } });
+      await markRestricted(recipient, String(error.providerCode ?? "RESTRICTED"));
+      await completeCampaignIfDone(recipient.campaignId);
+      return;
+    }
     const detail = error instanceof Error ? error.message : "Provider conversation setup failed";
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
@@ -216,6 +273,16 @@ async function processSend(job: Job<{ recipientId: string }>) {
       idempotencyKey: recipient.delivery.deterministicKey
     });
   } catch (error) {
+    if (error instanceof TikTokOutboundError && ["AUTH", "PERMISSION"].includes(error.kind)) {
+      await pauseShopForProviderFailure(recipient, error);
+      return;
+    }
+    if (error instanceof TikTokOutboundError) {
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? error.kind), providerRequestId: error.requestId, completedAt: new Date() } });
+      await markTerminalFailure(recipient, String(error.providerCode ?? error.kind), "TikTok definitively rejected the message request");
+      await completeCampaignIfDone(recipient.campaignId);
+      return;
+    }
     const detail = error instanceof Error ? error.message : "Network outcome was not observable";
     await markDeliveryUnknown(recipient, attempt.id, undefined, detail);
     await completeCampaignIfDone(recipient.campaignId);
@@ -227,7 +294,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
   } else if (result.status === "DELIVERY_UNKNOWN") {
     await markDeliveryUnknown(recipient, attempt.id, result.requestId, "Provider response did not establish whether the message was accepted");
     const numeric = Number(creatorOpenId.slice(-5));
-    if (numeric % 74 === 0) {
+    if (config.OUTBOUND_MODE === "mock" && numeric % 74 === 0) {
       await prisma.conversationMessage.create({ data: {
         conversationId: conversation.id, externalMessageId: `mock_reconciled_${recipient.delivery.id}`, direction: "OUTBOUND",
         content: recipient.frozenMessage, contentHash: recipient.contentHash, providerCreatedAt: new Date(), importSource: "MOCK_PROVIDER_RECONCILIATION"
@@ -237,7 +304,7 @@ async function processSend(job: Job<{ recipientId: string }>) {
     await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
       outcome: "FAILED_TERMINAL", providerRequestId: result.requestId, providerCode: result.errorCode, completedAt: new Date()
     } });
-    await markTerminalFailure(recipient, result.errorCode, "Creator cannot receive affiliate messages");
+    await markRestricted(recipient, result.errorCode);
   } else {
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
@@ -257,6 +324,9 @@ async function processSend(job: Job<{ recipientId: string }>) {
     }
   }
   await completeCampaignIfDone(recipient.campaignId);
+  } finally {
+    await releaseDispatchLease(prisma, recipient.campaign.shopId, claim.leaseOwner);
+  }
 }
 
 async function processReconciliation(job: Job<{ deliveryId: string; attemptNumber: number }>) {
@@ -307,7 +377,7 @@ worker.on("error", (error) => console.error("Worker error", { error: error.messa
 void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error));
 const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error("Worker maintenance sweep failed", error)), 5_000);
 maintenanceTimer.unref();
-console.log(config.APP_MODE === "mock" ? "Mock outreach worker ready" : "TikTok worker idle: outbound disabled", { mode: config.APP_MODE, outboundProvider: config.APP_MODE === "mock" ? "mock-only" : "none" });
+console.log(config.OUTBOUND_MODE === "mock" ? "Mock outreach worker ready" : config.OUTBOUND_MODE === "live" ? "Live TikTok outbound worker ready" : "TikTok worker idle: outbound disabled", { appMode: config.APP_MODE, outboundMode: config.OUTBOUND_MODE });
 
 async function shutdown() {
   clearInterval(maintenanceTimer);

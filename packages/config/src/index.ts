@@ -6,6 +6,8 @@ const schema = z.object({
   PORT: z.coerce.number().default(4000),
   HOST: z.string().default("127.0.0.1"),
   APP_MODE: z.enum(["mock", "read_only"]).default("mock"),
+  OUTBOUND_MODE: z.enum(["mock", "read_only", "live"]).optional(),
+  ENABLE_LIVE_TIKTOK_OUTBOUND: z.string().optional(),
   TIKTOK_APP_KEY: z.string().min(1).optional(),
   TIKTOK_APP_SECRET: z.string().min(1).optional(),
   TIKTOK_SERVICE_ID: z.string().min(1).optional(),
@@ -26,12 +28,23 @@ const schema = z.object({
   MAX_RECIPIENTS_PER_CAMPAIGN: z.coerce.number().int().positive().default(1000),
   MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: z.coerce.number().int().positive().default(4000),
   MAX_SENDS_PER_DAY: z.coerce.number().int().positive().default(1000),
+  MAX_SENDS_PER_HOUR: z.coerce.number().int().positive().default(50),
   MAX_DISPATCHES_PER_MINUTE: z.coerce.number().int().positive().default(10),
+  OUTBOUND_PACING_MS: z.coerce.number().int().min(1000).default(5000),
   MOCK_RECONCILIATION_DELAYS_MS: z.string().default("300000,1800000,7200000")
 });
 
-export type AppConfig = z.infer<typeof schema>;
-export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): AppConfig => schema.parse(environment);
+type ParsedConfig = z.infer<typeof schema>;
+export type AppConfig = Omit<ParsedConfig, "OUTBOUND_MODE"> & { OUTBOUND_MODE: "mock" | "read_only" | "live" };
+export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): AppConfig => {
+  const parsed = schema.parse(environment);
+  return { ...parsed, OUTBOUND_MODE: parsed.OUTBOUND_MODE ?? (parsed.APP_MODE === "mock" ? "mock" : "read_only") };
+};
+
+export function liveOutboundExplicitlyEnabled(config: AppConfig): boolean {
+  return config.OUTBOUND_MODE === "live" && config.APP_MODE === "read_only"
+    && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES";
+}
 
 export function tiktokCredentialsConfigured(config: AppConfig): boolean {
   return Boolean(config.TIKTOK_APP_KEY && config.TIKTOK_APP_SECRET && config.TIKTOK_SERVICE_ID && config.TIKTOK_TOKEN_ENCRYPTION_KEY);

@@ -55,6 +55,7 @@ export type SkipReason =
   | "DO_NOT_CONTACT"
   | "DELIVERY_UNKNOWN"
   | "COOLDOWN"
+  | "CONTACTED_BY_APP_WITHIN_COOLDOWN"
   | "ACTIVE_RESERVATION";
 
 export type EvaluatedCreator = CreatorCandidate & {
@@ -160,7 +161,7 @@ export function buildPreview(input: {
     else if (contact?.doNotContact) skipReason = "DO_NOT_CONTACT";
     else if (contact?.unresolvedDelivery) skipReason = "DELIVERY_UNKNOWN";
     else if (contact?.lastContactedAt && contact.lastContactedAt > cutoff) {
-      skipReason = "COOLDOWN";
+      skipReason = contact.historical ? "COOLDOWN" : "CONTACTED_BY_APP_WITHIN_COOLDOWN";
       skipDetail = `${contact.historical ? "Historical" : "App"} contact at ${contact.lastContactedAt.toISOString()}`;
     } else if (input.activeReservations.has(creator.creatorOpenId)) skipReason = "ACTIVE_RESERVATION";
     if (creator.creatorOpenId) seen.add(creator.creatorOpenId);
@@ -193,7 +194,7 @@ export function buildPreview(input: {
       skippedDuplicates: count("DUPLICATE"),
       skippedDoNotContact: count("DO_NOT_CONTACT"),
       skippedUnknownDelivery: count("DELIVERY_UNKNOWN"),
-      skippedCooldown: count("COOLDOWN"),
+      skippedCooldown: count("COOLDOWN") + count("CONTACTED_BY_APP_WITHIN_COOLDOWN"),
       skippedActiveReservation: count("ACTIVE_RESERVATION"),
       eligible: eligible.length,
       selected,
@@ -213,6 +214,7 @@ export type SafetyLimits = {
   maxRecipientsPerCampaign: number;
   maxDispatchAttemptsPerCampaign: number;
   maxSendsPerDay: number;
+  maxSendsPerHour?: number;
   maxDispatchesPerMinute: number;
 };
 

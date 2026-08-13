@@ -26,6 +26,7 @@ enum CampaignState {
   SAFETY_PAUSED
   COMPLETED
   COMPLETED_WITH_ERRORS
+  CANCELLED
 }
 
 enum Eligibility {
@@ -42,6 +43,7 @@ enum RecipientState {
   PROCESSING
   SENT
   FAILED
+  RESTRICTED
   DELIVERY_UNKNOWN
   DELIVERY_UNKNOWN_UNRESOLVED
   CANCELLED
@@ -53,8 +55,10 @@ enum DeliveryState {
   SENT
   FAILED_RETRYABLE
   FAILED_TERMINAL
+  RESTRICTED
   DELIVERY_UNKNOWN
   DELIVERY_UNKNOWN_UNRESOLVED
+  CANCELLED
 }
 
 enum SyncState {
@@ -149,7 +153,10 @@ model Shop {
   maxRecipientsPerCampaign       Int                       @default(1000)
   maxDispatchAttemptsPerCampaign Int                       @default(4000)
   maxSendsPerDay                 Int                       @default(1000)
+  maxSendsPerHour                Int                       @default(50)
   maxDispatchesPerMinute         Int                       @default(10)
+  outboundPacingMs               Int                       @default(5000)
+  outboundNextAllowedAt          DateTime?
   createdAt                      DateTime                  @default(now())
   updatedAt                      DateTime                  @updatedAt
   campaigns                      Campaign[]
@@ -164,6 +171,20 @@ model Shop {
   historySyncJob                 HistorySyncJob?
   historicalFacts                HistoricalContactFact[]
   safetySettingsChanges          SafetySettingsAudit[]
+  outboundLease                  ShopOutboundLease?
+}
+
+/// Durable single-flight lease for outbound provider mutation sequences.
+model ShopOutboundLease {
+  shopId      String   @id
+  leaseOwner  String
+  deliveryId String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
 
 model IntegrationConnection {
@@ -525,6 +546,9 @@ model Campaign {
   truncated         Boolean                 @default(false)
   frozenAt          DateTime?
   freezeExpiresAt   DateTime?
+  frozenFilters     Json?
+  frozenTemplate    String?                 @db.Text
+  frozenContext     Json?
   dispatchCount     Int                     @default(0)
   safetyPauseReason String?
   createdAt         DateTime                @default(now())
@@ -602,6 +626,9 @@ model CampaignRecipient {
   selected         Boolean               @default(false)
   frozenMessage    String?               @db.Text
   contentHash      String?
+  creatorOpenIdSnapshot String?
+  recipientSnapshot Json?
+  frozenRank        Int?
   state            RecipientState        @default(DISCOVERED)
   replyStatus      String                @default("NONE")
   campaign         Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -638,6 +665,7 @@ model OutreachDelivery {
   externalMessageId   String?                     @unique
   providerRequestId   String?
   attemptCount        Int                         @default(0)
+  lastAttemptedAt     DateTime?
   firstDispatchedAt   DateTime?
   sentAt              DateTime?
   lastErrorCode       String?

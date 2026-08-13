@@ -38,7 +38,7 @@ export async function expireFrozenCampaigns(prisma: PrismaClient, now = new Date
 }
 
 export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQueue, limit = 250): Promise<{ enqueued: number; failed: number }> {
-  if (config.APP_MODE !== "mock") return { enqueued: 0, failed: 0 };
+  if (config.OUTBOUND_MODE === "read_only") return { enqueued: 0, failed: 0 };
   const missing = await prisma.campaignRecipient.findMany({
     where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING"] } } },
     include: { delivery: true }, take: limit
@@ -118,14 +118,17 @@ export async function ensureMockShop(prisma: PrismaService) {
       name: "Indonesia Mock Shop", region: "ID", currency: "IDR", timezone: config.SHOP_TIMEZONE,
       connectionMode: "MOCK", maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN,
       maxDispatchAttemptsPerCampaign: config.MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN,
-      maxSendsPerDay: config.MAX_SENDS_PER_DAY, maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE
+      maxSendsPerDay: config.MAX_SENDS_PER_DAY, maxSendsPerHour: config.MAX_SENDS_PER_HOUR,
+      maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE, outboundPacingMs: config.OUTBOUND_PACING_MS
     } });
     await tx.safetySettingsAudit.create({ data: {
       shopId: shop.id, source: "ENVIRONMENT_INITIALIZATION_ONLY", effectiveValues: {
         maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign,
         maxDispatchAttemptsPerCampaign: shop.maxDispatchAttemptsPerCampaign,
         maxSendsPerDay: shop.maxSendsPerDay,
+        maxSendsPerHour: shop.maxSendsPerHour,
         maxDispatchesPerMinute: shop.maxDispatchesPerMinute,
+        outboundPacingMs: shop.outboundPacingMs,
         timezone: shop.timezone
       }
     } });

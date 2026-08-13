@@ -15,7 +15,7 @@ flowchart LR
   Adapter --> Mock[Deterministic mock provider]
 ```
 
-The domain package owns filtering, ranking, cooldown decisions, deduplication, template rendering, safety assertions, and reconciliation matching. The API owns operator workflows and persistence. The worker owns dispatch state transitions. Provider details are behind `TikTokAffiliateAdapter`; phase one registers only `MockTikTokAffiliateAdapter`. This keeps future modules from accumulating in either the UI or a single service class.
+The domain package owns filtering, ranking, cooldown decisions, deduplication, template rendering, safety assertions, and reconciliation matching. The API owns operator workflows and persistence. The worker owns dispatch state transitions. Discovery receives only `searchCreators`, history receives only `listConversations` and `listMessages`, and the outbound worker receives only `createOrGetConversation` and `sendMessage`.
 
 ## Campaign lifecycle
 
@@ -31,7 +31,7 @@ The domain package owns filtering, ranking, cooldown decisions, deduplication, t
 
 Frozen previews expire after 30 minutes, move to `PREVIEW_EXPIRED`, and release reservations idempotently. Freeze re-checks current contact state, cooldown, unknown deliveries, do-not-contact, and active reservations under ordered per-shop/per-creator transaction locks shared by history and delivery mutations. If every selected creator became ineligible, freeze returns the campaign to `PREVIEW_EXPIRED` immediately without an active expiry window. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection.
 
-Campaign recipient capacity (`maxRecipientsPerCampaign`) and provider dispatch-attempt capacity (`maxDispatchAttemptsPerCampaign`) are independent. Daily and rolling-minute claims remain separate. Reaching the campaign attempt ceiling moves the campaign to `SAFETY_PAUSED`; it does not create an infinite delayed-job loop.
+Campaign recipient capacity (`maxRecipientsPerCampaign`) and provider dispatch-attempt capacity (`maxDispatchAttemptsPerCampaign`) are independent. Daily, hourly, and rolling-minute claims remain separate. A persistent per-shop lease allows one active mutation sequence, and `outboundPacingMs` spaces starts. Reaching the campaign attempt ceiling moves the campaign to `SAFETY_PAUSED`; it does not create an infinite delayed-job loop.
 
 PostgreSQL is the queue source of truth. Campaign start commits each delivery and its `QueueOutbox` intent atomically. API and worker sweepers reconcile every safe `QUEUED` recipient to a deterministic BullMQ job after partial Redis failures or restarts. Queue presence never marks a delivery sent.
 
@@ -45,8 +45,9 @@ PostgreSQL stores the exact frozen outbound message and content hash. Runtime lo
 
 ## Safety invariants
 
-- `APP_MODE` validates only to `mock` or `read_only`; unsupported values fail closed and no production/live-send mode exists.
-- The real read-only adapter can issue only its exact method/path allowlist. Campaign freeze, queue creation, and worker dispatch reject `read_only` mode before any provider call.
+- `APP_MODE` validates only to `mock` or `read_only`. `OUTBOUND_MODE` independently validates to `mock`, `read_only`, or `live`.
+- Live capability requires `APP_MODE=read_only`, `OUTBOUND_MODE=live`, and the exact acknowledgement `ENABLE_LIVE_TIKTOK_OUTBOUND=I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES`; otherwise it fails closed.
+- The real read-only adapter still accepts only its exact read allowlist. The separate outbound adapter accepts only Create Conversation and Send Message; Mark Read is absent.
 - A dispatch is counted before the mock provider is called.
 - Campaign, Indonesia shop-day, and rolling-minute ceilings are enforced under a PostgreSQL advisory lock and serializable transaction.
 - PostgreSQL is authoritative for the maximum permitted dispatch rate. BullMQ also has an environment-configured infrastructure limiter, which may operate more slowly but can never override the database ceiling.
@@ -57,9 +58,9 @@ PostgreSQL stores the exact frozen outbound message and content hash. Runtime lo
 - Immediately before a dispatch claim, the worker re-checks do-not-contact, unrelated unresolved deliveries, reservation ownership, campaign state, and external cooldown changes. Unsafe recipients are cancelled and audited without consuming an attempt.
 - Pause is cooperative: active database transitions finish, queued jobs delay, and resume re-enqueues only safe states.
 
-## Historical-contact gate
+## Historical-contact capability
 
-The readiness endpoint reports whether a complete, recent conversation sync exists and records imported CSV sources. Mock sending is available for phase-one testing, but the future live-mode gate must require successful historical coverage before its adapter can be enabled. The import upserts contact state so outreach predating this application participates in cooldown and duplicate prevention.
+Exact Creator Open IDs make every confirmed app-originated send dedupe/cooldown safe. Unresolved IM-only historical identities never produce a heuristic match and do not block all outbound; the API and UI report `HISTORICAL_COOLDOWN_COVERAGE_INCOMPLETE` separately from `APP_ORIGINATED_DEDUPE_SAFE`.
 
 ## Extension points
 

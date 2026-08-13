@@ -117,7 +117,16 @@ export class OutreachService {
     if (!campaign) throw new NotFoundException("Campaign not found");
     const { discoveryRun, shop, ...publicCampaign } = campaign;
     const { shopCipher: _shopCipher, ...publicShop } = shop;
-    return { ...publicCampaign, shop: publicShop, discovery: discoveryRun ? publicDiscoveryRun(discoveryRun) : null };
+    return {
+      ...publicCampaign, shop: publicShop, discovery: discoveryRun ? publicDiscoveryRun(discoveryRun) : null,
+      outboundMode: config.OUTBOUND_MODE.toUpperCase(), outboundEnabled: config.OUTBOUND_MODE === "mock"
+        || (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES"),
+      cooldownCapability: {
+        appOriginated: "APP_ORIGINATED_DEDUPE_SAFE",
+        historical: (publicCampaign.summary as Record<string, unknown> | null)?.historyIdentityCoverageIncomplete
+          ? "HISTORICAL_COOLDOWN_COVERAGE_INCOMPLETE" : "FULL_HISTORICAL_COOLDOWN_SAFE"
+      }
+    };
   }
 
   async cancelDiscovery(id: string) {
@@ -131,7 +140,7 @@ export class OutreachService {
   }
 
   async freeze(id: string, version: number) {
-    if (config.APP_MODE === "read_only") throw new BadRequestException("READ_ONLY_PREVIEW: real TikTok campaigns cannot be frozen or dispatched in Phase 2A");
+    if (config.OUTBOUND_MODE === "read_only") throw new BadRequestException("READ_ONLY_PREVIEW: outbound is physically unavailable until an outbound mode is explicitly enabled");
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
@@ -156,17 +165,17 @@ export class OutreachService {
       const cutoff = new Date(Date.now() - current.cooldownDays * 86_400_000);
       const exclusionCounts: Record<string, number> = {};
       let finalSelected = 0;
-      for (const recipient of selected) {
+      for (const [frozenIndex, recipient] of selected.entries()) {
         const contact = recipient.creator.contacts[0];
         const activeReservation = await tx.outreachReservation.findFirst({
           where: { shopId: current.shopId, creatorId: recipient.creatorId, expiresAt: { gt: new Date() } }
         });
-        let skipReason: "DO_NOT_CONTACT" | "DELIVERY_UNKNOWN" | "COOLDOWN" | "ACTIVE_RESERVATION" | undefined;
+        let skipReason: "DO_NOT_CONTACT" | "DELIVERY_UNKNOWN" | "COOLDOWN" | "CONTACTED_BY_APP_WITHIN_COOLDOWN" | "ACTIVE_RESERVATION" | undefined;
         let skipDetail: string | undefined;
         if (contact?.doNotContact) skipReason = "DO_NOT_CONTACT";
         else if (contact?.unresolvedDelivery) skipReason = "DELIVERY_UNKNOWN";
         else if (contact?.lastContactedAt && contact.lastContactedAt > cutoff) {
-          skipReason = "COOLDOWN";
+          skipReason = contact.lastCampaignId ? "CONTACTED_BY_APP_WITHIN_COOLDOWN" : "COOLDOWN";
           skipDetail = `Contact appeared after preview at ${contact.lastContactedAt.toISOString()}`;
         } else if (activeReservation) skipReason = "ACTIVE_RESERVATION";
         if (skipReason) {
@@ -182,8 +191,16 @@ export class OutreachService {
           productName: campaign.productName, campaignName: campaign.name
         });
         const contentHash = createHash("sha256").update(frozenMessage).digest("hex");
+        if (!recipient.creator.creatorOpenId) throw new BadRequestException("Every frozen recipient requires an exact TikTok Creator Open ID");
         await tx.outreachReservation.create({ data: { shopId: campaign.shopId, creatorId: recipient.creatorId, campaignRecipientId: recipient.id, expiresAt } });
-        await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { frozenMessage, contentHash, state: "RESERVED" } });
+        await tx.campaignRecipient.update({ where: { id: recipient.id }, data: {
+          frozenMessage, contentHash, state: "RESERVED", creatorOpenIdSnapshot: recipient.creator.creatorOpenId,
+          frozenRank: frozenIndex + 1, recipientSnapshot: {
+            creatorId: recipient.creatorId, creatorOpenId: recipient.creator.creatorOpenId,
+            displayName: recipient.creator.nickname ?? recipient.creator.username ?? "there",
+            username: recipient.creator.username, rankingValue: recipient.rankingValue.toString(), discoveryOrdinal: recipient.discoveryOrdinal
+          }
+        } });
         finalSelected++;
       }
       const previousSummary = current.summary && typeof current.summary === "object" && !Array.isArray(current.summary)
@@ -213,6 +230,8 @@ export class OutreachService {
       } else {
         await tx.campaign.update({ where: { id }, data: {
           state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt,
+          frozenFilters: current.filters as Prisma.InputJsonValue, frozenTemplate: current.messageTemplate,
+          frozenContext: { campaignName: current.name, productName: current.productName, rankingMetric: current.rankingMetric, rankingDirection: current.rankingDirection },
           summary: finalSummary as Prisma.InputJsonValue, version: { increment: 1 }
         } });
         await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: {
@@ -224,7 +243,10 @@ export class OutreachService {
   }
 
   async start(id: string, input: { version: number; confirmationName: string; confirmationCount: number }) {
-    if (config.APP_MODE === "read_only") throw new BadRequestException("OUTBOUND_DISABLED: real TikTok campaigns cannot enter the dispatch queue");
+    if (config.OUTBOUND_MODE === "read_only") throw new BadRequestException("OUTBOUND_DISABLED: outbound is physically unavailable until an outbound mode is explicitly enabled");
+    if (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND !== "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES") {
+      throw new BadRequestException("LIVE_OUTBOUND_NOT_ACKNOWLEDGED: explicit live-send configuration is required");
+    }
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true, state: "RESERVED" } });
@@ -271,6 +293,29 @@ export class OutreachService {
     const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, state: { in: ["QUEUED", "RESERVED"] } } });
     await this.prisma.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
     await this.queues.reconcile();
+    return this.get(id);
+  }
+
+  async cancel(id: string) {
+    const campaign = await this.requiredCampaign(id);
+    if (!["FROZEN", "QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED"].includes(campaign.state)) {
+      if (campaign.state === "CANCELLED") return this.get(id);
+      throw new BadRequestException("Campaign cannot be cancelled in its current state");
+    }
+    await this.prisma.$transaction(async (tx) => {
+      const unsent = await tx.campaignRecipient.findMany({ where: {
+        campaignId: id, state: { in: ["RESERVED", "QUEUED"] }
+      }, select: { id: true } });
+      const ids = unsent.map((recipient) => recipient.id);
+      if (ids.length) {
+        await tx.outreachDelivery.updateMany({ where: { campaignRecipientId: { in: ids }, state: { in: ["PENDING", "FAILED_RETRYABLE"] } }, data: { state: "CANCELLED", lastErrorCode: "CAMPAIGN_CANCELLED", lastErrorDetail: "Cancelled before provider dispatch started" } });
+        await tx.campaignRecipient.updateMany({ where: { id: { in: ids } }, data: { state: "CANCELLED" } });
+        await tx.queueOutbox.updateMany({ where: { recipientId: { in: ids } }, data: { state: "COMPLETED", lastError: "Campaign cancelled before dispatch" } });
+        await tx.outreachReservation.deleteMany({ where: { campaignRecipientId: { in: ids } } });
+      }
+      await tx.campaign.update({ where: { id }, data: { state: "CANCELLED", version: { increment: 1 } } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_CANCELLED", payload: { unsentRecipientsCancelled: ids.length } } });
+    });
     return this.get(id);
   }
 }

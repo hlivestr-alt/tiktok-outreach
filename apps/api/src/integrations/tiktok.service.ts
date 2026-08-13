@@ -171,7 +171,8 @@ export class TikTokIntegrationService {
         name: shop.name, externalShopId: shop.id, shopCipher: shop.cipher, shopCode: shop.code, sellerType: shop.sellerType,
         region: shop.region, currency: "UNKNOWN", timezone: shop.region === "ID" ? "Asia/Jakarta" : config.SHOP_TIMEZONE,
         connectionMode: "READ_ONLY", selectedForReadOnly: false, maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN,
-        maxDispatchAttemptsPerCampaign: config.MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN, maxSendsPerDay: config.MAX_SENDS_PER_DAY, maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE
+        maxDispatchAttemptsPerCampaign: config.MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN, maxSendsPerDay: config.MAX_SENDS_PER_DAY,
+        maxSendsPerHour: config.MAX_SENDS_PER_HOUR, maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE, outboundPacingMs: config.OUTBOUND_PACING_MS
       } }));
     }
     const primary = persisted.find((shop) => shop.region === "ID")!;
@@ -239,7 +240,7 @@ export class TikTokIntegrationService {
   }
 
   private async selectedShop() {
-    const shop = await this.prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true } });
+    const shop = await this.prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true }, orderBy: { updatedAt: "desc" } });
     if (!shop?.shopCipher) throw new ServiceUnavailableException("A real authorized shop must be explicitly selected");
     return shop;
   }
@@ -425,7 +426,7 @@ export class TikTokIntegrationService {
   async status() {
     if (config.APP_MODE === "mock") {
       const shop = await ensureMockShop(this.prisma);
-      return { mode: "MOCK", configurationState: "MOCK_READY", shop, capabilities: await this.mock.getCapabilities(), outboundEnabled: true, outboundProvider: "MOCK_ONLY" };
+      return { mode: "MOCK", outboundMode: config.OUTBOUND_MODE.toUpperCase(), configurationState: "MOCK_READY", shop, capabilities: await this.mock.getCapabilities(), outboundEnabled: config.OUTBOUND_MODE === "mock", outboundProvider: "MOCK_ONLY" };
     }
     const shops = await this.prisma.shop.findMany({ where: { connectionMode: "READ_ONLY" }, orderBy: { createdAt: "asc" } });
     const selected = shops.find((shop) => shop.selectedForReadOnly);
@@ -435,11 +436,16 @@ export class TikTokIntegrationService {
     } }) : null;
     const now = new Date();
     return {
-      mode: "READ_ONLY", configurationState: this.configured ? connection ? connection.status : "AUTHORIZATION_REQUIRED" : "READ_ONLY_NOT_CONFIGURED",
-      outboundEnabled: false, outboundProvider: "PHYSICALLY_UNAVAILABLE", readOnlyStatus: "REAL TIKTOK — READ ONLY",
+      mode: "READ_ONLY", outboundMode: config.OUTBOUND_MODE.toUpperCase(), configurationState: this.configured ? connection ? connection.status : "AUTHORIZATION_REQUIRED" : "READ_ONLY_NOT_CONFIGURED",
+      outboundEnabled: config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES",
+      outboundProvider: config.OUTBOUND_MODE === "live" ? "LIVE_CONFIGURATION_GATED" : "PHYSICALLY_UNAVAILABLE",
+      readOnlyStatus: config.OUTBOUND_MODE === "live" ? "REAL TIKTOK — LIVE OUTBOUND CONFIGURED" : "REAL TIKTOK — READ ONLY",
       selectedShop: selected ? {
         id: selected.id, externalShopId: selected.externalShopId, name: selected.name, region: selected.region, code: selected.shopCode,
-        currency: selected.currency, currencyEvidence: selected.currency === "UNKNOWN" ? "NOT_RETURNED_BY_AUTHORIZED_SHOPS" : "LOCAL_CONFIGURATION"
+        currency: selected.currency, currencyEvidence: selected.currency === "UNKNOWN" ? "NOT_RETURNED_BY_AUTHORIZED_SHOPS" : "LOCAL_CONFIGURATION",
+        maxRecipientsPerCampaign: selected.maxRecipientsPerCampaign, maxDispatchAttemptsPerCampaign: selected.maxDispatchAttemptsPerCampaign,
+        maxSendsPerDay: selected.maxSendsPerDay, maxSendsPerHour: selected.maxSendsPerHour,
+        maxDispatchesPerMinute: selected.maxDispatchesPerMinute, outboundPacingMs: selected.outboundPacingMs
       } : null,
       authorizedShops: shops.map((shop) => ({ id: shop.id, externalShopId: shop.externalShopId, name: shop.name, region: shop.region, code: shop.shopCode, selected: shop.selectedForReadOnly })),
       connection: connection ? publicTikTokConnection(connection) : null,

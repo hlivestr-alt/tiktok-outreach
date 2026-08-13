@@ -103,6 +103,9 @@ importers:
       '@affiliate/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@affiliate/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@affiliate/db':
         specifier: workspace:*
         version: link:../../packages/db

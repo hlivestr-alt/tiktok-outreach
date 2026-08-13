@@ -5,6 +5,7 @@ export * from "./signing";
 export * from "./real-read-only";
 export * from "./token-crypto";
 export * from "./auth";
+export * from "./real-outbound";
 
 const categories = ["beauty", "fashion", "home", "health", "food"];
 const names = ["Ayu", "Bintang", "Citra", "Dewi", "Eka", "Fitri", "Gita", "Hana", "Intan", "Joko"];

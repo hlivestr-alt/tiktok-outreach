@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@affiliate/config": "workspace:*",
+    "@affiliate/contracts": "workspace:*",
     "@affiliate/db": "workspace:*",
     "@affiliate/domain": "workspace:*",
     "@affiliate/tiktok-adapter": "workspace:*",
@@ -18,4 +19,3 @@
   },
   "devDependencies": { "tsx": "^4.20.0" }
 }
-

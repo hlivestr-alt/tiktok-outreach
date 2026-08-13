@@ -4,7 +4,7 @@ export type DeliveryAction = "DISPATCH" | "RECOVER_AS_UNKNOWN" | "SKIP";
 
 export function deliveryAction(state: string): DeliveryAction {
   if (state === "DISPATCHING") return "RECOVER_AS_UNKNOWN";
-  if (["SENT", "FAILED_TERMINAL", "DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"].includes(state)) return "SKIP";
+  if (["SENT", "RESTRICTED", "FAILED_TERMINAL", "CANCELLED", "DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"].includes(state)) return "SKIP";
   return "DISPATCH";
 }
 

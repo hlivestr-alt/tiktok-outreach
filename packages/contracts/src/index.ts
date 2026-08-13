@@ -20,7 +20,7 @@ export type CreatorSearchPage = {
 };
 
 export type AdapterCapabilities = {
-  mode: "MOCK" | "READ_ONLY" | "DISABLED";
+  mode: "MOCK" | "READ_ONLY" | "LIVE" | "DISABLED";
   market: "ID";
   currency: string | null;
   currencySource: "MOCK_FIXED" | "PROVIDER_RESPONSE_REQUIRED";
@@ -71,3 +71,6 @@ export interface TikTokAffiliateAdapter extends TikTokReadAdapter {
   createOrGetConversation(creatorOpenId: string): Promise<{ conversationId: string; isNew: boolean }>;
   sendMessage(conversationId: string, creatorOpenId: string, content: string, options: { idempotencyKey: string }): Promise<SendMessageResult>;
 }
+
+/** The outbound worker receives this deliberately narrow capability. */
+export type TikTokOutboundAdapter = Pick<TikTokAffiliateAdapter, "createOrGetConversation" | "sendMessage">;

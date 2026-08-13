@@ -9,7 +9,7 @@ export const shopDate = (date: Date, timezone: string): Date => {
   return new Date(`${formatted}T00:00:00.000Z`);
 };
 
-type DispatchClaim = { claimed: true; attemptNumber: number } | { claimed: false; cancelled: boolean; reason?: string };
+type DispatchClaim = { claimed: true; attemptNumber: number; leaseOwner: string } | { claimed: false; cancelled: boolean; reason?: string };
 
 export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, now = new Date()): Promise<DispatchClaim> {
   return prisma.$transaction(async (tx) => {
@@ -19,6 +19,13 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
     const currentDelivery = await tx.outreachDelivery.findUniqueOrThrow({ where: { id: recipient.delivery.id } });
     if (!["PENDING", "FAILED_RETRYABLE"].includes(currentDelivery.state)) return { claimed: false as const, cancelled: false };
     if (!["QUEUED", "RUNNING"].includes(campaign.state)) return { claimed: false as const, cancelled: false };
+    const activeLease = await tx.shopOutboundLease.findUnique({ where: { shopId: campaign.shopId } });
+    if (activeLease && activeLease.expiresAt > now && activeLease.deliveryId !== currentDelivery.id) {
+      throw new SafetyDelay(Math.max(1000, activeLease.expiresAt.getTime() - now.getTime()), "Another outbound mutation sequence is active for this shop");
+    }
+    if (campaign.shop.outboundNextAllowedAt && campaign.shop.outboundNextAllowedAt > now && activeLease?.deliveryId !== currentDelivery.id) {
+      throw new SafetyDelay(campaign.shop.outboundNextAllowedAt.getTime() - now.getTime(), "Shop outbound pacing interval is active");
+    }
 
     const [currentRecipient, reservation, contact] = await Promise.all([
       tx.campaignRecipient.findUniqueOrThrow({ where: { id: recipient.id } }),
@@ -76,6 +83,9 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
     const oneMinuteAgo = new Date(now.getTime() - 60_000);
     const recent = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneMinuteAgo } } });
     if (recent >= campaign.shop.maxDispatchesPerMinute) throw new SafetyDelay(60_000, "Absolute dispatch-rate ceiling reached");
+    const oneHourAgo = new Date(now.getTime() - 3_600_000);
+    const recentHour = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneHourAgo } } });
+    if (recentHour >= campaign.shop.maxSendsPerHour) throw new SafetyDelay(15 * 60_000, "Hourly shop safety ceiling reached");
     const date = shopDate(now, campaign.shop.timezone);
     const usage = await tx.shopOutboundDailyUsage.findUnique({ where: { shopId_shopDate: { shopId: campaign.shopId, shopDate: date } } });
     if ((usage?.dispatchCount ?? 0) >= campaign.shop.maxSendsPerDay) throw new SafetyDelay(15 * 60_000, "Daily shop ceiling reached");
@@ -84,12 +94,21 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
       update: { dispatchCount: { increment: 1 }, ceiling: campaign.shop.maxSendsPerDay },
       create: { shopId: campaign.shopId, shopDate: date, dispatchCount: 1, ceiling: campaign.shop.maxSendsPerDay }
     });
+    const leaseOwner = `${currentDelivery.id}:${currentDelivery.attemptCount + 1}`;
+    await tx.shopOutboundLease.upsert({ where: { shopId: campaign.shopId }, update: {
+      leaseOwner, deliveryId: currentDelivery.id, expiresAt: new Date(now.getTime() + 120_000)
+    }, create: { shopId: campaign.shopId, leaseOwner, deliveryId: currentDelivery.id, expiresAt: new Date(now.getTime() + 120_000) } });
+    await tx.shop.update({ where: { id: campaign.shopId }, data: { outboundNextAllowedAt: new Date(now.getTime() + campaign.shop.outboundPacingMs) } });
     await tx.outboundDispatchEvent.create({ data: { shopId: campaign.shopId, campaignId: campaign.id, deliveryId: recipient.delivery.id, dispatchedAt: now } });
     await tx.campaign.update({ where: { id: campaign.id }, data: { dispatchCount: { increment: 1 }, state: "RUNNING" } });
     await tx.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
-      state: "DISPATCHING", firstDispatchedAt: currentDelivery.firstDispatchedAt ?? now, attemptCount: { increment: 1 }
+      state: "DISPATCHING", firstDispatchedAt: currentDelivery.firstDispatchedAt ?? now, lastAttemptedAt: now, attemptCount: { increment: 1 }
     } });
     await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "PROCESSING" } });
-    return { claimed: true as const, attemptNumber: currentDelivery.attemptCount + 1 };
+    return { claimed: true as const, attemptNumber: currentDelivery.attemptCount + 1, leaseOwner };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+}
+
+export async function releaseDispatchLease(prisma: PrismaClient, shopId: string, leaseOwner: string): Promise<void> {
+  await prisma.shopOutboundLease.deleteMany({ where: { shopId, leaseOwner } });
 }

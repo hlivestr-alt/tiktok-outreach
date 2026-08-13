@@ -12,6 +12,7 @@
     "test:integration": "vitest run apps/api/src/hardening.integration.test.ts apps/api/src/identity/creator-identity-resolver.integration.test.ts apps/api/src/integrations/tiktok-refresh.integration.test.ts apps/api/src/integrations/tiktok-read-governor.integration.test.ts apps/api/src/outreach/discovery-recovery.integration.test.ts apps/api/src/history/validation-mode.test.ts apps/api/src/history/history-sync.integration.test.ts",
     "test:history": "vitest run apps/api/src/history/history-sync.integration.test.ts apps/web/lib/history-sync.test.ts apps/api/src/integrations/tiktok-read-governor.integration.test.ts packages/tiktok-adapter/src/real-read-only.test.ts",
     "test:tiktok": "vitest run packages/tiktok-adapter/src/real-read-only.test.ts apps/api/src/integrations/tiktok.service.test.ts",
+    "test:outbound": "vitest run apps/worker/src packages/tiktok-adapter/src/adapter.test.ts packages/tiktok-adapter/src/real-outbound.test.ts packages/config/src/index.test.ts packages/domain/src/domain.test.ts apps/api/src/hardening.integration.test.ts",
     "test:rate-limit": "vitest run apps/api/src/integrations/tiktok-read-governor.integration.test.ts",
     "test:validation": "vitest run apps/api/src/history/validation-mode.test.ts apps/api/src/outreach/discovery-recovery.integration.test.ts apps/api/src/integrations/tiktok-refresh.integration.test.ts packages/tiktok-adapter/src/real-read-only.test.ts",
     "test:watch": "vitest",

@@ -1,14 +1,14 @@
 # Affiliate Outreach Operations
 
-TikTok Shop affiliate outreach operations with a deterministic Phase 1 mock workflow and a Phase 2A real TikTok read-only workflow. Real mode supports seller authorization, Indonesian shop selection, marketplace discovery/performance, and resumable history backfill while keeping TikTok outbound physically unavailable.
+TikTok Shop affiliate outreach operations with deterministic mock, real read-only, and explicitly gated live outbound modes. Real discovery/history and outbound mutation capabilities stay isolated in separate workers and adapters.
 
 Detailed design notes are in [Architecture and safety](docs/architecture.md), [Persistent historical synchronization](docs/historical-sync.md), and [Future TikTok integration](docs/tiktok-integration.md).
 
 ## Safety boundary
 
-- `APP_MODE` accepts only `mock` or `read_only`.
+- `APP_MODE` accepts `mock` or `read_only`; `OUTBOUND_MODE` separately accepts `mock`, `read_only`, or `live`.
 - The real HTTP client has an explicit read-operation method/path allowlist.
-- Real campaigns end at preview and cannot freeze, queue, or dispatch.
+- Read-only outbound mode ends at preview. Live mode additionally requires the exact `ENABLE_LIVE_TIKTOK_OUTBOUND` acknowledgement.
 - Only approved TikTok authorization and read operations connect to TikTok; real TikTok mutation and outbound operations are physically blocked.
 - The worker and web containers do not receive TikTok credentials, and no code connects to n8n.
 - The unauthenticated application binds to localhost only.
@@ -31,7 +31,9 @@ docker compose up -d postgres redis api web history-worker
 
 For local development, build packages first and run `cmd /c pnpm --filter @affiliate/api start:history`. The initial backfill is started from **History readiness**; after it reaches the end, a bounded three-page incremental pass runs every six hours by default. These values are configurable with the `HISTORY_SYNC_*` environment variables.
 
-The outbound mock worker is excluded from the default Compose profile. Start it only for an explicitly intended mock workflow with `docker compose --profile outbound-mock up worker`.
+Outbound workers are excluded from the default Compose profile. Start mock delivery with `docker compose --profile outbound-mock up worker`. After a separate live-validation approval and configuration, start the live worker with `docker compose --profile outbound-live up outbound-live`.
+
+Live activation requires `APP_MODE=read_only`, `OUTBOUND_MODE=live`, `ENABLE_LIVE_TIKTOK_OUTBOUND=I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES`, healthy stored seller authorization, the selected shop cipher, and the existing server-side TikTok app credentials. The worker has only Create Conversation and Send Message methods; it has no discovery, history, or Mark Read method.
 
 ## Local development
 

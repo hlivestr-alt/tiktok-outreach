@@ -118,7 +118,8 @@ export class DiscoveryProcessor {
     const contacts = new Map<string, ContactState>(existingCreators.flatMap((creator) => creator.creatorOpenId ? [[creator.creatorOpenId, {
       contactCount: creator.contacts[0]?.contactCount ?? 0, lastContactedAt: creator.contacts[0]?.lastContactedAt ?? undefined,
       firstContactedAt: creator.contacts[0]?.firstContactedAt ?? undefined, doNotContact: creator.contacts[0]?.doNotContact,
-      unresolvedDelivery: creator.contacts[0]?.unresolvedDelivery, historical: Boolean(creator.contacts[0]?.historyCoverageStart)
+      unresolvedDelivery: creator.contacts[0]?.unresolvedDelivery,
+      historical: Boolean(creator.contacts[0]?.historyCoverageStart) && !creator.contacts[0]?.lastCampaignId
     }]] : []));
     const reservations = await this.prisma.outreachReservation.findMany({ where: { shopId: run.shopId, expiresAt: { gt: this.now() } }, include: { creator: true } });
     const preview = buildPreview({
