@@ -95,7 +95,7 @@ describe.sequential("clone from PREVIEW_READY", () => {
     });
     await prisma.outreachReservation.create({ data: {
       shopId: seed.shop.id, creatorId: reservedRecipient.creatorId, campaignRecipientId: reservedRecipient.id,
-      expiresAt: new Date(now.getTime() + 86_400_000)
+      expiresAt: new Date("2099-01-01T00:00:00.000Z")
     } });
     const sourceBefore = await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id }, include: { recipients: true, discoveryRun: { include: { candidates: true } } } });
     expect(sourceBefore.recipients.filter((item) => item.selected)).toHaveLength(10);

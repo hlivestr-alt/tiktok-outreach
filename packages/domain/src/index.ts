@@ -12,6 +12,13 @@ export type CreatorCandidate = {
   avgVideoViews: number | null;
   avgLiveViewers: number | null;
   engagementRate?: number;
+  avatarUrl?: string;
+  liveGmv?: Money | null;
+  videoGmv?: Money | null;
+  gmvRange?: string;
+  topAgeRanges?: string[];
+  majorGender?: string;
+  majorGenderPercentage?: number;
   selectionRegion: string;
   discoveryOrdinal: number;
 };

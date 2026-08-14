@@ -1,7 +1,12 @@
 node_modules/
+__pycache__/
+*.py[cod]
 .next/
 dist/
 coverage/
+.probe-dist/
+reports/marketplace-probe-*.json
+diagnostics/marketplace-throttle-results/
 .env
 .env.*
 !.env.example

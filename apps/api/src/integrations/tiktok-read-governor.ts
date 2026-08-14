@@ -6,6 +6,7 @@ import { config } from "../shared";
 
 const DEFAULT_SPACING_MS = 750;
 const LEASE_MS = 120_000;
+export const CREATOR_MARKETPLACE_RETRY_MS = 5_000;
 
 type GovernorOptions = { now?: () => Date; random?: () => number; spacingMs?: number; marketplaceSpacingMs?: number; leaseMs?: number; timezone?: string };
 
@@ -23,11 +24,6 @@ function leaseOperation(operation: TikTokReadLease["operation"]): string {
   if (operation === "GET_AUTHORIZED_SHOPS") return "__LEASE__:AUTHORIZED_SHOPS";
   if (operation === "SEARCH_CREATORS") return "__LEASE__:SEARCH_CREATORS";
   return "__LEASE__:SHOP_HISTORY_READS";
-}
-
-export function marketplaceBackoffMs(count: number, random = Math.random): number {
-  const base = Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(Math.max(0, count - 1), 20));
-  return Math.min(6 * 60 * 60_000, base + Math.floor(base * 0.2 * random()));
 }
 
 function spacingMs(operation: TikTokReadLease["operation"], options: GovernorOptions): number {
@@ -142,11 +138,11 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
       where: { provider_shopScope_operation: { provider: lease.provider, shopScope: lease.shopScope, operation: lease.operation } }
     });
     const count = current.consecutiveThrottleCount + 1;
-    const exponential = lease.operation === "SEARCH_CREATORS"
-      ? marketplaceBackoffMs(count, this.options.random)
-      : Math.min(15 * 60_000, 5_000 * 2 ** Math.min(count - 1, 20));
     const retryAfterMs = safeDelay(event.retryAfterMs);
-    const cooldownMs = Math.max(exponential, retryAfterMs ?? 0);
+    const localBackoffMs = lease.operation === "SEARCH_CREATORS"
+      ? CREATOR_MARKETPLACE_RETRY_MS
+      : Math.min(15 * 60_000, 5_000 * 2 ** Math.min(count - 1, 20));
+    const cooldownMs = Math.max(localBackoffMs, retryAfterMs ?? 0);
     const now = this.now();
     const nextPermittedAt = event.providerCode === 45101004
       ? nextLocalDay(now, this.options.timezone ?? config.SHOP_TIMEZONE)

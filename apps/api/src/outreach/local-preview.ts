@@ -66,24 +66,34 @@ export async function rebuildLocalPreview(db: PreviewDatabase, runId: string, no
   };
 
   await db.campaignRecipient.deleteMany({ where: { campaignId: run.campaignId } });
+  const databaseSnapshotIds = preview.creators.flatMap((creator) => {
+    const id = (creator as unknown as { databaseSnapshotId?: string }).databaseSnapshotId;
+    return id ? [id] : [];
+  });
+  const databaseSnapshots = new Map((await db.creatorMetricSnapshot.findMany({ where: { id: { in: databaseSnapshotIds } } })).map((snapshot) => [snapshot.id, snapshot]));
+  const recipientRows: Prisma.CampaignRecipientCreateManyInput[] = [];
   for (const evaluated of preview.creators) {
     const creatorId = exactCreators.get(evaluated.creatorOpenId)!.id;
-    const snapshot = await db.creatorMetricSnapshot.create({ data: {
-      creatorId, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
+    const databaseSnapshotId = (evaluated as unknown as { databaseSnapshotId?: string }).databaseSnapshotId;
+    const existingSnapshot = databaseSnapshotId ? databaseSnapshots.get(databaseSnapshotId) : undefined;
+    if (existingSnapshot && existingSnapshot.creatorId !== creatorId) throw new BadRequestException("Creator database snapshot identity mismatch");
+    const snapshotId = existingSnapshot?.id ?? (await db.creatorMetricSnapshot.create({ data: {
+      creatorId, shopId: run.shopId, followerCount: evaluated.followerCount, categoryIds: evaluated.categoryIds,
       gmvAmount: evaluated.gmv ? new Prisma.Decimal(evaluated.gmv.amount) : null,
       gmvCurrency: evaluated.gmv?.currency, unitsSold: evaluated.unitsSold,
       avgVideoViews: evaluated.avgVideoViews, avgLiveViewers: evaluated.avgLiveViewers,
       engagementRate: evaluated.engagementRate == null ? null : new Prisma.Decimal(evaluated.engagementRate),
       sourceFetchedAt: now, rawPayload: evaluated as unknown as Prisma.InputJsonValue
-    } });
-    await db.campaignRecipient.create({ data: {
-      campaignId: run.campaignId, creatorId, snapshotId: snapshot.id,
+    } })).id;
+    recipientRows.push({
+      campaignId: run.campaignId, creatorId, snapshotId,
       discoveryOrdinal: evaluated.discoveryOrdinal, eligibility: evaluated.eligibility,
       skipReason: evaluated.skipReason, skipDetail: evaluated.skipDetail,
       rankingValue: new Prisma.Decimal(evaluated.rankingValue), selected: evaluated.selected,
       state: evaluated.selected ? "SELECTED" : evaluated.eligibility === "ELIGIBLE" ? "ELIGIBLE" : "DISCOVERED"
-    } });
+    });
   }
+  for (let offset = 0; offset < recipientRows.length; offset += 1000) await db.campaignRecipient.createMany({ data: recipientRows.slice(offset, offset + 1000) });
   await db.campaign.update({ where: { id: run.campaignId }, data: {
     state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue,
     truncated: run.providerHasMore, version: { increment: 1 }

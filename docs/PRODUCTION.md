@@ -7,8 +7,9 @@ This guide is for the TikTok Outreach repository only. Production uses Docker Co
 1. Enable **Start Docker Desktop when you sign in** and ensure Docker Desktop starts its engine automatically.
 2. Copy `.env.example` to `.env` in the repository root.
 3. Set the dedicated TikTok Outreach app values: `TIKTOK_APP_KEY`, `TIKTOK_APP_SECRET`, `TIKTOK_SERVICE_ID`, and a strong `TIKTOK_TOKEN_ENCRYPTION_KEY`. Do not reuse TikTok Orders Reporting credentials.
-4. Keep `APP_MODE=read_only`. For the safe mode, keep `OUTBOUND_MODE=read_only` and the live acknowledgement unset.
-5. Authorize and select the intended Indonesian shop in **Integration & safety** if it is not already selected.
+4. Give a Google service account Editor access to spreadsheet `1h_r1eaSHH0nIu6-0P70tMc03lxsQ1Jg9b1xl9xiCPX4`, base64-encode its JSON file as one line, and set that value in `GOOGLE_SERVICE_ACCOUNT_JSON`. The browser never receives it.
+5. Keep `APP_MODE=read_only`. For the safe mode, keep `OUTBOUND_MODE=read_only` and the live acknowledgement unset.
+6. Authorize and select the intended Indonesian shop in **Integration & safety** if it is not already selected.
 
 `.env` is ignored by Git. Compose loads it directly into each applicable container; production roles explicitly override runtime mode, database/Redis networking, and activation state. Windows user-level TikTok variables are not inherited into containers unless they are intentionally written into this repository's `.env`.
 
@@ -62,8 +63,8 @@ The status script reports container health, build version, worker heartbeats, ou
 ## Normal campaign operation
 
 1. Create a campaign. The API persists a `DiscoveryRun`; page navigation never calls TikTok.
-2. The always-running discovery worker claims due runs. It persists candidates, cursor, and backoff after every provider page.
-3. Review the preview. **Clone campaign** explicitly uses the previous persisted candidate snapshot and makes no Marketplace call; it is not fresh discovery.
+2. The always-running discovery worker claims the one shop-level Creator Database job. It stages a page, reconciles PostgreSQL and the existing Google Sheet, and advances the cursor only after the whole page is saved.
+3. Outreach previews filter stored creator snapshots and make no Marketplace call. **Clone campaign** explicitly uses the previous persisted candidate snapshot.
 4. In live mode, freeze recipients and immutable rendered messages.
 5. Type the exact campaign name and selected count, then **Confirm & queue**.
 6. Pause to stop starting new recipients. **Cancel unsent** terminates only work that has not begun provider dispatch.
@@ -74,7 +75,7 @@ The outbound worker may run continuously but is idle with no confirmed durable o
 
 ## Discovery and Marketplace throttling
 
-`36009002` and HTTP 429 enter durable `BACKING_OFF`. The campaign shows **TikTok Marketplace temporarily throttled** and the next automatic attempt. The worker waits until `nextAttemptAt`; it does not hot-loop and no manual retry is required. A stopped or stale discovery heartbeat is shown separately.
+`36009002` and HTTP 429 put the Creator Database job into durable `WAITING`. The UI shows the next automatic attempt. The worker keeps the exact cursor, does not hot-loop, and never falls back to page 1.
 
 If discovery appears stuck:
 
@@ -84,7 +85,7 @@ docker compose --profile production logs --tail 200 discovery-worker
 docker compose --profile production up -d discovery-worker
 ```
 
-Do not manually repeat Marketplace Search to bypass cooldown. Fix the worker/runtime issue and allow the persisted run to resume.
+Do not manually repeat Marketplace Search to bypass cooldown. Fix the worker/runtime issue and allow the persisted continuation job to resume.
 
 TikTok code `106001` commonly indicates an app credential/signature mismatch. Confirm the dedicated Outreach values inside the repository `.env`, rebuild with `start-production.ps1`, and reauthorize if credentials were rotated. Do not inspect resolved Compose output because it may render secrets; use the sanitized health/status endpoints instead.
 
@@ -125,6 +126,6 @@ If authorization needs attention after reboot, outbound fails closed. If Redis w
 
 ## Service topology
 
-Always-on safe profile: PostgreSQL, Redis, API, web, discovery worker, and read-only history worker. Live profile adds the mutation-only outbound worker. Discovery receives only `SEARCH_CREATORS`; history receives only `LIST_CONVERSATIONS` and `LIST_MESSAGES`; outbound receives only Create/Get Conversation and Send Message capabilities.
+Always-on safe profile: PostgreSQL, Redis, API, web, Creator Database sync worker, and read-only history worker. Live profile adds the mutation-only outbound worker. Only Creator Database sync receives `SEARCH_CREATORS`; Outreach filtering receives no TikTok adapter; history receives only `LIST_CONVERSATIONS` and `LIST_MESSAGES`; outbound receives only Create/Get Conversation and Send Message capabilities.
 
 PostgreSQL and Redis use persistent named volumes. API and web expose loopback-only ports. Health checks cover PostgreSQL, Redis, API readiness, and web readiness. Worker heartbeats update every 15 seconds, are stale after 45 seconds, and write only one small row per role.

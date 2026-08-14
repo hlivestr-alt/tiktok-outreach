@@ -195,6 +195,10 @@ function money(value: unknown): { amount: string; currency: string } | null {
 
 function mapCreator(value: unknown, ordinal: number): CreatorCandidate {
   const creator = object(value, "creator");
+  const avatar = creator.avatar && typeof creator.avatar === "object" && !Array.isArray(creator.avatar) ? creator.avatar as JsonObject : {};
+  const gmvRange = creator.gmv_range && typeof creator.gmv_range === "object" && !Array.isArray(creator.gmv_range) ? creator.gmv_range as JsonObject : {};
+  const demographics = creator.top_follower_demographics && typeof creator.top_follower_demographics === "object" && !Array.isArray(creator.top_follower_demographics) ? creator.top_follower_demographics as JsonObject : {};
+  const majorGender = demographics.major_gender && typeof demographics.major_gender === "object" && !Array.isArray(demographics.major_gender) ? demographics.major_gender as JsonObject : {};
   // Current marketplace docs describe this value as Creator Open ID. creator_im_id is intentionally never accepted here.
   const creatorOpenId = string(creator.creator_open_id);
   if (!creatorOpenId) throw new TikTokApiError("UNSUPPORTED_IDENTIFIER", "MAP_CREATOR", undefined, undefined, undefined, "Marketplace creator response omitted creator_open_id");
@@ -206,6 +210,11 @@ function mapCreator(value: unknown, ordinal: number): CreatorCandidate {
     followerCount: number(creator.follower_count), gmv: money(creator.gmv), unitsSold: number(creator.units_sold),
     avgVideoViews: number(creator.avg_ec_video_view_count), avgLiveViewers: number(creator.avg_ec_live_uv),
     engagementRate: number(creator.engagement_rate) ?? undefined,
+    avatarUrl: string(avatar.url), liveGmv: money(creator.live_gmv), videoGmv: money(creator.video_gmv),
+    gmvRange: string(gmvRange.formatted_range),
+    topAgeRanges: array(demographics.age_ranges).filter((item): item is string => typeof item === "string"),
+    majorGender: string(majorGender.gender),
+    majorGenderPercentage: number(majorGender.percentage) == null ? undefined : number(majorGender.percentage)! / 10_000,
     selectionRegion: string(creator.selection_region) ?? "UNKNOWN", discoveryOrdinal: ordinal
   };
 }

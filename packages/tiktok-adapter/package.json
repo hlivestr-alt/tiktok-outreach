@@ -4,10 +4,19 @@
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./read-only": {
+      "types": "./dist/read-only.d.ts",
+      "default": "./dist/read-only.js"
+    }
+  },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
   "dependencies": {
     "@affiliate/contracts": "workspace:*",
     "@affiliate/domain": "workspace:*"
   }
 }
-

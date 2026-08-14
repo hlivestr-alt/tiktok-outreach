@@ -42,7 +42,7 @@ Normal reads retain bounded retries for temporary/network failures only. Control
 
 The provider documents fields including `keyword`, `category`, `gmv_ranges`, `units_sold_ranges`, `follower_demographics`, `content_performance`, `affiliate_data`, and country-dependent `advanced_filters`. This implementation sends only shapes it can map without guessing: keyword, category IDs, and exact documented discrete units-sold ranges.
 
-Follower bounds, arbitrary GMV bounds, average video views, average live viewers, engagement, and other numeric campaign filters are applied locally. The capabilities response labels server and local filters. Unknown metrics remain `null`; they are never fabricated as zero. GMV is stored with the currency returned for that value. Filtering or ranking requires an explicit matching currency, cross-currency values are not compared, and no FX conversion or shop-region currency inference is performed. Search is capped by the campaign candidate-pool limit and reports truncation when provider pages remain.
+Follower bounds, arbitrary GMV bounds, average video views, average live viewers, engagement, category, and keyword campaign filters are applied to shop-scoped Creator Database snapshots in PostgreSQL. Changing Outreach filters performs zero Marketplace API calls. Unknown metrics remain `null`; they are never fabricated as zero. GMV is stored with the currency returned for that value. Filtering or ranking requires an explicit matching currency, cross-currency values are not compared, and no FX conversion or shop-region currency inference is performed. The separate continuation sync has no total creator cap.
 
 ## Provider identity namespaces
 
@@ -93,7 +93,7 @@ Controlled real validation may progress only through separately requested read a
 
 | Controlled action | API entry point | Physical TikTok request ceiling |
 | --- | --- | --- |
-| Marketplace discovery | `POST /api/v1/outreach/campaigns/:id/discovery-runs?validationMode=true` | One Marketplace Search page; page 2 is never fetched and the preview is always marked validation-truncated/incomplete. |
+| Marketplace continuation | Diagnostic probe only | One explicitly requested continuation page using a supplied persisted cursor; Outreach campaign endpoints make zero Marketplace requests. |
 | Creator performance | `GET /api/v1/integrations/tiktok/creators/:creatorOpenId/performance?validationMode=true` | One Creator Performance read. |
 | Conversation list | `POST /api/v1/contact-history/sync-runs?validationMode=true` or `POST /api/v1/contact-history/validation/conversations` | One Conversation List page; no conversations or messages are iterated. |
 | Selected conversation messages | `POST /api/v1/contact-history/validation/conversations/:conversationId/messages` | One Message List page for the explicitly selected conversation. |

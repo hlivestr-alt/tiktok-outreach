@@ -1,0 +1,9 @@
+FROM node:24-alpine
+WORKDIR /app
+RUN corepack enable
+COPY . .
+RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store \
+  && pnpm install --frozen-lockfile \
+  && pnpm build:packages \
+  && pnpm exec tsc -p scripts/tsconfig.json
+ENTRYPOINT ["node", "/app/.probe-dist/marketplace-discovery-probe.js"]

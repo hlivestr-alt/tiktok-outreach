@@ -12,16 +12,19 @@ flowchart LR
   Worker --> DB
   API --> Adapter[TikTok adapter contract]
   Worker --> Adapter
+  Sync[Creator database sync worker] --> Adapter
+  Sync --> DB
+  Sync --> Sheets[(Existing Google Sheet)]
   Adapter --> Mock[Deterministic mock provider]
 ```
 
-The domain package owns filtering, ranking, cooldown decisions, deduplication, template rendering, safety assertions, and reconciliation matching. The API owns operator workflows and persistence. The worker owns dispatch state transitions. Discovery receives only `searchCreators`, history receives only `listConversations` and `listMessages`, and the outbound worker receives only `createOrGetConversation` and `sendMessage`.
+The domain package owns filtering, ranking, cooldown decisions, deduplication, template rendering, safety assertions, and reconciliation matching. The API owns operator workflows and persistence. The creator sync worker alone receives `searchCreators`; Outreach campaign filtering reads PostgreSQL and makes no Marketplace request. History receives only `listConversations` and `listMessages`, and the outbound worker receives only `createOrGetConversation` and `sendMessage`.
 
 ## Campaign lifecycle
 
 1. Create a draft with target, filters, cooldown, ranking, product, and message template.
-2. Page through creator discovery using a stable search key and page token.
-3. Apply local filters and canonicalize by `creator_open_id`.
+2. Read the shop's latest stored Creator Database snapshots.
+3. Apply filters and canonicalize by `creator_open_id` without a TikTok call.
 4. Exclude do-not-contact, unresolved delivery, active reservation, and cooldown contacts, including historical imports.
 5. Rank eligible creators and select `min(requested, eligible)` without changing filters.
 6. Persist the preview and exclusion counts.
@@ -37,7 +40,7 @@ PostgreSQL is the queue source of truth. Campaign start commits each delivery an
 
 ## Persistent data
 
-The Prisma schema separates shops and integration modes, creator identity, metric snapshots, shop-specific contact state, conversations and messages, resumable paged history sync/import runs, cross-file historical contact facts, campaigns and frozen recipients, reservations, durable queue intents, deliveries and attempts, reconciliation evidence, dispatch events, daily usage, and audit events.
+The Prisma schema separates shops and integration modes, creator identity, shop-scoped metric snapshots, durable Creator Database continuation jobs and staged pages, shop-specific contact state, conversations and messages, resumable paged history sync/import runs, cross-file historical contact facts, campaigns and frozen recipients, reservations, durable queue intents, deliveries and attempts, reconciliation evidence, dispatch events, daily usage, and audit events.
 
 Safety values from environment variables are used only when the mock Shop is first created. Persistent Shop columns are authoritative at runtime thereafter, and `SafetySettingsAudit` records initialization and provides the audit trail required for future setting changes.
 
@@ -65,10 +68,10 @@ Exact Creator Open IDs make every confirmed app-originated send dedupe/cooldown 
 ## Extension points
 
 Add future modules as new API modules, UI route groups, domain services, and queue names. Creator identity, shop contact state, conversations, and audit events are shared foundations; leads, clip delivery, attribution, and workflow monitoring should not be added to the outreach worker.
-# Resumable Marketplace discovery
+# Resumable Creator Database synchronization
 
-Real TikTok Marketplace discovery is a persistent read-only workflow. The API creates one `DiscoveryRun` per campaign and returns immediately. A dedicated discovery process claims due runs in PostgreSQL, performs at most one `SEARCH_CREATORS` page per step, persists exact-Open-ID staging rows and opaque pagination state, then schedules the next page. The process has no outreach queue and receives only the adapter's `searchCreators` capability.
+Real TikTok Marketplace pagination is one persistent shop-level read-only workflow, independent of campaigns. It is seeded at page 11 from the known offset-200 `page_token` and existing `search_key`; no normal path can create a page-one search. A dedicated process claims the job, performs at most one `SEARCH_CREATORS` continuation page, stages the complete response, upserts exact-Open-ID creators and shop-scoped snapshots, reconciles one page to the existing Google Sheet in batches, and only then advances the cursor.
 
-`providerSearchKey` and `providerNextPageToken` live only on `DiscoveryRun`; campaign responses project a sanitized discovery status. `ProviderReadThrottle` provides a separate per-shop `SEARCH_CREATORS` lane with one in-flight request, at least 1,000 ms post-success spacing, and durable adaptive cooldown. Conversation and message-history reads use a distinct history lane.
+`privateSearchKey` and `privateNextPageToken` live only on `CreatorSyncJob`; the public status omits both. `CreatorSyncPage` makes a crash after a Sheet write replay-safe: reprocessing reconciles by Creator Open ID and snapshot source key before cursor advancement. `ProviderReadThrottle` provides a separate per-shop `SEARCH_CREATORS` lane with one in-flight request and durable cooldown. Conversation and message-history reads use a distinct history lane.
 
-Provider throttles are resumable. Marketplace 36009002/HTTP 429 uses 15/30/60/120 minute exponential cooldown with 0–20% bounded jitter and a six-hour cap, while valid `Retry-After` is a lower bound. Daily quota 45101004 waits until the next shop-local day plus five minutes. Terminal authorization, permission, signature, and shop-context failures require operator action.
+Provider throttles are resumable. Marketplace 36009002/HTTP 429 enters durable `WAITING` with the same cursor. Terminal authorization, invalid-cursor, permission, signature, malformed-pagination, Sheet, and shop-context failures enter `ERROR`; Resume retries the same stored page and never creates a new search. Pause is cooperative: an in-flight page finishes all persistence and then the job enters `PAUSED`.

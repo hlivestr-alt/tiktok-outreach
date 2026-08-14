@@ -89,6 +89,20 @@ enum DiscoveryRunState {
   CANCELLED
 }
 
+enum CreatorSyncState {
+  IDLE
+  RUNNING
+  PAUSED
+  WAITING
+  EXHAUSTED
+  ERROR
+}
+
+enum CreatorSyncPageState {
+  RECEIVED
+  COMMITTED
+}
+
 enum HistorySyncState {
   QUEUED
   RUNNING
@@ -172,6 +186,8 @@ model Shop {
   historicalFacts                HistoricalContactFact[]
   safetySettingsChanges          SafetySettingsAudit[]
   outboundLease                  ShopOutboundLease?
+  creatorSyncJob                 CreatorSyncJob?
+  creatorSnapshots               CreatorMetricSnapshot[]
 }
 
 /// Durable single-flight lease for outbound provider mutation sequences.
@@ -391,6 +407,7 @@ model CreatorIdentityAudit {
 model CreatorMetricSnapshot {
   id              String              @id @default(uuid())
   creatorId       String
+  shopId          String?
   followerCount   Int?
   categoryIds     Json
   gmvAmount       Decimal?            @db.Decimal(24, 2)
@@ -402,10 +419,98 @@ model CreatorMetricSnapshot {
   metrics         Json                @default("{}")
   rawPayload      Json                @default("{}")
   sourceFetchedAt DateTime
+  sourcePageKey   String?
   creator         Creator             @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  shop            Shop?               @relation(fields: [shopId], references: [id], onDelete: Cascade)
   recipients      CampaignRecipient[]
 
   @@index([creatorId, sourceFetchedAt])
+  @@index([shopId, sourceFetchedAt])
+  @@unique([creatorId, sourcePageKey])
+}
+
+/// One durable continuation stream per shop. Provider cursors are private and
+/// never returned by the public API projection.
+model CreatorSyncJob {
+  id                       String           @id @default(uuid())
+  shopId                   String           @unique
+  state                    CreatorSyncState @default(PAUSED)
+  privateSearchKey         String
+  privateNextPageToken     String?
+  pagesCompleted           Int              @default(10)
+  creatorsFetched          Int              @default(200)
+  creatorsFetchedThisRun   Int              @default(0)
+  pauseRequested           Boolean          @default(false)
+  nextAttemptAt            DateTime?
+  startedAt                DateTime?
+  lastPageAt               DateTime?
+  lastSuccessAt            DateTime?
+  lastError                String?
+  lastProviderCode         String?
+  currentStage             String           @default("PAUSED")
+  lastAttemptAt            DateTime?
+  lastResponseAt           DateTime?
+  lastAttemptPage          Int?
+  lastHttpStatus           Int?
+  lastTikTokCode           String?
+  lastSafeError            String?
+  lastCreatorsReturned     Int?
+  lastCreatorsAdded        Int?
+  lastDuplicates           Int?
+  spreadsheetId            String
+  sheetImportedAt          DateTime?
+  leaseId                  String?
+  leaseExpiresAt           DateTime?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  shop                     Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  pages                    CreatorSyncPage[]
+  events                   CreatorSyncEvent[]
+
+  @@index([state, nextAttemptAt])
+  @@index([leaseExpiresAt])
+}
+
+/// Safe, durable activity records for the Creator Database UI. Provider
+/// credentials and opaque pagination values are deliberately excluded.
+model CreatorSyncEvent {
+  id                   String         @id @default(uuid())
+  creatorSyncJobId     String
+  stage                String
+  pageNumber           Int?
+  httpStatus           Int?
+  tiktokCode           String?
+  safeMessage          String?
+  creatorsReturned     Int?
+  creatorsAdded        Int?
+  duplicates           Int?
+  nextAttemptAt        DateTime?
+  occurredAt           DateTime       @default(now())
+  creatorSyncJob       CreatorSyncJob @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+
+  @@index([creatorSyncJobId, occurredAt])
+}
+
+/// A successful provider response is staged before either Sheets work or
+/// cursor advancement. Replaying this row is safe because creators reconcile
+/// by Creator Open ID and snapshots reconcile by sourcePageKey.
+model CreatorSyncPage {
+  id                   String               @id @default(uuid())
+  creatorSyncJobId     String
+  state                CreatorSyncPageState @default(RECEIVED)
+  pageNumber           Int
+  privateRequestToken  String
+  privateNextToken     String?
+  privateSearchKey     String
+  providerHasMore      Boolean
+  creatorsReturned     Int
+  payload              Json
+  receivedAt           DateTime             @default(now())
+  committedAt          DateTime?
+  creatorSyncJob       CreatorSyncJob       @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorSyncJobId, privateRequestToken])
+  @@index([creatorSyncJobId, state, pageNumber])
 }
 
 model CreatorShopContactState {

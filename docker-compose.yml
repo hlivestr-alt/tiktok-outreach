@@ -138,6 +138,25 @@ services:
       redis: { condition: service_healthy }
       api: { condition: service_healthy }
 
+  marketplace-probe:
+    profiles: ["diagnostics"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.marketplace-probe
+    env_file: .env
+    environment:
+      RUNTIME_ENV: production
+      APP_MODE: read_only
+      DATABASE_URL: postgresql://affiliate:affiliate@host.docker.internal:5432/affiliate_outreach?schema=public
+      PROBE_EXPECTED_APP_KEY_SHA256: ${PROBE_EXPECTED_APP_KEY_SHA256:-MISSING}
+      PROBE_EXPECTED_APP_SECRET_SHA256: ${PROBE_EXPECTED_APP_SECRET_SHA256:-MISSING}
+      PROBE_EXPECTED_TOKEN_KEY_SHA256: ${PROBE_EXPECTED_TOKEN_KEY_SHA256:-MISSING}
+      PROBE_EXPECTED_API_BASE_SHA256: ${PROBE_EXPECTED_API_BASE_SHA256:-MISSING}
+      PROBE_SOURCE_GIT_SHA: ${PROBE_SOURCE_GIT_SHA:-unknown}
+    volumes:
+      - ./reports:/app/reports
+    restart: "no"
+
 volumes:
   postgres_data:
   redis_data:

@@ -5,22 +5,25 @@ import { config, PrismaService } from "./shared";
 import { TikTokReadGovernor } from "./integrations/tiktok-read-governor";
 import { TikTokIntegrationService } from "./integrations/tiktok.service";
 import { CreatorIdentityResolver } from "./identity/creator-identity-resolver.service";
-import { DiscoveryProcessor } from "./outreach/discovery-processor";
+import { CreatorSyncProcessor } from "./creator-database/creator-sync.processor";
+import { GoogleSheetsCreatorGateway } from "./creator-database/creator-sheet.gateway";
+import { CreatorDatabaseService } from "./creator-database/creator-database.service";
 import { WorkerHeartbeatPublisher } from "./worker-heartbeat";
 
-@Module({ providers: [PrismaService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, DiscoveryProcessor] })
+@Module({ providers: [PrismaService, TikTokReadGovernor, TikTokIntegrationService, CreatorIdentityResolver, GoogleSheetsCreatorGateway, CreatorSyncProcessor, CreatorDatabaseService] })
 class DiscoveryWorkerModule {}
 
 async function main() {
   const app = await NestFactory.createApplicationContext(DiscoveryWorkerModule, { logger: ["error", "warn", "log"] });
-  const processor = app.get(DiscoveryProcessor);
-  const heartbeat = new WorkerHeartbeatPublisher(app.get(PrismaService), "discovery-worker", { capability: "SEARCH_CREATORS", mutations: false });
+  const processor = app.get(CreatorSyncProcessor);
+  await app.get(CreatorDatabaseService).ensureJob();
+  const heartbeat = new WorkerHeartbeatPublisher(app.get(PrismaService), "discovery-worker", { capability: "CREATOR_DATABASE_CONTINUATION", mutations: false });
   await heartbeat.start();
   let stopping = false;
   const tick = async () => {
     if (stopping) return;
     try { while (await processor.processNext()) { /* drain due local jobs one page at a time */ } }
-    catch (error) { console.error("Discovery sweep failed", error instanceof Error ? error.message : "unknown error"); }
+    catch (error) { console.error("Creator sync sweep failed", error instanceof Error ? error.message : "unknown error"); }
   };
   await tick();
   const timer = setInterval(() => void tick(), config.DISCOVERY_POLL_INTERVAL_MS);

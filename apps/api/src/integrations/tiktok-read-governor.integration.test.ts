@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrismaClient } from "@affiliate/db";
 import { TikTokApiError, TikTokReadOnlyBoundaryError, TikTokReadOnlyHttpClient, type TikTokReadOperation } from "@affiliate/tiktok-adapter";
 import { TikTokApiExceptionFilter } from "./tiktok-api-exception.filter";
-import { marketplaceBackoffMs, TikTokReadGovernor } from "./tiktok-read-governor";
+import { CREATOR_MARKETPLACE_RETRY_MS, TikTokReadGovernor } from "./tiktok-read-governor";
 
 const prisma = new PrismaClient();
 const prefix = `rate_limit_test_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -47,16 +47,11 @@ afterAll(async () => {
 });
 
 describe.sequential("durable TikTok read governor", () => {
-  it("uses conservative bounded Marketplace cooldowns", () => {
-    expect([1, 2, 3, 4].map((count) => marketplaceBackoffMs(count, () => 0))).toEqual([15, 30, 60, 120].map((minutes) => minutes * 60_000));
-    expect(marketplaceBackoffMs(1, () => 1)).toBe(18 * 60_000);
-    expect(marketplaceBackoffMs(20, () => 1)).toBe(6 * 60 * 60_000);
-  });
   it("persists Marketplace throttle state after HTTP 429 / 36009002", async () => {
     const { row } = await throttleOnce(scope());
     expect(row).toMatchObject({ provider: "TIKTOK_SHOP", operation: "SEARCH_CREATORS", consecutiveThrottleCount: 1, lastProviderRequestId: "safe-request-id" });
     expect(row.lastThrottleAt).toEqual(new Date(nowMs));
-    expect(row.nextPermittedAt!.getTime()).toBeGreaterThan(nowMs);
+    expect(row.nextPermittedAt!.getTime()).toBe(nowMs + CREATOR_MARKETPLACE_RETRY_MS);
   });
 
   it("blocks an immediate second request locally with zero additional provider calls", async () => {
@@ -134,13 +129,13 @@ describe.sequential("durable TikTok read governor", () => {
       .toMatchObject({ consecutiveThrottleCount: 1, leaseId: null });
   });
 
-  it("increases exponential cooldown after repeated 429s", async () => {
+  it("keeps repeated temporary Marketplace throttles on the fixed 5-second retry interval", async () => {
     const shop = scope(); const first = await throttleOnce(shop);
-    const firstDelay = first.row.nextPermittedAt!.getTime() - nowMs;
+    expect(first.row.nextPermittedAt!.getTime() - nowMs).toBe(CREATOR_MARKETPLACE_RETRY_MS);
     nowMs = first.row.nextPermittedAt!.getTime() + 1;
     const second = await throttleOnce(shop);
     expect(second.row.consecutiveThrottleCount).toBe(2);
-    expect(second.row.nextPermittedAt!.getTime() - nowMs).toBeGreaterThan(firstDelay);
+    expect(second.row.nextPermittedAt!.getTime() - nowMs).toBe(CREATOR_MARKETPLACE_RETRY_MS);
   });
 
   it("clears provider cooldown and consecutive count after success", async () => {

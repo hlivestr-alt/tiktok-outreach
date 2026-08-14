@@ -15,12 +15,18 @@
     "test:outbound": "vitest run apps/worker/src packages/tiktok-adapter/src/adapter.test.ts packages/tiktok-adapter/src/real-outbound.test.ts packages/config/src/index.test.ts packages/domain/src/domain.test.ts apps/api/src/hardening.integration.test.ts",
     "test:rate-limit": "vitest run apps/api/src/integrations/tiktok-read-governor.integration.test.ts",
     "test:validation": "vitest run apps/api/src/history/validation-mode.test.ts apps/api/src/outreach/discovery-recovery.integration.test.ts apps/api/src/integrations/tiktok-refresh.integration.test.ts packages/tiktok-adapter/src/real-read-only.test.ts",
+    "test:marketplace-probe": "vitest run scripts/marketplace-discovery-probe.test.ts",
     "test:watch": "vitest",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",
     "db:studio": "prisma studio --schema packages/db/prisma/schema.prisma",
-    "typecheck": "pnpm build:packages && pnpm -r --workspace-concurrency=1 run typecheck",
+    "typecheck": "pnpm build:packages && pnpm -r --workspace-concurrency=1 run typecheck && tsc -p scripts/tsconfig.json --noEmit",
+    "marketplace:probe": "node scripts/run-marketplace-probe.cjs",
     "postinstall": "pnpm db:generate"
+  },
+  "dependencies": {
+    "@affiliate/domain": "workspace:*",
+    "@affiliate/tiktok-adapter": "workspace:*"
   },
   "devDependencies": {
     "@prisma/client": "^6.19.0",

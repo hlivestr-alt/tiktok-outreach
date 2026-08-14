@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Clock3, Megaphone, Plus, ShieldCheck, Users } from "lucide-react";
 import { api, formatNumber } from "../../lib/api";
+import { CreatorDatabaseSync } from "../../components/creator-database-sync";
 
 type Campaign = { id: string; name: string; productName: string; targetCount: number; state: string; summary: any; createdAt: string; dispatchCount: number };
 
@@ -18,6 +19,7 @@ export default function CampaignsPage() {
       <div className="stat-card"><Clock3/><span>Dispatch attempts</span><strong>{formatNumber(campaigns.reduce((s, c) => s + c.dispatchCount, 0))}</strong></div>
       <div className="stat-card safe"><ShieldCheck/><span>Production sends</span><strong>0</strong></div>
     </section>
+    <CreatorDatabaseSync/>
     <section className="panel"><div className="panel-heading"><div><h2>Outreach campaigns</h2><p>Every campaign begins with discovery and a frozen preview.</p></div></div>
       {error && <div className="alert error">{error}. Start PostgreSQL, Redis, and the API to load campaigns.</div>}
       {!error && campaigns.length === 0 ? <div className="empty"><div className="empty-icon"><Megaphone/></div><h3>No campaigns yet</h3><p>Create a mock campaign to test discovery, exclusions, confirmation, and queue safety.</p><Link className="button primary" href="/campaigns/new">Create first campaign</Link></div> :
@@ -25,4 +27,3 @@ export default function CampaignsPage() {
     </section>
   </div>;
 }
-

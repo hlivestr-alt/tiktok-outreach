@@ -50,11 +50,11 @@ export class CreatorIdentityResolver {
       }
       const creator = byOpen ?? byUser ?? await tx.creator.create({ data: {
         creatorOpenId: candidate.creatorOpenId, creatorUserId: candidate.creatorUserId,
-        username: candidate.username, nickname: candidate.nickname, selectionRegion: candidate.selectionRegion
+        username: candidate.username, nickname: candidate.nickname, avatarUrl: candidate.avatarUrl, selectionRegion: candidate.selectionRegion
       } });
       const updated = await tx.creator.update({ where: { id: creator.id }, data: {
         creatorOpenId: candidate.creatorOpenId, creatorUserId: candidate.creatorUserId,
-        username: candidate.username, nickname: candidate.nickname, selectionRegion: candidate.selectionRegion
+        username: candidate.username, nickname: candidate.nickname, avatarUrl: candidate.avatarUrl, selectionRegion: candidate.selectionRegion
       } });
       await this.identity(tx, updated.id, "TIKTOK_CREATOR_OPEN_ID", candidate.creatorOpenId, "VERIFIED", "MARKETPLACE_EXACT_FIELD");
       if (candidate.creatorUserId) await this.identity(tx, updated.id, "TIKTOK_CREATOR_USER_ID", candidate.creatorUserId, "VERIFIED", "MARKETPLACE_EXACT_FIELD");
