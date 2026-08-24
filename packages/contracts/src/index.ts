@@ -57,10 +57,10 @@ export type ProviderPage<T> = {
 export type ProviderConversation = { id: string; creatorOpenId?: string; creatorImId: string; username?: string; avatarUrl?: string; unreadCount?: number };
 
 export type SendMessageResult =
-  | { status: "SENT"; messageId: string; requestId: string }
-  | { status: "DELIVERY_UNKNOWN"; requestId: string }
-  | { status: "RETRYABLE_ERROR" | "QUOTA_LIMITED"; requestId: string; errorCode: string; retryAfterMs: number }
-  | { status: "RESTRICTED"; requestId: string; errorCode: string };
+  | { status: "SENT"; messageId: string; requestId: string; httpStatus?: number }
+  | { status: "DELIVERY_UNKNOWN"; requestId: string; httpStatus?: number }
+  | { status: "RETRYABLE_ERROR" | "QUOTA_LIMITED"; requestId: string; errorCode: string; retryAfterMs?: number; httpStatus?: number }
+  | { status: "RESTRICTED"; requestId: string; errorCode: string; httpStatus?: number };
 
 export type AuthorizedTikTokShop = { id: string; cipher: string; code?: string; name: string; region: string; sellerType?: string };
 

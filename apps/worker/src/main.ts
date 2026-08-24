@@ -5,15 +5,24 @@ import { liveOutboundExplicitlyEnabled, loadConfig } from "@affiliate/config";
 import type { TikTokOutboundAdapter } from "@affiliate/contracts";
 import { reconcileUnknownDelivery } from "@affiliate/domain";
 import { decryptTikTokToken, MockTikTokAffiliateAdapter, RealTikTokOutboundAdapter, TikTokOutboundError } from "@affiliate/tiktok-adapter";
-import { releaseDispatchLease, reserveDispatchSlot, SafetyDelay } from "./dispatch-safety";
+import { reserveDispatchSlot } from "./dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "./delivery-policy";
 import { campaignCompletionSummary } from "./campaign-completion";
+import { isProviderThrottle, OutboundProviderGovernor } from "./outbound-throttle";
 
 const config = loadConfig();
 const redisUrl = new URL(config.REDIS_URL);
 const connection = { host: redisUrl.hostname, port: Number(redisUrl.port || 6379), password: redisUrl.password || undefined };
 const prisma = new PrismaClient();
 const workerInstanceId = randomUUID();
+const providerAppScope = createHash("sha256").update(config.TIKTOK_APP_KEY ?? "mock-outbound-app").digest("hex").slice(0, 24);
+const providerGovernor = new OutboundProviderGovernor(prisma, {
+  provider: "TIKTOK_SHOP",
+  appScope: providerAppScope,
+  initialConcurrency: config.OUTBOUND_PROVIDER_INITIAL_CONCURRENCY,
+  technicalMaxConcurrency: config.OUTBOUND_PROVIDER_MAX_CONCURRENCY,
+  permitLeaseMs: config.OUTBOUND_PROVIDER_PERMIT_LEASE_MS
+});
 function required(name: "TIKTOK_APP_KEY" | "TIKTOK_APP_SECRET" | "TIKTOK_TOKEN_ENCRYPTION_KEY"): string {
   const value = config[name];
   if (!value) throw new Error(`LIVE_OUTBOUND_NOT_CONFIGURED: ${name} is required`);
@@ -47,11 +56,32 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
 async function publishHeartbeat(status: "RUNNING" | "STOPPED"): Promise<void> {
   const now = new Date();
+  const since = new Date(now.getTime() - 60_000);
+  const [limiters, attemptsLastMinute, acceptedLastMinute, throttlesLastMinute, queueDepth] = await Promise.all([
+    prisma.providerOutboundLimiter.findMany({ where: { appScope: providerAppScope }, select: {
+      shopId: true, operation: true, state: true, effectiveConcurrency: true, technicalMaxConcurrency: true,
+      nextPermittedAt: true, lastHttpStatus: true, lastBusinessCode: true, consecutiveThrottleCount: true, quotaCode: true
+    } }),
+    prisma.providerOutboundEvent.count({ where: { occurredAt: { gt: since }, outcome: "ATTEMPT", limiter: { appScope: providerAppScope } } }),
+    prisma.providerOutboundEvent.count({ where: { occurredAt: { gt: since }, outcome: "ACCEPTED", limiter: { appScope: providerAppScope, operation: "SEND_MESSAGE" } } }),
+    prisma.providerOutboundEvent.count({ where: { occurredAt: { gt: since }, outcome: "THROTTLED", limiter: { appScope: providerAppScope } } }),
+    queue.getJobCounts("waiting", "active", "delayed", "prioritized")
+  ]);
+  const metadata = {
+    outboundMode: config.OUTBOUND_MODE,
+    mutationCapability: config.OUTBOUND_MODE === "live",
+    acceptedSendsPerMinute: acceptedLastMinute,
+    providerAttemptsPerMinute: attemptsLastMinute,
+    recentThrottles: throttlesLastMinute,
+    queueDepth: Object.values(queueDepth).reduce((sum, count) => sum + count, 0),
+    limiters
+  };
   await prisma.workerHeartbeat.upsert({
     where: { role: "outbound-worker" },
-    update: { instanceId: workerInstanceId, status, lastSeenAt: now, metadata: { outboundMode: config.OUTBOUND_MODE, mutationCapability: config.OUTBOUND_MODE === "live" } },
-    create: { role: "outbound-worker", instanceId: workerInstanceId, status, startedAt: now, lastSeenAt: now, metadata: { outboundMode: config.OUTBOUND_MODE, mutationCapability: config.OUTBOUND_MODE === "live" } }
+    update: { instanceId: workerInstanceId, status, lastSeenAt: now, metadata },
+    create: { role: "outbound-worker", instanceId: workerInstanceId, status, startedAt: now, lastSeenAt: now, metadata }
   });
+  console.log(JSON.stringify({ level: "info", worker: "outbound-worker", event: "provider_runtime", ...metadata }));
 }
 
 async function maintenanceSweep(): Promise<void> {
@@ -69,7 +99,7 @@ async function maintenanceSweep(): Promise<void> {
 
   const recipients = await prisma.campaignRecipient.findMany({
     where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING"] } } },
-    include: { delivery: true }, take: 250
+    include: { delivery: true }, take: config.OUTBOUND_QUEUE_RECONCILE_BATCH_SIZE
   });
   for (const recipient of recipients) {
     if (!recipient.delivery) continue;
@@ -97,6 +127,20 @@ async function delayJob(job: Job, delayMs: number): Promise<never> {
   if (!job.token) throw new Error("Active job has no token");
   await job.moveToDelayed(Date.now() + delayMs, job.token);
   throw new DelayedError();
+}
+
+async function waitForSendPermitWhileCampaignActive(recipient: any, attemptNumber: number) {
+  for (;;) {
+    const result = await providerGovernor.acquire(
+      recipient.campaign.shopId,
+      "SEND_MESSAGE",
+      `${workerInstanceId}:${recipient.delivery.id}:${attemptNumber}:send`
+    );
+    if (result.acquired) return result.permit;
+    const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: recipient.campaignId }, select: { state: true } });
+    if (!["QUEUED", "RUNNING"].includes(campaign.state)) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, result.delayMs)));
+  }
 }
 
 async function markSent(recipient: any, conversationId: string, externalMessageId: string, requestId?: string) {
@@ -150,11 +194,11 @@ async function markTerminalFailure(recipient: any, errorCode: string, errorDetai
   ]);
 }
 
-async function markDeliveryUnknown(recipient: any, attemptId: string, requestId: string | undefined, detail: string) {
+async function markDeliveryUnknown(recipient: any, attemptId: string, requestId: string | undefined, detail: string, httpStatus?: number) {
   await prisma.$transaction(async (tx) => {
     await lockCreatorEligibility(tx, recipient.campaign.shopId, [recipient.creatorId]);
     await tx.deliveryAttempt.update({ where: { id: attemptId }, data: {
-      outcome: "DELIVERY_UNKNOWN", providerRequestId: requestId, providerCode: "DELIVERY_UNKNOWN", completedAt: new Date()
+      outcome: "DELIVERY_UNKNOWN", providerRequestId: requestId, providerCode: "DELIVERY_UNKNOWN", providerHttpStatus: httpStatus, completedAt: new Date()
     } });
     await tx.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
       state: "DELIVERY_UNKNOWN", providerRequestId: requestId, lastErrorCode: "DELIVERY_UNKNOWN", lastErrorDetail: detail
@@ -202,6 +246,27 @@ async function pauseShopForProviderFailure(recipient: any, error: TikTokOutbound
   ]);
 }
 
+async function pauseShopForProviderQuota(recipient: any, errorCode: string, operation: "CREATE_CONVERSATION" | "SEND_MESSAGE") {
+  const reason = `TikTok outbound IM quota ${errorCode} blocked outbound; provider recovery or operator action is required`;
+  await prisma.$transaction([
+    prisma.campaign.updateMany({ where: { shopId: recipient.campaign.shopId, state: { in: ["QUEUED", "RUNNING"] } }, data: { state: "SAFETY_PAUSED", safetyPauseReason: reason, version: { increment: 1 } } }),
+    prisma.queueOutbox.updateMany({ where: { campaign: { shopId: recipient.campaign.shopId }, state: { in: ["PENDING", "ENQUEUED"] } }, data: { state: "SAFETY_PAUSED", lastError: reason } }),
+    prisma.auditEvent.create({ data: {
+      shopId: recipient.campaign.shopId, campaignId: recipient.campaignId,
+      eventType: "OUTBOUND_PROVIDER_IM_QUOTA_BLOCKED", payload: { providerCode: errorCode, operation }
+    } })
+  ]);
+}
+
+async function makeDeliveryRetryable(recipient: any, errorCode: string, errorDetail: string) {
+  await prisma.$transaction([
+    prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
+      state: "FAILED_RETRYABLE", lastErrorCode: errorCode, lastErrorDetail: errorDetail
+    } }),
+    prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } })
+  ]);
+}
+
 async function processSend(job: Job<{ recipientId: string }>) {
   if (config.OUTBOUND_MODE === "read_only" || (config.OUTBOUND_MODE === "live" && !liveOutboundExplicitlyEnabled(config))) throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable");
   const recipient = await prisma.campaignRecipient.findUnique({
@@ -227,10 +292,26 @@ async function processSend(job: Job<{ recipientId: string }>) {
     await completeCampaignIfDone(recipient.campaignId);
     return;
   }
+  const createPermitResult = await providerGovernor.acquire(
+    recipient.campaign.shopId,
+    "CREATE_CONVERSATION",
+    `${workerInstanceId}:${recipient.delivery.id}:${recipient.delivery.attemptCount + 1}:create`
+  );
+  if (!createPermitResult.acquired) return delayJob(job, createPermitResult.delayMs);
+  const createPermit = createPermitResult.permit;
+  let createPermitSettled = false;
+  let sendPermit: Awaited<ReturnType<typeof providerGovernor.waitForPermit>> | undefined;
+  let sendPermitSettled = false;
   let claim: Awaited<ReturnType<typeof reserveDispatchSlot>>;
   try { claim = await reserveDispatchSlot(prisma, recipient); }
-  catch (error) { if (error instanceof SafetyDelay) return delayJob(job, error.delayMs); throw error; }
+  catch (error) {
+    await providerGovernor.release(createPermit, "NOT_DISPATCHED");
+    createPermitSettled = true;
+    throw error;
+  }
   if (!claim.claimed) {
+    await providerGovernor.release(createPermit, "NOT_DISPATCHED");
+    createPermitSettled = true;
     if (claim.cancelled) await completeCampaignIfDone(recipient.campaignId);
     return;
   }
@@ -238,10 +319,71 @@ async function processSend(job: Job<{ recipientId: string }>) {
   try {
   const attemptNumber = claim.attemptNumber;
   const attempt = await prisma.deliveryAttempt.create({ data: { deliveryId: recipient.delivery.id, attemptNumber, outcome: "STARTED", startedAt: new Date() } });
+  const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
   let providerConversation: Awaited<ReturnType<typeof adapter.createOrGetConversation>>;
   let conversation: { id: string };
   try {
     providerConversation = await adapter.createOrGetConversation(creatorOpenId);
+    await providerGovernor.healthy(createPermit, "ACCEPTED", { businessCode: "0" });
+    createPermitSettled = true;
+  } catch (error) {
+    const providerCode = error instanceof TikTokOutboundError ? String(error.providerCode ?? error.kind) : "CONVERSATION_SETUP_FAILED";
+    const meta = error instanceof TikTokOutboundError ? { httpStatus: error.httpStatus, businessCode: providerCode } : {};
+    if (error instanceof TikTokOutboundError && error.kind === "QUOTA") {
+      await providerGovernor.quotaBlocked(createPermit, providerCode, "TikTok reported that the shop has reached its IM quota", meta);
+      createPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode, providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
+      await makeDeliveryRetryable(recipient, providerCode, "Provider shop IM quota is blocked");
+      await pauseShopForProviderQuota(recipient, providerCode, "CREATE_CONVERSATION");
+      return;
+    }
+    if (error instanceof TikTokOutboundError && ["AUTH", "PERMISSION"].includes(error.kind)) {
+      await providerGovernor.release(createPermit, "AUTH_OR_PERMISSION", meta);
+      createPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode, providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
+      await makeDeliveryRetryable(recipient, providerCode, "Provider authorization or permission requires operator action");
+      await pauseShopForProviderFailure(recipient, error);
+      return;
+    }
+    if (error instanceof TikTokOutboundError && error.kind === "RESTRICTED") {
+      await providerGovernor.healthy(createPermit, "RESTRICTED", meta);
+      createPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? "RESTRICTED"), providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
+      await markRestricted(recipient, String(error.providerCode ?? "RESTRICTED"));
+      await completeCampaignIfDone(recipient.campaignId);
+      return;
+    }
+    const detail = error instanceof Error ? error.message : "Provider conversation setup failed";
+    let providerDelayMs: number | undefined;
+    if (error instanceof TikTokOutboundError && error.kind === "RETRYABLE" && isProviderThrottle(error.httpStatus, error.providerCode)) {
+      const throttle = await providerGovernor.throttle(createPermit, { ...meta, retryAfterMs: error.retryAfterMs });
+      createPermitSettled = true;
+      providerDelayMs = throttle.delayMs;
+    } else if (!(error instanceof TikTokOutboundError) || error.kind === "RETRYABLE") {
+      const transient = await providerGovernor.transientFailure(createPermit, meta);
+      createPermitSettled = true;
+      providerDelayMs = transient.delayMs;
+    } else {
+      await providerGovernor.healthy(createPermit, "RESTRICTED", meta);
+      createPermitSettled = true;
+    }
+    const throttled = error instanceof TikTokOutboundError && error.kind === "RETRYABLE" && isProviderThrottle(error.httpStatus, error.providerCode);
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
+      outcome: throttled || !finalAttempt ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
+      providerCode,
+      providerHttpStatus: error instanceof TikTokOutboundError ? error.httpStatus : undefined,
+      providerRequestId: error instanceof TikTokOutboundError ? error.requestId : undefined, completedAt: new Date()
+    } });
+    if (!throttled && finalAttempt) {
+      await markTerminalFailure(recipient, "CONVERSATION_SETUP_FAILED", detail);
+      await completeCampaignIfDone(recipient.campaignId);
+      return;
+    }
+    await makeDeliveryRetryable(recipient, providerCode, detail);
+    if (throttled) return delayJob(job, providerDelayMs ?? 1_000);
+    throw error;
+  }
+  try {
     conversation = await prisma.conversation.upsert({
       where: { externalConversationId: providerConversation.conversationId }, update: {},
       create: { shopId: recipient.campaign.shopId, creatorId: recipient.creatorId, externalConversationId: providerConversation.conversationId }
@@ -249,33 +391,16 @@ async function processSend(job: Job<{ recipientId: string }>) {
     await prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: { conversationId: conversation.id } });
     recipient.delivery.conversationId = conversation.id;
   } catch (error) {
-    if (error instanceof TikTokOutboundError && ["AUTH", "PERMISSION"].includes(error.kind)) {
-      await pauseShopForProviderFailure(recipient, error);
-      return;
-    }
-    if (error instanceof TikTokOutboundError && error.kind === "RESTRICTED") {
-      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? "RESTRICTED"), providerRequestId: error.requestId, completedAt: new Date() } });
-      await markRestricted(recipient, String(error.providerCode ?? "RESTRICTED"));
-      await completeCampaignIfDone(recipient.campaignId);
-      return;
-    }
-    const detail = error instanceof Error ? error.message : "Provider conversation setup failed";
-    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
-    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
-      outcome: finalAttempt ? "FAILED_TERMINAL" : "FAILED_RETRYABLE", providerCode: "CONVERSATION_SETUP_FAILED", completedAt: new Date()
-    } });
-    if (finalAttempt) {
-      await markTerminalFailure(recipient, "CONVERSATION_SETUP_FAILED", detail);
-      await completeCampaignIfDone(recipient.campaignId);
-      return;
-    }
-    await prisma.$transaction([
-      prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
-        state: "FAILED_RETRYABLE", lastErrorCode: "CONVERSATION_SETUP_FAILED", lastErrorDetail: detail
-      } }),
-      prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } })
-    ]);
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode: "LOCAL_CONVERSATION_PERSISTENCE_FAILED", completedAt: new Date() } });
+    await makeDeliveryRetryable(recipient, "LOCAL_CONVERSATION_PERSISTENCE_FAILED", "Conversation persistence failed before Send Message was attempted");
     throw error;
+  }
+  sendPermit = await waitForSendPermitWhileCampaignActive(recipient, attemptNumber);
+  if (!sendPermit) {
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode: "CAMPAIGN_PAUSED_BEFORE_SEND", completedAt: new Date() } });
+    await makeDeliveryRetryable(recipient, "CAMPAIGN_PAUSED_BEFORE_SEND", "Campaign paused before Send Message acquired a provider permit");
+    await prisma.campaign.updateMany({ where: { id: recipient.campaignId, state: "PAUSE_REQUESTED" }, data: { state: "PAUSED" } });
+    return;
   }
   let result: Awaited<ReturnType<typeof adapter.sendMessage>>;
   try {
@@ -284,25 +409,46 @@ async function processSend(job: Job<{ recipientId: string }>) {
     });
   } catch (error) {
     if (error instanceof TikTokOutboundError && ["AUTH", "PERMISSION"].includes(error.kind)) {
+      await providerGovernor.release(sendPermit, "AUTH_OR_PERMISSION", { httpStatus: error.httpStatus, businessCode: String(error.providerCode ?? error.kind) });
+      sendPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode: String(error.providerCode ?? error.kind), providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
+      await makeDeliveryRetryable(recipient, String(error.providerCode ?? error.kind), "Provider authorization or permission requires operator action");
       await pauseShopForProviderFailure(recipient, error);
       return;
     }
+    if (error instanceof TikTokOutboundError && error.kind === "QUOTA") {
+      const code = String(error.providerCode ?? "PROVIDER_IM_QUOTA");
+      await providerGovernor.quotaBlocked(sendPermit, code, "TikTok reported a shop IM quota", { httpStatus: error.httpStatus, businessCode: code });
+      sendPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_RETRYABLE", providerCode: code, providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
+      await makeDeliveryRetryable(recipient, code, "Provider shop IM quota is blocked");
+      await pauseShopForProviderQuota(recipient, code, "SEND_MESSAGE");
+      return;
+    }
     if (error instanceof TikTokOutboundError) {
-      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? error.kind), providerRequestId: error.requestId, completedAt: new Date() } });
+      await providerGovernor.healthy(sendPermit, "RESTRICTED", { httpStatus: error.httpStatus, businessCode: String(error.providerCode ?? error.kind) });
+      sendPermitSettled = true;
+      await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "FAILED_TERMINAL", providerCode: String(error.providerCode ?? error.kind), providerHttpStatus: error.httpStatus, providerRequestId: error.requestId, completedAt: new Date() } });
       await markTerminalFailure(recipient, String(error.providerCode ?? error.kind), "TikTok definitively rejected the message request");
       await completeCampaignIfDone(recipient.campaignId);
       return;
     }
     const detail = error instanceof Error ? error.message : "Network outcome was not observable";
+    await providerGovernor.release(sendPermit, "DELIVERY_UNKNOWN");
+    sendPermitSettled = true;
     await markDeliveryUnknown(recipient, attempt.id, undefined, detail);
     await completeCampaignIfDone(recipient.campaignId);
     return;
   }
   if (result.status === "SENT") {
-    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "SENT", providerRequestId: result.requestId, completedAt: new Date() } });
+    await providerGovernor.healthy(sendPermit, "ACCEPTED", { httpStatus: result.httpStatus, businessCode: "0" });
+    sendPermitSettled = true;
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: { outcome: "SENT", providerCode: "0", providerHttpStatus: result.httpStatus, providerRequestId: result.requestId, completedAt: new Date() } });
     await markSent(recipient, conversation.id, result.messageId, result.requestId);
   } else if (result.status === "DELIVERY_UNKNOWN") {
-    await markDeliveryUnknown(recipient, attempt.id, result.requestId, "Provider response did not establish whether the message was accepted");
+    await providerGovernor.release(sendPermit, "DELIVERY_UNKNOWN", { httpStatus: result.httpStatus });
+    sendPermitSettled = true;
+    await markDeliveryUnknown(recipient, attempt.id, result.requestId, "Provider response did not establish whether the message was accepted", result.httpStatus);
     const numeric = Number(creatorOpenId.slice(-5));
     if (config.OUTBOUND_MODE === "mock" && numeric % 74 === 0) {
       await prisma.conversationMessage.create({ data: {
@@ -311,31 +457,44 @@ async function processSend(job: Job<{ recipientId: string }>) {
       }});
     }
   } else if (result.status === "RESTRICTED") {
+    await providerGovernor.healthy(sendPermit, "RESTRICTED", { httpStatus: result.httpStatus, businessCode: result.errorCode });
+    sendPermitSettled = true;
     await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
-      outcome: "FAILED_TERMINAL", providerRequestId: result.requestId, providerCode: result.errorCode, completedAt: new Date()
+      outcome: "FAILED_TERMINAL", providerRequestId: result.requestId, providerCode: result.errorCode, providerHttpStatus: result.httpStatus, completedAt: new Date()
     } });
     await markRestricted(recipient, result.errorCode);
-  } else {
-    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+  } else if (result.status === "QUOTA_LIMITED") {
+    await providerGovernor.quotaBlocked(sendPermit, result.errorCode, "TikTok reported that outbound IM quota is blocked", { httpStatus: result.httpStatus, businessCode: result.errorCode });
+    sendPermitSettled = true;
     await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
-      outcome: finalAttempt ? "FAILED_TERMINAL" : "FAILED_RETRYABLE", providerRequestId: result.requestId,
-      providerCode: result.errorCode, completedAt: new Date()
+      outcome: "FAILED_RETRYABLE", providerRequestId: result.requestId, providerCode: result.errorCode,
+      providerHttpStatus: result.httpStatus, completedAt: new Date()
     } });
-    if (finalAttempt) {
+    await makeDeliveryRetryable(recipient, result.errorCode, "Provider shop IM quota is blocked");
+    await pauseShopForProviderQuota(recipient, result.errorCode, "SEND_MESSAGE");
+    return;
+  } else {
+    const throttled = isProviderThrottle(result.httpStatus, result.errorCode);
+    const providerDelay = throttled
+      ? await providerGovernor.throttle(sendPermit, { httpStatus: result.httpStatus, businessCode: result.errorCode, retryAfterMs: result.retryAfterMs })
+      : await providerGovernor.transientFailure(sendPermit, { httpStatus: result.httpStatus, businessCode: result.errorCode });
+    sendPermitSettled = true;
+    await prisma.deliveryAttempt.update({ where: { id: attempt.id }, data: {
+      outcome: throttled || !finalAttempt ? "FAILED_RETRYABLE" : "FAILED_TERMINAL", providerRequestId: result.requestId,
+      providerCode: result.errorCode, providerHttpStatus: result.httpStatus, completedAt: new Date()
+    } });
+    if (!throttled && finalAttempt) {
       await markTerminalFailure(recipient, result.errorCode, "Retry budget exhausted without a confirmed dispatch");
     } else {
-      await prisma.$transaction([
-        prisma.outreachDelivery.update({ where: { id: recipient.delivery.id }, data: {
-          state: "FAILED_RETRYABLE", lastErrorCode: result.errorCode, lastErrorDetail: `Retry after ${result.retryAfterMs}ms`
-        } }),
-        prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } })
-      ]);
+      await makeDeliveryRetryable(recipient, result.errorCode, `Provider retry scheduled after ${providerDelay.delayMs}ms`);
+      if (throttled) return delayJob(job, providerDelay.delayMs);
       throw new Error(result.errorCode);
     }
   }
   await completeCampaignIfDone(recipient.campaignId);
   } finally {
-    await releaseDispatchLease(prisma, recipient.campaign.shopId, claim.leaseOwner);
+    if (!createPermitSettled) await providerGovernor.release(createPermit, "LOCAL_FAILURE").catch(() => undefined);
+    if (sendPermit && !sendPermitSettled) await providerGovernor.release(sendPermit, "LOCAL_FAILURE").catch(() => undefined);
   }
 }
 
@@ -378,19 +537,24 @@ const worker = new Worker("outreach", async (job) => {
   return processSend(job as Job<{ recipientId: string }>);
 }, {
   connection,
-  concurrency: 4,
-  limiter: { max: config.MAX_DISPATCHES_PER_MINUTE, duration: 60_000 }
+  concurrency: config.OUTBOUND_WORKER_CONCURRENCY
 });
 
 worker.on("failed", (job, error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "job_failed", jobId: job?.id, error: error.message })));
 worker.on("error", (error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "worker_error", error: error.message })));
 void maintenanceSweep().catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "maintenance_failed", error: error instanceof Error ? error.message : "unknown" })));
-const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "maintenance_failed", error: error instanceof Error ? error.message : "unknown" }))), 5_000);
+const maintenanceTimer = setInterval(() => void maintenanceSweep().catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "maintenance_failed", error: error instanceof Error ? error.message : "unknown" }))), config.OUTBOUND_QUEUE_POLL_INTERVAL_MS);
 maintenanceTimer.unref();
 void publishHeartbeat("RUNNING").catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "heartbeat_failed", error: error instanceof Error ? error.message : "unknown" })));
 const heartbeatTimer = setInterval(() => void publishHeartbeat("RUNNING").catch((error) => console.error(JSON.stringify({ level: "error", worker: "outbound-worker", event: "heartbeat_failed", error: error instanceof Error ? error.message : "unknown" }))), config.WORKER_HEARTBEAT_INTERVAL_MS ?? 15_000);
 heartbeatTimer.unref();
-console.log(JSON.stringify({ level: "info", worker: "outbound-worker", event: "ready", appMode: config.APP_MODE, outboundMode: config.OUTBOUND_MODE }));
+console.log(JSON.stringify({
+  level: "info", worker: "outbound-worker", event: "ready", appMode: config.APP_MODE, outboundMode: config.OUTBOUND_MODE,
+  workerConcurrency: config.OUTBOUND_WORKER_CONCURRENCY,
+  providerInitialConcurrency: config.OUTBOUND_PROVIDER_INITIAL_CONCURRENCY,
+  providerTechnicalMaxConcurrency: config.OUTBOUND_PROVIDER_MAX_CONCURRENCY,
+  queuePollIntervalMs: config.OUTBOUND_QUEUE_POLL_INTERVAL_MS, queueReconcileBatchSize: config.OUTBOUND_QUEUE_RECONCILE_BATCH_SIZE
+}));
 
 async function shutdown() {
   clearInterval(maintenanceTimer);

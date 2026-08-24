@@ -69,7 +69,9 @@ The status script reports container health, build version, worker heartbeats, ou
 5. Type the exact campaign name and selected count, then **Confirm & queue**.
 6. Pause to stop starting new recipients. **Cancel unsent** terminates only work that has not begun provider dispatch.
 
-The outbound worker may run continuously but is idle with no confirmed durable outbox jobs. Exact Creator Open ID, per-shop single flight, pacing, per-minute/hour/day application safeguards, deterministic jobs, exact positive send evidence, and restart-safe dedupe remain enforced.
+The outbound worker may run continuously but is idle with no confirmed durable outbox jobs. Exact Creator Open ID, endpoint-scoped adaptive provider permits, deterministic jobs, exact positive send evidence, and restart-safe dedupe remain enforced. Daily/hourly/minute dispatch counters are observability only; they do not throttle successful sends, and there is no fixed spacing after success.
+
+TikTok documents dynamic production rate allocation rather than one fixed QPS for these IM endpoints. HTTP 429 or business code `36009002` stops new calls in the affected App × Shop × endpoint limiter, honors `Retry-After`, or uses exponential backoff plus jitter, then automatically recovers with reduced concurrency. Healthy responses add capacity back. Create Conversation code `16030002` is a shop IM quota: the limiter persists `QUOTA_BLOCKED` and affected campaigns enter `SAFETY_PAUSED` until an operator verifies recovery and explicitly retries. `36009003` and structured HTTP 5xx responses use bounded transient backoff.
 
 `DELIVERY_UNKNOWN` is never automatically resent. Reconciliation may link exactly one matching provider message; unresolved outcomes stay visibly unresolved and block unsafe follow-up. App-originated exact Open-ID cooldown is safe. Historical pre-app IM-only identity coverage remains `HISTORICAL_COOLDOWN_COVERAGE_INCOMPLETE` and is never heuristically linked.
 

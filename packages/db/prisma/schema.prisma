@@ -165,10 +165,6 @@ model Shop {
   timezone                       String                    @default("Asia/Jakarta")
   connectionMode                 ConnectionMode            @default(MOCK)
   maxRecipientsPerCampaign       Int                       @default(500)
-  maxSendsPerHour                Int                       @default(20)
-  maxDispatchesPerMinute         Int                       @default(5)
-  outboundPacingMs               Int                       @default(10000)
-  outboundNextAllowedAt          DateTime?
   createdAt                      DateTime                  @default(now())
   updatedAt                      DateTime                  @updatedAt
   campaigns                      Campaign[]
@@ -183,22 +179,9 @@ model Shop {
   historySyncJob                 HistorySyncJob?
   historicalFacts                HistoricalContactFact[]
   safetySettingsChanges          SafetySettingsAudit[]
-  outboundLease                  ShopOutboundLease?
+  providerOutboundLimiters       ProviderOutboundLimiter[]
   creatorSyncJob                 CreatorSyncJob?
   creatorSnapshots               CreatorMetricSnapshot[]
-}
-
-/// Durable single-flight lease for outbound provider mutation sequences.
-model ShopOutboundLease {
-  shopId      String   @id
-  leaseOwner  String
-  deliveryId String
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-
-  @@index([expiresAt])
 }
 
 model IntegrationConnection {
@@ -349,6 +332,67 @@ model ProviderReadThrottle {
   @@unique([provider, shopScope, operation])
   @@index([provider, shopScope, nextPermittedAt])
   @@index([leaseExpiresAt])
+}
+
+/// Durable adaptive outbound capacity for one App x Shop x mutation endpoint.
+/// appScope is a one-way app-key digest; provider credentials are never stored.
+model ProviderOutboundLimiter {
+  id                       String                   @id @default(uuid())
+  provider                 String
+  appScope                 String
+  shopId                   String
+  operation                String
+  state                    String                   @default("HEALTHY")
+  effectiveConcurrency     Int                      @default(4)
+  technicalMaxConcurrency  Int                      @default(16)
+  healthySuccessCount      Int                      @default(0)
+  consecutiveThrottleCount Int                      @default(0)
+  consecutiveFailureCount  Int                      @default(0)
+  nextPermittedAt          DateTime?
+  lastRequestAt            DateTime?
+  lastSuccessAt            DateTime?
+  lastThrottleAt           DateTime?
+  lastHttpStatus           Int?
+  lastBusinessCode         String?
+  retryAfterMs             Int?
+  quotaBlockedAt           DateTime?
+  quotaCode                String?
+  quotaDetail              String?
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
+  shop                     Shop                     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  permits                  ProviderOutboundPermit[]
+  events                   ProviderOutboundEvent[]
+
+  @@unique([provider, appScope, shopId, operation])
+  @@index([shopId, state, nextPermittedAt])
+}
+
+/// Short-lived cross-process provider permits. Expiry is crash recovery only;
+/// healthy requests release their permit immediately.
+model ProviderOutboundPermit {
+  id        String                  @id @default(uuid())
+  limiterId String
+  owner     String                  @unique
+  expiresAt DateTime
+  createdAt DateTime                @default(now())
+  limiter   ProviderOutboundLimiter @relation(fields: [limiterId], references: [id], onDelete: Cascade)
+
+  @@index([limiterId, expiresAt])
+}
+
+/// Compact request events support rolling one-minute outbound observability.
+model ProviderOutboundEvent {
+  id           String                  @id @default(uuid())
+  limiterId    String
+  outcome      String
+  httpStatus   Int?
+  businessCode String?
+  occurredAt   DateTime                @default(now())
+  limiter      ProviderOutboundLimiter @relation(fields: [limiterId], references: [id], onDelete: Cascade)
+
+  @@index([limiterId, occurredAt])
+  @@index([occurredAt])
 }
 
 model Creator {
@@ -825,6 +869,7 @@ model DeliveryAttempt {
   attemptNumber     Int
   outcome           String
   providerCode      String?
+  providerHttpStatus Int?
   providerRequestId String?
   startedAt         DateTime
   completedAt       DateTime?

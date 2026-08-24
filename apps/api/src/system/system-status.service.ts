@@ -32,6 +32,9 @@ export class SystemStatusService {
       this.prisma.campaign.count({ where: { state: "SAFETY_PAUSED" } })
     ]);
     const heartbeat = (role: string) => heartbeats.find((item) => item.role === role) ?? null;
+    const outboundHeartbeat = heartbeat("outbound-worker");
+    const outboundRuntime = outboundHeartbeat?.metadata && typeof outboundHeartbeat.metadata === "object" && !Array.isArray(outboundHeartbeat.metadata)
+      ? outboundHeartbeat.metadata as Record<string, unknown> : {};
     const connection = (integration as any).connection ?? null;
     return {
       generatedAt: now, version: { gitSha: config.APP_VERSION, buildTimestamp: config.BUILD_TIMESTAMP },
@@ -39,9 +42,9 @@ export class SystemStatusService {
       workers: {
         discovery: workerOperationalState(heartbeat("discovery-worker"), now),
         history: workerOperationalState(heartbeat("history-worker"), now),
-        outbound: config.OUTBOUND_MODE === "live" ? workerOperationalState(heartbeat("outbound-worker"), now) : "STOPPED"
+        outbound: config.OUTBOUND_MODE === "live" ? workerOperationalState(outboundHeartbeat, now) : "STOPPED"
       },
-      outbound: { mode: config.OUTBOUND_MODE.toUpperCase(), enabled: (integration as any).outboundEnabled === true },
+      outbound: { mode: config.OUTBOUND_MODE.toUpperCase(), enabled: (integration as any).outboundEnabled === true, runtime: outboundRuntime },
       tiktok: { state: (integration as any).configurationState, selectedShop: (integration as any).selectedShop ?? (integration as any).shop ?? null, accessTokenExpiresAt: connection?.accessTokenExpiresAt ?? null, refreshState: connection?.refreshState ?? "IDLE", reauthorizationRequired: Boolean(connection && connection.status !== "HEALTHY") },
       workload: { pendingDiscovery, backingOffDiscovery, queuedOutbound, currentlySending: sending, unknownDeliveries: unknown, safetyPausedCampaigns: safetyPaused }
     };

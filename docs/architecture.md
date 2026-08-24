@@ -34,7 +34,9 @@ The domain package owns filtering, ranking, cooldown decisions, deduplication, t
 
 Frozen previews expire after 30 minutes, move to `PREVIEW_EXPIRED`, and release reservations idempotently. Freeze re-checks current contact state, cooldown, unknown deliveries, do-not-contact, and active reservations under ordered per-shop/per-creator transaction locks shared by history and delivery mutations. If every selected creator became ineligible, freeze returns the campaign to `PREVIEW_EXPIRED` immediately without an active expiry window. A unique `(campaign_id, creator_id)` recipient and unique `(shop_id, creator_id)` active reservation prevent duplicate selection.
 
-Campaign recipient capacity (`maxRecipientsPerCampaign`) is the only setting that limits how many distinct frozen recipients a campaign may process. Campaign dispatch counts and per-shop daily usage remain durable observability counters, but neither is a dispatch blocker. Transient provider retries use the delivery job's retry policy and do not change recipient capacity. Hourly and rolling-minute controls pace starts, a persistent per-shop lease allows one active mutation sequence, and `outboundPacingMs` spaces starts.
+Campaign recipient capacity (`maxRecipientsPerCampaign`) is the only setting that limits how many distinct frozen recipients a campaign may process. Campaign dispatch counts, per-shop daily usage, and rolling provider events remain durable observability counters, but none is a dispatch blocker. Transient provider retries do not change recipient capacity. There is no local hourly, minute, or fixed-success-spacing messaging quota.
+
+Outbound provider capacity is isolated by TikTok App × Shop × mutation endpoint. Durable short-lived permits coordinate all worker processes. Each endpoint starts at a conservative effective concurrency, increases additively after healthy provider responses, halves on each HTTP 429 or business code `36009002`, honors `Retry-After`, and otherwise applies exponential backoff with jitter. A 16-job worker/provider ceiling protects the measured Prisma transaction pool, Node, PostgreSQL, and Redis; it is a configurable technical maximum rather than a claimed TikTok quota. Shop IM quota code `16030002` persists `QUOTA_BLOCKED` and safety-pauses affected campaigns until an operator retries after checking provider recovery.
 
 PostgreSQL is the queue source of truth. Campaign start commits each delivery and its `QueueOutbox` intent atomically. API and worker sweepers reconcile every safe `QUEUED` recipient to a deterministic BullMQ job after partial Redis failures or restarts. Queue presence never marks a delivery sent.
 
@@ -53,7 +55,7 @@ PostgreSQL stores the exact frozen outbound message and content hash. Runtime lo
 - The real read-only adapter still accepts only its exact read allowlist. The separate outbound adapter accepts only Create Conversation and Send Message; Mark Read is absent.
 - A dispatch is counted before the mock provider is called.
 - Campaign, Indonesia shop-day, and rolling-minute ceilings are enforced under a PostgreSQL advisory lock and serializable transaction.
-- PostgreSQL is authoritative for the maximum permitted dispatch rate. BullMQ also has an environment-configured infrastructure limiter, which may operate more slowly but can never override the database ceiling.
+- PostgreSQL is authoritative for endpoint-scoped provider permits and cooldowns. BullMQ has no messaging rate limiter; its worker concurrency is only the configurable technical scheduler ceiling.
 - Explicit non-acceptance outcomes may retry with exponential backoff. Each retry consumes a new dispatch event and safety budget.
 - A timeout or crash after dispatch becomes `DELIVERY_UNKNOWN` and is never sent again.
 - Reconciliation is read-only. One unique outbound message with the same conversation, content hash, and timing window marks the delivery sent. No match or multiple matches remain blocked after the final check.

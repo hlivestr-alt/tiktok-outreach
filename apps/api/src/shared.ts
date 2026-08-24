@@ -37,7 +37,7 @@ export async function expireFrozenCampaigns(prisma: PrismaClient, now = new Date
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 20_000 });
 }
 
-export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQueue, limit = 250): Promise<{ enqueued: number; failed: number }> {
+export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQueue, limit = config.OUTBOUND_QUEUE_RECONCILE_BATCH_SIZE): Promise<{ enqueued: number; failed: number }> {
   if (config.OUTBOUND_MODE === "read_only") return { enqueued: 0, failed: 0 };
   const missing = await prisma.campaignRecipient.findMany({
     where: { state: "QUEUED", delivery: { isNot: null }, campaign: { state: { in: ["QUEUED", "RUNNING"] } } },
@@ -103,7 +103,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     this.timer = setInterval(() => {
       void expireFrozenCampaigns(this.prisma).catch((error) => console.error("Reservation expiry sweep failed", error));
       void reconcileOutbox(this.prisma, this.outreach).catch((error) => console.error("Outbox reconciliation failed", error));
-    }, 5_000);
+    }, config.OUTBOUND_QUEUE_POLL_INTERVAL_MS);
     this.timer.unref();
   }
   async reconcile(): Promise<{ enqueued: number; failed: number }> { return reconcileOutbox(this.prisma, this.outreach); }
@@ -116,16 +116,12 @@ export async function ensureMockShop(prisma: PrismaService) {
   return prisma.$transaction(async (tx) => {
     const shop = await tx.shop.create({ data: {
       name: "Indonesia Mock Shop", region: "ID", currency: "IDR", timezone: config.SHOP_TIMEZONE,
-      connectionMode: "MOCK", maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN,
-      maxSendsPerHour: config.MAX_SENDS_PER_HOUR,
-      maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE, outboundPacingMs: config.OUTBOUND_PACING_MS
+      connectionMode: "MOCK", maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN
     } });
     await tx.safetySettingsAudit.create({ data: {
       shopId: shop.id, source: "ENVIRONMENT_INITIALIZATION_ONLY", effectiveValues: {
         maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign,
-        maxSendsPerHour: shop.maxSendsPerHour,
-        maxDispatchesPerMinute: shop.maxDispatchesPerMinute,
-        outboundPacingMs: shop.outboundPacingMs,
+        providerDrivenAdaptiveConcurrency: true,
         timezone: shop.timezone
       }
     } });

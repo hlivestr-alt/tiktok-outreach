@@ -40,9 +40,12 @@ const schema = z.object({
   HISTORY_SYNC_HEAD_EVERY_BACKFILL_PAGES: z.coerce.number().int().min(1).max(100).default(5),
   SHOP_TIMEZONE: z.string().default("Asia/Jakarta"),
   MAX_RECIPIENTS_PER_CAMPAIGN: z.coerce.number().int().positive().default(500),
-  MAX_SENDS_PER_HOUR: z.coerce.number().int().positive().default(20),
-  MAX_DISPATCHES_PER_MINUTE: z.coerce.number().int().positive().default(5),
-  OUTBOUND_PACING_MS: z.coerce.number().int().min(1000).default(10000),
+  OUTBOUND_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(16),
+  OUTBOUND_PROVIDER_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+  OUTBOUND_PROVIDER_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
+  OUTBOUND_PROVIDER_PERMIT_LEASE_MS: z.coerce.number().int().min(30000).max(300000).default(120000),
+  OUTBOUND_QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().min(500).default(1000),
+  OUTBOUND_QUEUE_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(1000),
   MOCK_RECONCILIATION_DELAYS_MS: z.string().default("300000,1800000,7200000")
 });
 

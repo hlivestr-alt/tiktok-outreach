@@ -4,7 +4,7 @@ Verified against the official TikTok Shop Partner Center documentation on 2026-0
 
 ## Safety boundary
 
-`APP_MODE` accepts only `mock` or `read_only`. There is no production/live-send mode. In `read_only`, real campaign processing ends at `PREVIEW_READY` (`READ_ONLY_PREVIEW` in the UI); freeze, queue creation, worker dispatch, and provider mutations are rejected.
+`APP_MODE` accepts only `mock` or `read_only`. Live mutation capability is not added to the API, discovery worker, or history worker: it exists only in the separately started `outbound-live` service with `OUTBOUND_MODE=live` and the exact acknowledgement gate. Without that service, real campaign processing ends at `PREVIEW_READY` and provider mutations are rejected.
 
 The real HTTP client uses this complete allowlist:
 
@@ -15,10 +15,12 @@ The real HTTP client uses this complete allowlist:
 | Get Marketplace Creator Performance | `GET /affiliate_seller/202508/marketplace_creators/{creator_user_id}` | `seller.creator_marketplace.read` | Prior 30 days. The documentation names the parameter `creator_user_id` while describing the supplied value as Creator Open ID. |
 | Get Conversation List | `GET /affiliate_seller/202412/conversations` | `seller.affiliate_messages.write` | Page size up to 50; opaque pagination; returns `creator_im_id`. |
 | Get Message in the Conversation | `GET /affiliate_seller/202412/conversation/{conversation_id}/messages` | `seller.affiliate_messages.write` | Page size up to 20; opaque pagination; messages contain `sender_id` and epoch-second `create_time`. |
+| Create Conversation (outbound-live only) | `POST /affiliate_seller/202508/conversations` | `seller.affiliate_messages.write` | Exact frozen Creator Open ID; mutation-only adapter. |
+| Send IM Message (outbound-live only) | `POST /affiliate_seller/202412/conversations/{conversation_id}/messages` | `seller.affiliate_messages.write` | Exact frozen text; positive message ID required for SENT. |
 
 Official references: [authorization overview](https://partner.tiktokshop.com/docv2/page/authorization-overview-202407), [authorized shops](https://partner.tiktokshop.com/docv2/page/call-get-authorized-shops), [creator search](https://partner.tiktokshop.com/docv2/page/seller-search-creator-on-marketplace-202508), [creator performance](https://partner.tiktokshop.com/docv2/page/get-marketplace-creator-performance), [conversation list](https://partner.tiktokshop.com/docv2/page/get-conversation-list-202412), [conversation messages](https://partner.tiktokshop.com/docv2/page/get-message-in-the-conversation-202412), and [request signing](https://partner.tiktokshop.com/docv2/page/sign-your-api-request).
 
-TikTok currently requires the write-named `seller.affiliate_messages.write` scope for the two history GET operations. The scope does not authorize this application to send. Create Conversation, Send IM Message, Mark Conversation Read, targeted/open collaborations, invitations, and sample actions are absent from the allowlist; deny tests prove they fail before `fetch`. Get Latest Unread Messages is not called because its exact active version/path could not be verified.
+TikTok currently requires the write-named `seller.affiliate_messages.write` scope for both history GETs and IM mutations. Capability separation is enforced locally: history receives only the GET operations, while only the separately gated outbound worker receives Create Conversation and Send IM Message. Mark Conversation Read, targeted/open collaborations, invitations, and sample actions remain absent from every allowlist; deny tests prove they fail before `fetch`. Get Latest Unread Messages is not called because its exact active version/path could not be verified.
 
 ## Real validation findings and dedicated application
 
@@ -102,4 +104,4 @@ The conversation and message steps are intentionally separate. Validation histor
 
 Before any validation read, the service checks the selected connection and access-token expiry only from local storage. The connection must be healthy and idle, and its decryptable access token must remain valid beyond the configured automatic refresh margin. Missing, expired, unhealthy, unreadable, or near-expiry tokens fail locally with a controlled-validation preparation error. That failure performs no token refresh, Authorized Shops validation, or requested provider read; the operator must reauthorize or explicitly prepare the connection outside the validation action.
 
-Real TikTok outbound remains physically unavailable: campaigns cannot freeze or queue, the worker cannot dispatch them, and no mutation endpoint may be called.
+Real TikTok outbound is physically isolated in the explicitly gated `outbound-live` worker. Its mutation-only adapter can call only Create Conversation and Send IM Message. Normal accepted processing has no local hourly, minute, or fixed-spacing quota; durable App × Shop × endpoint limiters adapt to actual TikTok feedback. See TikTok's current [rate-limit guidance](https://partner.tiktokshop.com/docv2/page/rate-limits), [Create Conversation](https://partner.tiktokshop.com/docv2/page/create-conversation-with-creator-202508), and [Send IM Message](https://partner.tiktokshop.com/docv2/page/send-im-message-202412) references.

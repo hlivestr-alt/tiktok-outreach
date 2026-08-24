@@ -6,7 +6,7 @@ import { MockTikTokAffiliateAdapter } from "@affiliate/tiktok-adapter";
 import { OutreachService } from "./outreach/outreach.service";
 import { HistoryService } from "./history/history.service";
 import { ensureMockShop, expireFrozenCampaigns, reconcileOutbox } from "./shared";
-import { reserveDispatchSlot, SafetyDelay, shopDate } from "../../worker/src/dispatch-safety";
+import { reserveDispatchSlot, shopDate } from "../../worker/src/dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "../../worker/src/delivery-policy";
 import { createHash } from "node:crypto";
 import { TikTokIntegrationService } from "./integrations/tiktok.service";
@@ -16,10 +16,9 @@ const tiktokStub = { activeShop: () => ensureMockShop(prisma as any), adapter: a
 const testIds = new Set<string>();
 const stamp = () => `hardening_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
-async function createShop(overrides: Partial<{ maxRecipientsPerCampaign: number; maxDispatchesPerMinute: number }> = {}) {
+async function createShop(overrides: Partial<{ maxRecipientsPerCampaign: number }> = {}) {
   const shop = await prisma.shop.create({ data: {
-    name: stamp(), connectionMode: "MOCK", maxRecipientsPerCampaign: 1000,
-    maxDispatchesPerMinute: 1000, ...overrides
+    name: stamp(), connectionMode: "MOCK", maxRecipientsPerCampaign: 1000, ...overrides
   } });
   testIds.add(shop.id);
   return shop;
@@ -238,7 +237,7 @@ describe.sequential("recipient-driven dispatch capacity and delivery policy", ()
     expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "RUNNING", dispatchCount: 3 });
   });
 
-  it("records daily dispatch usage without blocking while preserving the rolling-minute pacing ceiling", async () => {
+  it("records daily and rolling dispatch analytics without using either as a ceiling", async () => {
     const dailyShop = await createShop();
     const daily = await createRecipient(dailyShop.id, "QUEUED");
     const dailyDelivery = await addDelivery(daily);
@@ -247,11 +246,11 @@ describe.sequential("recipient-driven dispatch capacity and delivery policy", ()
     await expect(reserveDispatchSlot(prisma, { ...daily.recipient, campaignId: daily.campaign.id, campaign: { ...daily.campaign, shopId: dailyShop.id }, delivery: dailyDelivery })).resolves.toMatchObject({ claimed: true });
     expect(await prisma.shopOutboundDailyUsage.findUniqueOrThrow({ where: { shopId_shopDate: { shopId: dailyShop.id, shopDate: date } } })).toMatchObject({ dispatchCount: 10_001 });
 
-    const minuteShop = await createShop({ maxDispatchesPerMinute: 1 });
+    const minuteShop = await createShop();
     const first = await createRecipient(minuteShop.id, "QUEUED");
     const firstDelivery = await addDelivery(first);
     await prisma.outboundDispatchEvent.create({ data: { shopId: minuteShop.id, campaignId: first.campaign.id, deliveryId: firstDelivery.id, dispatchedAt: new Date() } });
-    await expect(reserveDispatchSlot(prisma, { ...first.recipient, campaignId: first.campaign.id, campaign: { ...first.campaign, shopId: minuteShop.id }, delivery: firstDelivery })).rejects.toBeInstanceOf(SafetyDelay);
+    await expect(reserveDispatchSlot(prisma, { ...first.recipient, campaignId: first.campaign.id, campaign: { ...first.campaign, shopId: minuteShop.id }, delivery: firstDelivery })).resolves.toMatchObject({ claimed: true });
   });
 
   it("skips duplicate executions and never sends DELIVERY_UNKNOWN again", () => {

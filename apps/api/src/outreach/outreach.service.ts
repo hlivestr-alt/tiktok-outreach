@@ -429,9 +429,23 @@ export class OutreachService {
 
   async resume(id: string) {
     const campaign = await this.requiredCampaign(id);
-    if (!["PAUSED", "PAUSE_REQUESTED"].includes(campaign.state)) throw new BadRequestException("Campaign is not paused");
-    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, state: { in: ["QUEUED", "RESERVED"] } } });
-    await this.prisma.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
+    if (!["PAUSED", "PAUSE_REQUESTED", "SAFETY_PAUSED"].includes(campaign.state)) throw new BadRequestException("Campaign is not paused");
+    const quotaRecovery = campaign.state === "SAFETY_PAUSED" && campaign.safetyPauseReason?.includes("IM quota");
+    if (campaign.state === "SAFETY_PAUSED" && !quotaRecovery) {
+      throw new BadRequestException("This provider safety pause requires its authorization or permission issue to be resolved first");
+    }
+    await this.prisma.$transaction(async (tx) => {
+      if (quotaRecovery) {
+        await tx.providerOutboundLimiter.updateMany({ where: { shopId: campaign.shopId, state: "QUOTA_BLOCKED" }, data: {
+          state: "RECOVERING", effectiveConcurrency: 1, healthySuccessCount: 0,
+          consecutiveThrottleCount: 0, consecutiveFailureCount: 0,
+          nextPermittedAt: null, quotaBlockedAt: null, quotaCode: null, quotaDetail: null
+        } });
+        await tx.queueOutbox.updateMany({ where: { campaignId: id, state: "SAFETY_PAUSED" }, data: { state: "PENDING", availableAt: new Date(), lastError: null } });
+        await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "OUTBOUND_PROVIDER_IM_QUOTA_OPERATOR_RETRY", payload: { recoveryConcurrency: 1 } } });
+      }
+      await tx.campaign.update({ where: { id }, data: { state: "QUEUED", safetyPauseReason: null, version: { increment: 1 } } });
+    });
     await this.queues.reconcile();
     return this.get(id);
   }

@@ -4,7 +4,7 @@ import { signTikTokShopRequest } from "./signing";
 type JsonObject = Record<string, unknown>;
 type FetchLike = typeof fetch;
 
-export type TikTokOutboundErrorKind = "AUTH" | "PERMISSION" | "RESTRICTED" | "RETRYABLE" | "PROVIDER" | "MALFORMED_RESPONSE";
+export type TikTokOutboundErrorKind = "AUTH" | "PERMISSION" | "QUOTA" | "RESTRICTED" | "RETRYABLE" | "PROVIDER" | "MALFORMED_RESPONSE";
 
 export class TikTokOutboundError extends Error {
   constructor(
@@ -13,18 +13,26 @@ export class TikTokOutboundError extends Error {
     readonly providerCode: number | undefined,
     readonly requestId: string | undefined,
     message: string,
-    readonly retryAfterMs?: number
+    readonly retryAfterMs?: number,
+    readonly httpStatus?: number
   ) { super(message); }
 }
 
-const restrictedCreateCodes = new Set([16030001, 16030002, 16030003, 16030007, 16030009, 16032001, 45101021]);
+const restrictedCreateCodes = new Set([16030001, 16030003, 16030007, 16030009, 16032001, 45101021]);
 const restrictedSendCodes = new Set([16030100, 16030101, 16032001]);
+const shopQuotaCodes = new Set([16030002, 45101004]);
 const authCodes = new Set([105001, 105002]);
 const permissionCodes = new Set([105005]);
-const retryableCodes = new Set([36009003, 36009007, 45101004]);
+const retryableCodes = new Set([36009002, 36009003, 36009007]);
 const asObject = (value: unknown): JsonObject | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
 const asString = (value: unknown): string | undefined => typeof value === "string" && value.length ? value : undefined;
 const asNumber = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+export function parseRetryAfterMs(value: string | null, nowMs = Date.now()): number | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  const milliseconds = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : Date.parse(value) - nowMs;
+  return Number.isFinite(milliseconds) && milliseconds >= 0 ? Math.min(Math.floor(milliseconds), 24 * 60 * 60_000) : undefined;
+}
 
 /**
  * A mutation-only client. It intentionally contains no Marketplace or history
@@ -58,23 +66,26 @@ export class RealTikTokOutboundAdapter implements TikTokOutboundAdapter {
     } catch (cause) {
       // For Send Message the request outcome is ambiguous. The caller must not retry.
       if (operation === "SEND_MESSAGE") return { __deliveryUnknown: true };
-      throw new TikTokOutboundError("RETRYABLE", operation, undefined, undefined, "TikTok conversation request did not receive a response", 5000);
+      throw new TikTokOutboundError("RETRYABLE", operation, undefined, undefined, "TikTok conversation request did not receive a response");
     }
     const headerRequestId = response.headers.get("x-tts-request-id") ?? undefined;
+    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"), (this.options.now ?? Date.now)());
     let decoded: JsonObject;
     try { decoded = asObject(await response.json()) ?? {}; }
     catch {
-      if (operation === "SEND_MESSAGE") return { __deliveryUnknown: true, request_id: headerRequestId };
-      throw new TikTokOutboundError(response.status >= 500 ? "RETRYABLE" : "MALFORMED_RESPONSE", operation, undefined, headerRequestId, "TikTok returned a non-JSON conversation response", 5000);
+      if (response.status === 429) throw new TikTokOutboundError("RETRYABLE", operation, undefined, headerRequestId, "TikTok throttled the request without a JSON body", retryAfterMs, response.status);
+      if (operation === "SEND_MESSAGE") return { __deliveryUnknown: true, request_id: headerRequestId, __httpStatus: response.status };
+      throw new TikTokOutboundError(response.status >= 500 || response.status === 429 ? "RETRYABLE" : "MALFORMED_RESPONSE", operation, undefined, headerRequestId, "TikTok returned a non-JSON conversation response", retryAfterMs, response.status);
     }
     const code = asNumber(decoded.code);
     const requestId = asString(decoded.request_id) ?? headerRequestId;
-    if (response.ok && code === 0) return decoded;
+    if (response.ok && code === 0) return { ...decoded, __httpStatus: response.status };
     const kind: TikTokOutboundErrorKind = authCodes.has(code ?? -1) ? "AUTH"
       : permissionCodes.has(code ?? -1) ? "PERMISSION"
+      : shopQuotaCodes.has(code ?? -1) ? "QUOTA"
       : (operation === "CREATE_CONVERSATION" ? restrictedCreateCodes : restrictedSendCodes).has(code ?? -1) ? "RESTRICTED"
       : response.status === 429 || response.status >= 500 || retryableCodes.has(code ?? -1) ? "RETRYABLE" : "PROVIDER";
-    throw new TikTokOutboundError(kind, operation, code, requestId, `TikTok ${operation.toLowerCase().replaceAll("_", " ")} was rejected`, kind === "RETRYABLE" ? 5000 : undefined);
+    throw new TikTokOutboundError(kind, operation, code, requestId, `TikTok ${operation.toLowerCase().replaceAll("_", " ")} was rejected`, kind === "RETRYABLE" ? retryAfterMs : undefined, response.status);
   }
 
   async createOrGetConversation(creatorOpenId: string): Promise<{ conversationId: string; isNew: boolean }> {
@@ -84,7 +95,7 @@ export class RealTikTokOutboundAdapter implements TikTokOutboundAdapter {
     });
     const data = asObject(response.data);
     const conversationId = asString(data?.conversation_id);
-    if (!conversationId) throw new TikTokOutboundError("MALFORMED_RESPONSE", "CREATE_CONVERSATION", 0, asString(response.request_id), "TikTok did not return a conversation ID");
+    if (!conversationId) throw new TikTokOutboundError("MALFORMED_RESPONSE", "CREATE_CONVERSATION", 0, asString(response.request_id), "TikTok did not return a conversation ID", undefined, asNumber(response.__httpStatus));
     return { conversationId, isNew: data?.is_new === true };
   }
 
@@ -95,13 +106,14 @@ export class RealTikTokOutboundAdapter implements TikTokOutboundAdapter {
         content: JSON.stringify({ content })
       });
       const requestId = asString(response.request_id) ?? "unknown-request";
-      if (response.__deliveryUnknown === true) return { status: "DELIVERY_UNKNOWN", requestId };
+      const httpStatus = asNumber(response.__httpStatus);
+      if (response.__deliveryUnknown === true) return { status: "DELIVERY_UNKNOWN", requestId, httpStatus };
       const messageId = asString(asObject(response.data)?.message_id);
-      return messageId ? { status: "SENT", messageId, requestId } : { status: "DELIVERY_UNKNOWN", requestId };
+      return messageId ? { status: "SENT", messageId, requestId, httpStatus } : { status: "DELIVERY_UNKNOWN", requestId, httpStatus };
     } catch (error) {
       if (!(error instanceof TikTokOutboundError)) return { status: "DELIVERY_UNKNOWN", requestId: "unknown-request" };
-      if (error.kind === "RESTRICTED") return { status: "RESTRICTED", requestId: error.requestId ?? "unknown-request", errorCode: String(error.providerCode ?? "RESTRICTED") };
-      if (error.kind === "RETRYABLE") return { status: "RETRYABLE_ERROR", requestId: error.requestId ?? "unknown-request", errorCode: String(error.providerCode ?? "TEMPORARY"), retryAfterMs: error.retryAfterMs ?? 5000 };
+      if (error.kind === "RESTRICTED") return { status: "RESTRICTED", requestId: error.requestId ?? "unknown-request", errorCode: String(error.providerCode ?? "RESTRICTED"), httpStatus: error.httpStatus };
+      if (error.kind === "RETRYABLE") return { status: "RETRYABLE_ERROR", requestId: error.requestId ?? "unknown-request", errorCode: String(error.providerCode ?? "TEMPORARY"), retryAfterMs: error.retryAfterMs, httpStatus: error.httpStatus };
       throw error;
     }
   }

@@ -170,8 +170,7 @@ export class TikTokIntegrationService {
       }, create: {
         name: shop.name, externalShopId: shop.id, shopCipher: shop.cipher, shopCode: shop.code, sellerType: shop.sellerType,
         region: shop.region, currency: "UNKNOWN", timezone: shop.region === "ID" ? "Asia/Jakarta" : config.SHOP_TIMEZONE,
-        connectionMode: "READ_ONLY", selectedForReadOnly: false, maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN,
-        maxSendsPerHour: config.MAX_SENDS_PER_HOUR, maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE, outboundPacingMs: config.OUTBOUND_PACING_MS
+        connectionMode: "READ_ONLY", selectedForReadOnly: false, maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN
       } }));
     }
     const primary = persisted.find((shop) => shop.region === "ID")!;
@@ -442,8 +441,7 @@ export class TikTokIntegrationService {
       selectedShop: selected ? {
         id: selected.id, externalShopId: selected.externalShopId, name: selected.name, region: selected.region, code: selected.shopCode,
         currency: selected.currency, currencyEvidence: selected.currency === "UNKNOWN" ? "NOT_RETURNED_BY_AUTHORIZED_SHOPS" : "LOCAL_CONFIGURATION",
-        maxRecipientsPerCampaign: selected.maxRecipientsPerCampaign, maxSendsPerHour: selected.maxSendsPerHour,
-        maxDispatchesPerMinute: selected.maxDispatchesPerMinute, outboundPacingMs: selected.outboundPacingMs
+        maxRecipientsPerCampaign: selected.maxRecipientsPerCampaign
       } : null,
       authorizedShops: shops.map((shop) => ({ id: shop.id, externalShopId: shop.externalShopId, name: shop.name, region: shop.region, code: shop.shopCode, selected: shop.selectedForReadOnly })),
       connection: connection ? publicTikTokConnection(connection) : null,
