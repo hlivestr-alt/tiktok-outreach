@@ -7,6 +7,14 @@ describe("outbound activation", () => {
     expect(loadConfig({ ...base, APP_MODE: "mock" }).OUTBOUND_MODE).toBe("mock");
     expect(loadConfig({ ...base, APP_MODE: "read_only" }).OUTBOUND_MODE).toBe("read_only");
   });
+  it("defaults the shared campaign recipient ceiling to 500", () => {
+    expect(loadConfig(base).MAX_RECIPIENTS_PER_CAMPAIGN).toBe(500);
+  });
+  it("has no daily or per-campaign dispatch-attempt capacity settings", () => {
+    const value = loadConfig({ ...base, MAX_SENDS_PER_DAY: "1", MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN: "1" });
+    expect(value).not.toHaveProperty("MAX_SENDS_PER_DAY");
+    expect(value).not.toHaveProperty("MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN");
+  });
   it("requires both live mode and the exact acknowledgement", () => {
     expect(liveOutboundExplicitlyEnabled(loadConfig({ ...base, APP_MODE: "read_only", OUTBOUND_MODE: "live" }))).toBe(false);
     expect(liveOutboundExplicitlyEnabled(loadConfig({ ...base, APP_MODE: "read_only", OUTBOUND_MODE: "live", ENABLE_LIVE_TIKTOK_OUTBOUND: "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES" }))).toBe(true);

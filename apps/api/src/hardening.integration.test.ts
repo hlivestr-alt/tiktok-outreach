@@ -16,10 +16,10 @@ const tiktokStub = { activeShop: () => ensureMockShop(prisma as any), adapter: a
 const testIds = new Set<string>();
 const stamp = () => `hardening_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
-async function createShop(overrides: Partial<{ maxRecipientsPerCampaign: number; maxDispatchAttemptsPerCampaign: number; maxSendsPerDay: number; maxDispatchesPerMinute: number }> = {}) {
+async function createShop(overrides: Partial<{ maxRecipientsPerCampaign: number; maxDispatchesPerMinute: number }> = {}) {
   const shop = await prisma.shop.create({ data: {
-    name: stamp(), connectionMode: "MOCK", maxRecipientsPerCampaign: 1000, maxDispatchAttemptsPerCampaign: 4000,
-    maxSendsPerDay: 1000, maxDispatchesPerMinute: 1000, ...overrides
+    name: stamp(), connectionMode: "MOCK", maxRecipientsPerCampaign: 1000,
+    maxDispatchesPerMinute: 1000, ...overrides
   } });
   testIds.add(shop.id);
   return shop;
@@ -210,17 +210,18 @@ describe.sequential("durable queue outbox", () => {
   });
 });
 
-describe.sequential("dispatch ceilings and delivery policy", () => {
-  it("keeps the 1,000-recipient ceiling separate from retry attempts", async () => {
-    const shop = await createShop({ maxRecipientsPerCampaign: 1000, maxDispatchAttemptsPerCampaign: 1100 });
-    const seed = await createRecipient(shop.id, "QUEUED", stamp(), { dispatchCount: 1002 });
+describe.sequential("recipient-driven dispatch capacity and delivery policy", () => {
+  it("does not use the campaign dispatch counter as a recipient-processing ceiling", async () => {
+    const shop = await createShop({ maxRecipientsPerCampaign: 1000 });
+    const seed = await createRecipient(shop.id, "QUEUED", stamp(), { dispatchCount: 10_000 });
     const delivery = await addDelivery(seed);
     const recipient = { ...seed.recipient, campaignId: seed.campaign.id, campaign: { ...seed.campaign, shopId: shop.id }, delivery };
     expect(await reserveDispatchSlot(prisma, recipient)).toMatchObject({ claimed: true });
+    expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "RUNNING", dispatchCount: 10_001 });
   });
 
-  it("never exceeds the campaign dispatch-attempt ceiling and safety-pauses instead of delaying forever", async () => {
-    const shop = await createShop({ maxDispatchAttemptsPerCampaign: 2 });
+  it("keeps transient retries separate from the number of distinct recipients", async () => {
+    const shop = await createShop({ maxRecipientsPerCampaign: 1 });
     const seed = await createRecipient(shop.id, "QUEUED");
     let delivery = await addDelivery(seed);
     let recipient: any = { ...seed.recipient, campaignId: seed.campaign.id, campaign: { ...seed.campaign, shopId: shop.id }, delivery };
@@ -233,16 +234,18 @@ describe.sequential("dispatch ceilings and delivery policy", () => {
     delivery = await prisma.outreachDelivery.update({ where: { id: delivery.id }, data: { state: "FAILED_RETRYABLE" } });
     await prisma.campaignRecipient.update({ where: { id: seed.recipient.id }, data: { state: "QUEUED" } });
     recipient.delivery = delivery;
-    expect((await reserveDispatchSlot(prisma, recipient)).claimed).toBe(false);
-    expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "SAFETY_PAUSED", dispatchCount: 2 });
+    expect((await reserveDispatchSlot(prisma, recipient)).claimed).toBe(true);
+    expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "RUNNING", dispatchCount: 3 });
   });
 
-  it("enforces daily and rolling-minute ceilings independently", async () => {
-    const dailyShop = await createShop({ maxSendsPerDay: 1 });
+  it("records daily dispatch usage without blocking while preserving the rolling-minute pacing ceiling", async () => {
+    const dailyShop = await createShop();
     const daily = await createRecipient(dailyShop.id, "QUEUED");
     const dailyDelivery = await addDelivery(daily);
-    await prisma.shopOutboundDailyUsage.create({ data: { shopId: dailyShop.id, shopDate: shopDate(new Date(), dailyShop.timezone), dispatchCount: 1, ceiling: 1 } });
-    await expect(reserveDispatchSlot(prisma, { ...daily.recipient, campaignId: daily.campaign.id, campaign: { ...daily.campaign, shopId: dailyShop.id }, delivery: dailyDelivery })).rejects.toMatchObject({ message: "Daily shop ceiling reached" });
+    const date = shopDate(new Date(), dailyShop.timezone);
+    await prisma.shopOutboundDailyUsage.create({ data: { shopId: dailyShop.id, shopDate: date, dispatchCount: 10_000 } });
+    await expect(reserveDispatchSlot(prisma, { ...daily.recipient, campaignId: daily.campaign.id, campaign: { ...daily.campaign, shopId: dailyShop.id }, delivery: dailyDelivery })).resolves.toMatchObject({ claimed: true });
+    expect(await prisma.shopOutboundDailyUsage.findUniqueOrThrow({ where: { shopId_shopDate: { shopId: dailyShop.id, shopDate: date } } })).toMatchObject({ dispatchCount: 10_001 });
 
     const minuteShop = await createShop({ maxDispatchesPerMinute: 1 });
     const first = await createRecipient(minuteShop.id, "QUEUED");

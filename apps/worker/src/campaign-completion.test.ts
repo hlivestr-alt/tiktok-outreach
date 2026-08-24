@@ -12,4 +12,12 @@ describe("campaign completion reporting", () => {
     expect(campaignCompletionSummary(["SENT", "SENT"]).completedSuccessfully).toBe(true);
     expect(campaignCompletionSummary(["SENT", "FAILED"]).completedSuccessfully).toBe(false);
   });
+
+  it("counts every terminal recipient outcome independently of successful-send count", () => {
+    expect(campaignCompletionSummary([
+      ...Array(800).fill("SENT"), ...Array(150).fill("RESTRICTED"), ...Array(50).fill("FAILED")
+    ])).toMatchObject({
+      completedSuccessfully: false, sent: 800, restricted: 150, failed: 50, unresolved: 0, terminalRecipients: 1000
+    });
+  });
 });

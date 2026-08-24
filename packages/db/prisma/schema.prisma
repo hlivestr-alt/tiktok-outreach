@@ -164,9 +164,7 @@ model Shop {
   currency                       String                    @default("IDR")
   timezone                       String                    @default("Asia/Jakarta")
   connectionMode                 ConnectionMode            @default(MOCK)
-  maxRecipientsPerCampaign       Int                       @default(100)
-  maxDispatchAttemptsPerCampaign Int                       @default(400)
-  maxSendsPerDay                 Int                       @default(100)
+  maxRecipientsPerCampaign       Int                       @default(500)
   maxSendsPerHour                Int                       @default(20)
   maxDispatchesPerMinute         Int                       @default(5)
   outboundPacingMs               Int                       @default(10000)
@@ -867,7 +865,6 @@ model ShopOutboundDailyUsage {
   shopId        String
   shopDate      DateTime @db.Date
   dispatchCount Int      @default(0)
-  ceiling       Int
   updatedAt     DateTime @updatedAt
   shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
 

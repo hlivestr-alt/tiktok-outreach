@@ -71,15 +71,6 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
       } });
       return { claimed: false as const, cancelled: true, reason: exclusionReason };
     }
-    if (campaign.dispatchCount >= campaign.shop.maxDispatchAttemptsPerCampaign) {
-      const reason = `Campaign dispatch-attempt ceiling of ${campaign.shop.maxDispatchAttemptsPerCampaign} reached`;
-      await tx.campaign.update({ where: { id: campaign.id }, data: { state: "SAFETY_PAUSED", safetyPauseReason: reason, version: { increment: 1 } } });
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: campaign.id, eventType: "CAMPAIGN_DISPATCH_LIMIT_REACHED", payload: {
-        dispatchAttempts: campaign.dispatchCount, ceiling: campaign.shop.maxDispatchAttemptsPerCampaign, reason
-      } } });
-      await tx.queueOutbox.updateMany({ where: { campaignId: campaign.id, state: { in: ["PENDING", "ENQUEUED"] } }, data: { state: "SAFETY_PAUSED", lastError: reason } });
-      return { claimed: false as const, cancelled: false };
-    }
     const oneMinuteAgo = new Date(now.getTime() - 60_000);
     const recent = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneMinuteAgo } } });
     if (recent >= campaign.shop.maxDispatchesPerMinute) throw new SafetyDelay(60_000, "Absolute dispatch-rate ceiling reached");
@@ -87,12 +78,10 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
     const recentHour = await tx.outboundDispatchEvent.count({ where: { shopId: campaign.shopId, dispatchedAt: { gt: oneHourAgo } } });
     if (recentHour >= campaign.shop.maxSendsPerHour) throw new SafetyDelay(15 * 60_000, "Hourly shop safety ceiling reached");
     const date = shopDate(now, campaign.shop.timezone);
-    const usage = await tx.shopOutboundDailyUsage.findUnique({ where: { shopId_shopDate: { shopId: campaign.shopId, shopDate: date } } });
-    if ((usage?.dispatchCount ?? 0) >= campaign.shop.maxSendsPerDay) throw new SafetyDelay(15 * 60_000, "Daily shop ceiling reached");
     await tx.shopOutboundDailyUsage.upsert({
       where: { shopId_shopDate: { shopId: campaign.shopId, shopDate: date } },
-      update: { dispatchCount: { increment: 1 }, ceiling: campaign.shop.maxSendsPerDay },
-      create: { shopId: campaign.shopId, shopDate: date, dispatchCount: 1, ceiling: campaign.shop.maxSendsPerDay }
+      update: { dispatchCount: { increment: 1 } },
+      create: { shopId: campaign.shopId, shopDate: date, dispatchCount: 1 }
     });
     const leaseOwner = `${currentDelivery.id}:${currentDelivery.attemptCount + 1}`;
     await tx.shopOutboundLease.upsert({ where: { shopId: campaign.shopId }, update: {

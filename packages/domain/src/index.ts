@@ -219,10 +219,6 @@ export function buildPreview(input: {
 
 export type SafetyLimits = {
   maxRecipientsPerCampaign: number;
-  maxDispatchAttemptsPerCampaign: number;
-  maxSendsPerDay: number;
-  maxSendsPerHour?: number;
-  maxDispatchesPerMinute: number;
 };
 
 export function assertCampaignWithinLimit(requested: number, limits: SafetyLimits): void {

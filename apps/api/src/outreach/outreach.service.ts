@@ -26,9 +26,7 @@ export class OutreachService {
     const rankingMetrics = new Set(["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]);
     try {
       assertCampaignWithinLimit(input.targetCount, {
-        maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign,
-        maxDispatchAttemptsPerCampaign: shop.maxDispatchAttemptsPerCampaign,
-        maxSendsPerDay: shop.maxSendsPerDay, maxDispatchesPerMinute: shop.maxDispatchesPerMinute
+        maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign
       });
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
@@ -135,7 +133,7 @@ export class OutreachService {
     return publicDiscoveryRun(run);
   }
 
-  private validateCloneInput(input: CampaignCloneFromPreviewInput, shop: { maxRecipientsPerCampaign: number; maxDispatchAttemptsPerCampaign: number; maxSendsPerDay: number; maxDispatchesPerMinute: number }) {
+  private validateCloneInput(input: CampaignCloneFromPreviewInput, shop: { maxRecipientsPerCampaign: number }) {
     try {
       assertCampaignWithinLimit(input.targetCount, shop);
     } catch (error) {

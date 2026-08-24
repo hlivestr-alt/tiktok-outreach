@@ -117,15 +117,12 @@ export async function ensureMockShop(prisma: PrismaService) {
     const shop = await tx.shop.create({ data: {
       name: "Indonesia Mock Shop", region: "ID", currency: "IDR", timezone: config.SHOP_TIMEZONE,
       connectionMode: "MOCK", maxRecipientsPerCampaign: config.MAX_RECIPIENTS_PER_CAMPAIGN,
-      maxDispatchAttemptsPerCampaign: config.MAX_DISPATCH_ATTEMPTS_PER_CAMPAIGN,
-      maxSendsPerDay: config.MAX_SENDS_PER_DAY, maxSendsPerHour: config.MAX_SENDS_PER_HOUR,
+      maxSendsPerHour: config.MAX_SENDS_PER_HOUR,
       maxDispatchesPerMinute: config.MAX_DISPATCHES_PER_MINUTE, outboundPacingMs: config.OUTBOUND_PACING_MS
     } });
     await tx.safetySettingsAudit.create({ data: {
       shopId: shop.id, source: "ENVIRONMENT_INITIALIZATION_ONLY", effectiveValues: {
         maxRecipientsPerCampaign: shop.maxRecipientsPerCampaign,
-        maxDispatchAttemptsPerCampaign: shop.maxDispatchAttemptsPerCampaign,
-        maxSendsPerDay: shop.maxSendsPerDay,
         maxSendsPerHour: shop.maxSendsPerHour,
         maxDispatchesPerMinute: shop.maxDispatchesPerMinute,
         outboundPacingMs: shop.outboundPacingMs,

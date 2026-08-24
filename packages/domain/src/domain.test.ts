@@ -96,10 +96,10 @@ describe("messages and reconciliation", () => {
 });
 
 describe("hard safety limits", () => {
-  it("rejects invalid or above-ceiling campaign targets", () => {
-    const limits = { maxRecipientsPerCampaign: 1000, maxDispatchAttemptsPerCampaign: 4000, maxSendsPerDay: 1000, maxDispatchesPerMinute: 10 };
-    expect(() => assertCampaignWithinLimit(1000, limits)).not.toThrow();
-    expect(() => assertCampaignWithinLimit(1001, limits)).toThrow("campaign recipient ceiling");
+  it("accepts every campaign target from 1 through 500 and rejects 501", () => {
+    const limits = { maxRecipientsPerCampaign: 500 };
+    for (let requested = 1; requested <= 500; requested++) expect(() => assertCampaignWithinLimit(requested, limits)).not.toThrow();
+    expect(() => assertCampaignWithinLimit(501, limits)).toThrow("campaign recipient ceiling of 500");
     expect(() => assertCampaignWithinLimit(0, limits)).toThrow("positive integer");
   });
 });
