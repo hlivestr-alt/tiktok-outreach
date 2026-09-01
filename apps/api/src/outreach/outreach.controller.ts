@@ -20,7 +20,7 @@ export class OutreachController {
   @Get(":id/recipients") recipients(@Param("id") id: string, @Query("view") view?: string) { return this.service.recipients(id, view); }
   @Get(":id") get(@Param("id") id: string) { return this.service.get(id); }
   @Post(":id/freeze") freeze(@Param("id") id: string, @Body() body: { version: number }) { return this.service.freeze(id, body.version); }
-  @Post(":id/start") start(@Param("id") id: string, @Body() body: { version: number; confirmationName: string; confirmationCount: number }) { return this.service.start(id, body); }
+  @Post(":id/send") send(@Param("id") id: string, @Body() body: { version: number }) { return this.service.send(id, body.version); }
   @Post(":id/pause") pause(@Param("id") id: string) { return this.service.pause(id); }
   @Post(":id/resume") resume(@Param("id") id: string) { return this.service.resume(id); }
   @Post(":id/cancel") cancel(@Param("id") id: string) { return this.service.cancel(id); }

@@ -103,6 +103,51 @@ enum CreatorSyncPageState {
   COMMITTED
 }
 
+enum CreatorSearchPartitionStatus {
+  QUEUED
+  STARTING
+  RUNNING
+  WAITING_RETRY
+  SATURATED
+  SPLIT
+  COMPLETE
+  PAUSED
+  ERROR
+  SUPERSEDED
+  DEEPLY_SATURATED
+  DISABLED_BY_STRATEGY
+}
+
+enum CreatorSearchPartitionType {
+  LEGACY
+  V2_SEED
+  EXPERIMENT
+  ADAPTIVE_FOLLOWER
+  ADAPTIVE_GMV
+}
+
+enum CreatorObservedSaturationState {
+  UNKNOWN
+  OBSERVED_SATURATED
+  NOT_OBSERVED_SATURATED
+}
+
+enum CreatorBranchClassification {
+  UNCLASSIFIED
+  STRONG
+  PRODUCTIVE
+  MARGINAL
+  LOW_VALUE
+  EFFECTIVELY_DEAD
+}
+
+enum CreatorSchedulerClass {
+  HIGH
+  MEDIUM
+  EXPLORATION
+  LOW
+}
+
 enum HistorySyncState {
   QUEUED
   RUNNING
@@ -153,20 +198,20 @@ enum TokenRefreshState {
 }
 
 model Shop {
-  id                             String                    @id @default(uuid())
+  id                             String                       @id @default(uuid())
   name                           String
-  externalShopId                 String?                   @unique
+  externalShopId                 String?                      @unique
   shopCipher                     String?
   shopCode                       String?
   sellerType                     String?
-  selectedForReadOnly            Boolean                   @default(false)
-  region                         String                    @default("ID")
-  currency                       String                    @default("IDR")
-  timezone                       String                    @default("Asia/Jakarta")
-  connectionMode                 ConnectionMode            @default(MOCK)
-  maxRecipientsPerCampaign       Int                       @default(500)
-  createdAt                      DateTime                  @default(now())
-  updatedAt                      DateTime                  @updatedAt
+  selectedForReadOnly            Boolean                      @default(false)
+  region                         String                       @default("ID")
+  currency                       String                       @default("IDR")
+  timezone                       String                       @default("Asia/Jakarta")
+  connectionMode                 ConnectionMode               @default(MOCK)
+  maxRecipientsPerCampaign       Int                          @default(500)
+  createdAt                      DateTime                     @default(now())
+  updatedAt                      DateTime                     @updatedAt
   campaigns                      Campaign[]
   contacts                       CreatorShopContactState[]
   conversations                  Conversation[]
@@ -182,17 +227,18 @@ model Shop {
   providerOutboundLimiters       ProviderOutboundLimiter[]
   creatorSyncJob                 CreatorSyncJob?
   creatorSnapshots               CreatorMetricSnapshot[]
+  creatorMarketplaceCategories   CreatorMarketplaceCategory[]
 }
 
 model IntegrationConnection {
-  id                     String         @id @default(uuid())
+  id                     String            @id @default(uuid())
   shopId                 String
-  provider               String         @default("TIKTOK_SHOP")
-  mode                   ConnectionMode @default(MOCK)
-  status                 String         @default("READY")
+  provider               String            @default("TIKTOK_SHOP")
+  mode                   ConnectionMode    @default(MOCK)
+  status                 String            @default("READY")
   sellerOpenId           String?
-  grantedScopes          Json           @default("[]")
-  capabilityStatus       Json           @default("{}")
+  grantedScopes          Json              @default("[]")
+  capabilityStatus       Json              @default("{}")
   accessTokenCiphertext  String?
   refreshTokenCiphertext String?
   accessTokenExpiresAt   DateTime?
@@ -201,19 +247,19 @@ model IntegrationConnection {
   lastAuthorizedAt       DateTime?
   lastRefreshAt          DateTime?
   lastRefreshFailureAt   DateTime?
-  refreshFailureCount    Int            @default(0)
+  refreshFailureCount    Int               @default(0)
   refreshState           TokenRefreshState @default(IDLE)
   refreshLeaseId         String?
   refreshLeaseExpiresAt  DateTime?
   refreshStartedAt       DateTime?
   refreshUncertainAt     DateTime?
-  tokenVersion           Int            @default(0)
+  tokenVersion           Int               @default(0)
   lastErrorCode          String?
   lastErrorMessage       String?
   lastApiRequestAt       DateTime?
   lastRequestId          String?
-  createdAt              DateTime       @default(now())
-  updatedAt              DateTime       @updatedAt
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
 
   @@unique([shopId, provider])
 }
@@ -235,40 +281,40 @@ model WorkerHeartbeat {
 /// Private, durable history-worker state. Opaque provider cursors in this
 /// model are never returned by an API projection.
 model HistorySyncJob {
-  id                                String              @id @default(uuid())
-  shopId                            String              @unique
-  state                             HistorySyncState    @default(QUEUED)
-  mode                              HistorySyncMode     @default(INITIAL_BACKFILL)
-  passKind                          HistorySyncPassKind @default(BACKFILL)
-  phase                             HistorySyncPhase    @default(LIST)
-  pageSequence                      Int                 @default(0)
-  pagesProcessed                    Int                 @default(0)
-  conversationsDiscovered           Int                 @default(0)
-  conversationsImported             Int                 @default(0)
-  conversationsCompleted            Int                 @default(0)
-  messagesImported                  Int                 @default(0)
-  totalProviderRequests             Int                 @default(0)
-  consecutiveFailureCount           Int                 @default(0)
-  cursorRecoveryCount               Int                 @default(0)
-  backfillPagesSinceHead             Int                 @default(0)
-  incrementalPageIndex              Int                 @default(0)
-  privateBackfillPageToken           String?
-  privateIncrementalPageToken        String?
-  privatePendingNextPageToken        String?
-  privatePendingHasMore              Boolean?
-  lastProviderCode                   String?
-  lastErrorCategory                  String?
-  lastSuccessfulProviderRequestAt    DateTime?
-  nextAttemptAt                      DateTime?
-  leaseOwner                         String?
-  leaseExpiresAt                     DateTime?
-  startedAt                          DateTime?
-  initialCompletedAt                 DateTime?
-  completedAt                        DateTime?
-  createdAt                          DateTime             @default(now())
-  updatedAt                          DateTime             @updatedAt
-  shop                               Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  conversations                      HistorySyncConversationWork[]
+  id                              String                        @id @default(uuid())
+  shopId                          String                        @unique
+  state                           HistorySyncState              @default(QUEUED)
+  mode                            HistorySyncMode               @default(INITIAL_BACKFILL)
+  passKind                        HistorySyncPassKind           @default(BACKFILL)
+  phase                           HistorySyncPhase              @default(LIST)
+  pageSequence                    Int                           @default(0)
+  pagesProcessed                  Int                           @default(0)
+  conversationsDiscovered         Int                           @default(0)
+  conversationsImported           Int                           @default(0)
+  conversationsCompleted          Int                           @default(0)
+  messagesImported                Int                           @default(0)
+  totalProviderRequests           Int                           @default(0)
+  consecutiveFailureCount         Int                           @default(0)
+  cursorRecoveryCount             Int                           @default(0)
+  backfillPagesSinceHead          Int                           @default(0)
+  incrementalPageIndex            Int                           @default(0)
+  privateBackfillPageToken        String?
+  privateIncrementalPageToken     String?
+  privatePendingNextPageToken     String?
+  privatePendingHasMore           Boolean?
+  lastProviderCode                String?
+  lastErrorCategory               String?
+  lastSuccessfulProviderRequestAt DateTime?
+  nextAttemptAt                   DateTime?
+  leaseOwner                      String?
+  leaseExpiresAt                  DateTime?
+  startedAt                       DateTime?
+  initialCompletedAt              DateTime?
+  completedAt                     DateTime?
+  createdAt                       DateTime                      @default(now())
+  updatedAt                       DateTime                      @updatedAt
+  shop                            Shop                          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  conversations                   HistorySyncConversationWork[]
 
   @@index([state, nextAttemptAt])
   @@index([leaseExpiresAt])
@@ -277,22 +323,22 @@ model HistorySyncJob {
 /// A provider-list page is staged here before its durable cursor is advanced.
 /// Message cursors are private and exact conversation IDs make replay safe.
 model HistorySyncConversationWork {
-  id                         String                       @id @default(uuid())
-  historySyncJobId           String
-  pageSequence               Int
-  externalConversationId     String
-  creatorImId                String
-  username                   String?
-  avatarUrl                  String?
-  unreadCount                Int                          @default(0)
-  state                      HistoryConversationWorkState @default(QUEUED)
-  privateMessagePageToken    String?
-  messagesImported           Int                          @default(0)
-  providerRequests           Int                          @default(0)
-  completedAt                DateTime?
-  createdAt                  DateTime                     @default(now())
-  updatedAt                  DateTime                     @updatedAt
-  historySyncJob             HistorySyncJob               @relation(fields: [historySyncJobId], references: [id], onDelete: Cascade)
+  id                      String                       @id @default(uuid())
+  historySyncJobId        String
+  pageSequence            Int
+  externalConversationId  String
+  creatorImId             String
+  username                String?
+  avatarUrl               String?
+  unreadCount             Int                          @default(0)
+  state                   HistoryConversationWorkState @default(QUEUED)
+  privateMessagePageToken String?
+  messagesImported        Int                          @default(0)
+  providerRequests        Int                          @default(0)
+  completedAt             DateTime?
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+  historySyncJob          HistorySyncJob               @relation(fields: [historySyncJobId], references: [id], onDelete: Cascade)
 
   @@unique([historySyncJobId, pageSequence, externalConversationId])
   @@index([historySyncJobId, pageSequence, state])
@@ -312,22 +358,22 @@ model TikTokAuthorizationState {
 /// local Shop.id or a non-secret authorization bucket; provider credentials,
 /// shop ciphers, headers, and response bodies must never be stored here.
 model ProviderReadThrottle {
-  id                       String   @id @default(uuid())
+  id                       String    @id @default(uuid())
   provider                 String
   shopScope                String
   operation                String
   lastRequestAt            DateTime?
   lastSuccessAt            DateTime?
   lastThrottleAt           DateTime?
-  consecutiveThrottleCount Int      @default(0)
+  consecutiveThrottleCount Int       @default(0)
   nextPermittedAt          DateTime?
   spacingUntil             DateTime?
   lastProviderRequestId    String?
   retryAfterMs             Int?
   leaseId                  String?
   leaseExpiresAt           DateTime?
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
   @@unique([provider, shopScope, operation])
   @@index([provider, shopScope, nextPermittedAt])
@@ -396,22 +442,22 @@ model ProviderOutboundEvent {
 }
 
 model Creator {
-  id              String                    @id @default(uuid())
-  creatorOpenId   String?                   @unique
-  creatorUserId   String?                   @unique
-  creatorImId     String?                   @unique
-  username        String?
-  nickname        String?
-  selectionRegion String                    @default("ID")
-  avatarUrl       String?
-  profileUri      String?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  snapshots       CreatorMetricSnapshot[]
-  contacts        CreatorShopContactState[]
-  conversations   Conversation[]
-  recipients      CampaignRecipient[]
-  reservations    OutreachReservation[]
+  id                 String                    @id @default(uuid())
+  creatorOpenId      String?                   @unique
+  creatorUserId      String?                   @unique
+  creatorImId        String?                   @unique
+  username           String?
+  nickname           String?
+  selectionRegion    String                    @default("ID")
+  avatarUrl          String?
+  profileUri         String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  snapshots          CreatorMetricSnapshot[]
+  contacts           CreatorShopContactState[]
+  conversations      Conversation[]
+  recipients         CampaignRecipient[]
+  reservations       OutreachReservation[]
   providerIdentities CreatorProviderIdentity[]
 }
 
@@ -466,48 +512,54 @@ model CreatorMetricSnapshot {
   shop            Shop?               @relation(fields: [shopId], references: [id], onDelete: Cascade)
   recipients      CampaignRecipient[]
 
+  @@unique([creatorId, sourcePageKey])
   @@index([creatorId, sourceFetchedAt])
   @@index([shopId, sourceFetchedAt])
-  @@unique([creatorId, sourcePageKey])
 }
 
 /// One durable continuation stream per shop. Provider cursors are private and
 /// never returned by the public API projection.
 model CreatorSyncJob {
-  id                       String           @id @default(uuid())
-  shopId                   String           @unique
-  state                    CreatorSyncState @default(PAUSED)
-  privateSearchKey         String
-  privateNextPageToken     String?
-  pagesCompleted           Int              @default(10)
-  creatorsFetched          Int              @default(200)
-  creatorsFetchedThisRun   Int              @default(0)
-  pauseRequested           Boolean          @default(false)
-  nextAttemptAt            DateTime?
-  startedAt                DateTime?
-  lastPageAt               DateTime?
-  lastSuccessAt            DateTime?
-  lastError                String?
-  lastProviderCode         String?
-  currentStage             String           @default("PAUSED")
-  lastAttemptAt            DateTime?
-  lastResponseAt           DateTime?
-  lastAttemptPage          Int?
-  lastHttpStatus           Int?
-  lastTikTokCode           String?
-  lastSafeError            String?
-  lastCreatorsReturned     Int?
-  lastCreatorsAdded        Int?
-  lastDuplicates           Int?
-  spreadsheetId            String
-  sheetImportedAt          DateTime?
-  leaseId                  String?
-  leaseExpiresAt           DateTime?
-  createdAt                DateTime          @default(now())
-  updatedAt                DateTime          @updatedAt
-  shop                     Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  pages                    CreatorSyncPage[]
-  events                   CreatorSyncEvent[]
+  id                     String                   @id @default(uuid())
+  shopId                 String                   @unique
+  state                  CreatorSyncState         @default(PAUSED)
+  privateSearchKey       String?
+  privateNextPageToken   String?
+  pagesCompleted         Int                      @default(10)
+  creatorsFetched        Int                      @default(200)
+  creatorsFetchedThisRun Int                      @default(0)
+  pauseRequested         Boolean                  @default(false)
+  marketplaceRetryDelaySeconds Int                  @default(3)
+  nextAttemptAt          DateTime?
+  startedAt              DateTime?
+  lastPageAt             DateTime?
+  lastSuccessAt          DateTime?
+  lastError              String?
+  lastProviderCode       String?
+  currentStage           String                   @default("PAUSED")
+  lastAttemptAt          DateTime?
+  lastResponseAt         DateTime?
+  lastAttemptPage        Int?
+  lastHttpStatus         Int?
+  lastTikTokCode         String?
+  lastSafeError          String?
+  lastCreatorsReturned   Int?
+  lastCreatorsAdded      Int?
+  lastDuplicates         Int?
+  spreadsheetId          String
+  sheetImportedAt        DateTime?
+  leaseId                String?
+  leaseExpiresAt         DateTime?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+  shop                   Shop                     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  pages                  CreatorSyncPage[]
+  events                 CreatorSyncEvent[]
+  partitions             CreatorSearchPartition[]
+  currentPartitionId     String?                  @unique
+  currentPartition       CreatorSearchPartition?  @relation("CurrentCreatorPartition", fields: [currentPartitionId], references: [id], onDelete: SetNull)
+  crawlerGeneration      Int                      @default(1)
+  partitionClaimSequence Int                      @default(0)
 
   @@index([state, nextAttemptAt])
   @@index([leaseExpiresAt])
@@ -516,19 +568,25 @@ model CreatorSyncJob {
 /// Safe, durable activity records for the Creator Database UI. Provider
 /// credentials and opaque pagination values are deliberately excluded.
 model CreatorSyncEvent {
-  id                   String         @id @default(uuid())
-  creatorSyncJobId     String
-  stage                String
-  pageNumber           Int?
-  httpStatus           Int?
-  tiktokCode           String?
-  safeMessage          String?
-  creatorsReturned     Int?
-  creatorsAdded        Int?
-  duplicates           Int?
-  nextAttemptAt        DateTime?
-  occurredAt           DateTime       @default(now())
-  creatorSyncJob       CreatorSyncJob @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  id                       String                  @id @default(uuid())
+  creatorSyncJobId         String
+  stage                    String
+  pageNumber               Int?
+  httpStatus               Int?
+  tiktokCode               String?
+  googleApiCode            String?
+  retryable                Boolean?
+  safeMessage              String?
+  creatorsReturned         Int?
+  creatorsAdded            Int?
+  duplicates               Int?
+  nextAttemptAt            DateTime?
+  occurredAt               DateTime                @default(now())
+  creatorSyncJob           CreatorSyncJob          @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  creatorSearchPartitionId String?
+  partitionKey             String?
+  partitionLabel           String?
+  creatorSearchPartition   CreatorSearchPartition? @relation(fields: [creatorSearchPartitionId], references: [id], onDelete: SetNull)
 
   @@index([creatorSyncJobId, occurredAt])
 }
@@ -537,22 +595,132 @@ model CreatorSyncEvent {
 /// cursor advancement. Replaying this row is safe because creators reconcile
 /// by Creator Open ID and snapshots reconcile by sourcePageKey.
 model CreatorSyncPage {
-  id                   String               @id @default(uuid())
-  creatorSyncJobId     String
-  state                CreatorSyncPageState @default(RECEIVED)
-  pageNumber           Int
-  privateRequestToken  String
-  privateNextToken     String?
-  privateSearchKey     String
-  providerHasMore      Boolean
-  creatorsReturned     Int
-  payload              Json
-  receivedAt           DateTime             @default(now())
-  committedAt          DateTime?
-  creatorSyncJob       CreatorSyncJob       @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  id                       String                  @id @default(uuid())
+  creatorSyncJobId         String
+  state                    CreatorSyncPageState    @default(RECEIVED)
+  pageNumber               Int
+  privateRequestToken      String
+  privateNextToken         String?
+  privateSearchKey         String
+  providerHasMore          Boolean
+  creatorsReturned         Int
+  newUniqueCreators        Int?
+  duplicateRows            Int?
+  newCreatorOpenIds        String[]                @default([])
+  payload                  Json
+  sheetsAttemptCount       Int                     @default(0)
+  nextSheetsAttemptAt      DateTime?
+  lastSheetsHttpStatus     Int?
+  lastSheetsApiCode        String?
+  lastSheetsRetryable      Boolean?
+  lastSheetsError          String?
+  receivedAt               DateTime                @default(now())
+  committedAt              DateTime?
+  creatorSyncJob           CreatorSyncJob          @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  creatorSearchPartitionId String?
+  creatorSearchPartition   CreatorSearchPartition? @relation(fields: [creatorSearchPartitionId], references: [id], onDelete: SetNull)
 
   @@unique([creatorSyncJobId, privateRequestToken])
   @@index([creatorSyncJobId, state, pageNumber])
+}
+
+/// Cached TikTok Shop category metadata. V1 creator crawling enables the
+/// documented parent categories (root nodes) and keeps the full fetched tree.
+model CreatorMarketplaceCategory {
+  id                        String   @id @default(uuid())
+  shopId                    String
+  categoryId                String
+  categoryName              String
+  parentCategoryId          String?
+  level                     Int
+  enabledForCreatorCrawl    Boolean  @default(false)
+  availableForCreatorFilter Boolean  @default(true)
+  sortOrder                 Int
+  isLeaf                    Boolean  @default(false)
+  fetchedAt                 DateTime
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  shop                      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, categoryId])
+  @@index([shopId, enabledForCreatorCrawl, sortOrder])
+}
+
+/// Durable Marketplace search sequence. Opaque cursors remain backend-only.
+model CreatorSearchPartition {
+  id                            String                         @id @default(uuid())
+  creatorSyncJobId              String
+  partitionKey                  String
+  generation                    Int                            @default(1)
+  partitionType                 CreatorSearchPartitionType     @default(LEGACY)
+  adaptiveDepth                 Int                            @default(0)
+  categoryId                    String?
+  categoryName                  String
+  categoryChildId               String?
+  categoryChildName             String?
+  followerBucket                String?
+  followersMin                  Int?
+  followersMax                  Int?
+  gmvBucket                     String?
+  gmvRange                      String?
+  parentPartitionId             String?
+  status                        CreatorSearchPartitionStatus   @default(QUEUED)
+  queuePosition                 BigInt
+  privateSearchKey              String?
+  privateNextPageToken          String?
+  pagesCompleted                Int                            @default(0)
+  rowsReturned                  Int                            @default(0)
+  uniqueCreatorsAdded           Int                            @default(0)
+  duplicates                    Int                            @default(0)
+  marketplaceRequests           Int                            @default(0)
+  throttleAttempts              Int                            @default(0)
+  newCreatorsPerRequest         Decimal?                       @db.Decimal(14, 6)
+  duplicateRate                 Decimal?                       @db.Decimal(10, 8)
+  originalYield                 Decimal?                       @db.Decimal(10, 8)
+  incrementalYield              Decimal?                       @db.Decimal(10, 8)
+  combinedChildIncrementalYield Decimal?                       @db.Decimal(10, 8)
+  observedSaturationState       CreatorObservedSaturationState @default(UNKNOWN)
+  branchClassification          CreatorBranchClassification    @default(UNCLASSIFIED)
+  followerSplitExplored         Boolean                        @default(false)
+  followerRecursionTerminal     Boolean                        @default(false)
+  gmvSplitCreated               Boolean                        @default(false)
+  priorityScore                 Decimal                        @default(0) @db.Decimal(18, 6)
+  priorityReason                String?
+  priorityUpdatedAt             DateTime?
+  schedulerClass                CreatorSchedulerClass?
+  schedulerClaimSequence        Int?
+  schedulerCategoryRows         Decimal?                       @db.Decimal(18, 3)
+  schedulerCategoryYield        Decimal?                       @db.Decimal(10, 8)
+  schedulerCategoryWeight       Decimal?                       @db.Decimal(12, 6)
+  schedulerFollowerRows         Decimal?                       @db.Decimal(18, 3)
+  schedulerFollowerYield        Decimal?                       @db.Decimal(10, 8)
+  schedulerFollowerWeight       Decimal?                       @db.Decimal(12, 6)
+  schedulerAncestorYield        Decimal?                       @db.Decimal(10, 8)
+  schedulerNewPerSuccessfulPage Decimal?                       @db.Decimal(14, 6)
+  mayStillBeDense               Boolean                        @default(false)
+  categoryChildIds              String[]                       @default([])
+  business16032001RetryCount    Int                            @default(0)
+  business16032001RetryPage     Int?
+  createdAt                     DateTime                       @default(now())
+  startedAt                     DateTime?
+  completedAt                   DateTime?
+  lastRequestAt                 DateTime?
+  lastSuccessAt                 DateTime?
+  lastError                     String?
+  updatedAt                     DateTime                       @updatedAt
+  creatorSyncJob                CreatorSyncJob                 @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  activeForJob                  CreatorSyncJob?                @relation("CurrentCreatorPartition")
+  parentPartition               CreatorSearchPartition?        @relation("PartitionChildren", fields: [parentPartitionId], references: [id], onDelete: SetNull)
+  children                      CreatorSearchPartition[]       @relation("PartitionChildren")
+  pages                         CreatorSyncPage[]
+  events                        CreatorSyncEvent[]
+
+  @@unique([creatorSyncJobId, partitionKey])
+  @@index([creatorSyncJobId, status, queuePosition])
+  @@index([creatorSyncJobId, generation, status, queuePosition])
+  @@index([creatorSyncJobId, partitionType, status, priorityScore, queuePosition])
+  @@index([creatorSyncJobId, schedulerClass, schedulerClaimSequence])
+  @@index([parentPartitionId])
 }
 
 model CreatorShopContactState {
@@ -727,30 +895,30 @@ model Campaign {
 /// Durable, private Marketplace discovery progress. Provider pagination values
 /// are intentionally isolated from Campaign, which is a public API object.
 model DiscoveryRun {
-  id                       String            @id @default(uuid())
-  campaignId               String            @unique
+  id                       String               @id @default(uuid())
+  campaignId               String               @unique
   shopId                   String
-  state                    DiscoveryRunState @default(QUEUED)
+  state                    DiscoveryRunState    @default(QUEUED)
   requestedTarget          Int
   candidateLimit           Int
-  pagesFetched             Int               @default(0)
-  candidatesFetched        Int               @default(0)
-  consecutiveThrottleCount Int               @default(0)
-  totalProviderRequests    Int               @default(0)
+  pagesFetched             Int                  @default(0)
+  candidatesFetched        Int                  @default(0)
+  consecutiveThrottleCount Int                  @default(0)
+  totalProviderRequests    Int                  @default(0)
   lastProviderCode         String?
   lastProviderRequestAt    DateTime?
   nextAttemptAt            DateTime?
   providerSearchKey        String?
   providerNextPageToken    String?
-  providerHasMore          Boolean           @default(true)
+  providerHasMore          Boolean              @default(true)
   failureCategory          String?
   leaseId                  String?
   leaseExpiresAt           DateTime?
-  createdAt                DateTime           @default(now())
-  updatedAt                DateTime           @updatedAt
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
   completedAt              DateTime?
-  campaign                 Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  shop                     Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  campaign                 Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  shop                     Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
   candidates               DiscoveryCandidate[]
 
   @@index([state, nextAttemptAt])
@@ -775,28 +943,28 @@ model DiscoveryCandidate {
 }
 
 model CampaignRecipient {
-  id               String                @id @default(uuid())
-  campaignId       String
-  creatorId        String
-  snapshotId       String
-  discoveryOrdinal Int
-  eligibility      Eligibility
-  skipReason       String?
-  skipDetail       String?
-  rankingValue     Decimal               @db.Decimal(24, 6)
-  selected         Boolean               @default(false)
-  frozenMessage    String?               @db.Text
-  contentHash      String?
+  id                    String                @id @default(uuid())
+  campaignId            String
+  creatorId             String
+  snapshotId            String
+  discoveryOrdinal      Int
+  eligibility           Eligibility
+  skipReason            String?
+  skipDetail            String?
+  rankingValue          Decimal               @db.Decimal(24, 6)
+  selected              Boolean               @default(false)
+  frozenMessage         String?               @db.Text
+  contentHash           String?
   creatorOpenIdSnapshot String?
-  recipientSnapshot Json?
-  frozenRank        Int?
-  state            RecipientState        @default(DISCOVERED)
-  replyStatus      String                @default("NONE")
-  campaign         Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  creator          Creator               @relation(fields: [creatorId], references: [id], onDelete: Cascade)
-  snapshot         CreatorMetricSnapshot @relation(fields: [snapshotId], references: [id])
-  delivery         OutreachDelivery?
-  reservation      OutreachReservation?
+  recipientSnapshot     Json?
+  frozenRank            Int?
+  state                 RecipientState        @default(DISCOVERED)
+  replyStatus           String                @default("NONE")
+  campaign              Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  creator               Creator               @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  snapshot              CreatorMetricSnapshot @relation(fields: [snapshotId], references: [id])
+  delivery              OutreachDelivery?
+  reservation           OutreachReservation?
 
   @@unique([campaignId, creatorId])
   @@index([campaignId, selected, state])
@@ -864,16 +1032,16 @@ model QueueOutbox {
 }
 
 model DeliveryAttempt {
-  id                String           @id @default(uuid())
-  deliveryId        String
-  attemptNumber     Int
-  outcome           String
-  providerCode      String?
+  id                 String           @id @default(uuid())
+  deliveryId         String
+  attemptNumber      Int
+  outcome            String
+  providerCode       String?
   providerHttpStatus Int?
-  providerRequestId String?
-  startedAt         DateTime
-  completedAt       DateTime?
-  delivery          OutreachDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  providerRequestId  String?
+  startedAt          DateTime
+  completedAt        DateTime?
+  delivery           OutreachDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 
   @@unique([deliveryId, attemptNumber])
 }

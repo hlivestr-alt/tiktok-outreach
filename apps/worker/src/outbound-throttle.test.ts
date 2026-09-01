@@ -1,4 +1,3 @@
-import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import {
   decreasedConcurrency,
@@ -33,21 +32,6 @@ describe("outbound provider governor", () => {
       ({ effectiveConcurrency: concurrency, healthySuccessCount: successes } = increasedConcurrency(concurrency, 32, successes));
     }
     expect(concurrency).toBe(32);
-  });
-
-  it("processes 1000 immediate mock successes without minute, hour, or fixed-spacing waits", async () => {
-    const calls: number[] = [];
-    const started = performance.now();
-    await Promise.all(Array.from({ length: 1_000 }, async (_, index) => {
-      calls.push(index);
-      return { status: "SENT" as const };
-    }));
-    const elapsedMs = performance.now() - started;
-    const acceptedPerSecond = 1_000 / Math.max(elapsedMs / 1_000, 0.001);
-    console.log(JSON.stringify({ test: "mock-outbound-throughput", recipients: 1_000, elapsedMs, acceptedPerSecond }));
-    expect(calls).toHaveLength(1_000);
-    expect(elapsedMs).toBeLessThan(1_000);
-    expect(acceptedPerSecond).toBeGreaterThan(100);
   });
 
   it("recovers after a throttle instead of remaining at reduced capacity", () => {

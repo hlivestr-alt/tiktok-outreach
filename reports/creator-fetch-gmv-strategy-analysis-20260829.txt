@@ -1,0 +1,707 @@
+CREATOR DATABASE — SPECIFIC GMV STRATEGY ANALYSIS
+Generated: 29/08/2026 10:46:20 WIB
+Timezone for daily reporting: Indonesia/WIB (Asia/Jakarta)
+Functional strategy change (STRATEGY_CHANGE_TIME): 26/08/2026 12:45:35 WIB / 2026-08-26T05:45:35.507Z
+Durable evidence: GMV_ALL_DISABLED_BY_STRATEGY event at 05:45:35.507 UTC, followed by the first specific-GMV partition start at 05:46:05.959 UTC. Migration seeds (21,800) were materialized earlier at 05:06:28.942 UTC; 5,456 GMV-All partitions are retained disabled history.
+Scope: read-only snapshot; main page metrics use COMMITTED receipts so uncommitted/staged pages do not inflate discovery results. Marketplace attempt outcomes are event-derived (success + throttle + error).
+
+============================================================
+EXECUTIVE SUMMARY
+============================================================
+Post-change committed window: 26/08/2026 12:45:35 WIB to 29/08/2026 10:41:51 WIB (69h 56m calendar; 63h 22m active-runtime estimate).
+Post-change: 23,488 new creators from 66,114 returned rows / 3,347 committed pages; unique 35.5%, duplicate 64.5%; 8,060.2 new/day calendar and 8,897.1 new/day active runtime.
+Matched old GMV-All window: 23/08/2026 14:49:19 WIB to 26/08/2026 12:45:35 WIB; 10,034 new creators; unique 33.4%; 3,443.3 calendar new/day and 7,785.9 active-runtime new/day.
+Current best observed GMV efficiency by new/page: G1 Low (8.72 new/page). Evidence is early and execution-order-confounded.
+Conclusion: SUPPORTED — removing GMV All improved/changed the observed matched-period new/page rate by +5.7% and unique rate by +2.1 pp; rate conclusions retain active-time and ordering limitations below.
+
+============================================================
+BEFORE VS AFTER — MATCHED WINDOWS
+============================================================
+Metric                      Old GMV All       Specific GMV      Change          
+--------------------------  ----------------  ----------------  ----------------
+Committed successful page…  1,512             3,347             +121.4%         
+Marketplace attempts        18,540            28,905            +55.9%          
+Rows returned               30,026            66,114            +120.2%         
+New unique creators         10,034            23,488            +134.1%         
+Unique rate                 33.4%             35.5%             +2.1 pp         
+Duplicate rate              66.6%             64.5%             -2.1 pp         
+New / page                  6.64              7.02              +5.7%           
+New / attempt               0.54              0.81              +50.1%          
+New / hour calendar         143.47            335.84            +134.1%         
+New / hour active           324.41            370.71            +14.3%          
+New / day calendar          3,443.29          8,060.18          +134.1%         
+New / day active            7,785.85          8,897.06          +14.3%          
+Throttle %                  90.7%             87.7%             -3.1 pp         
+Strict 24h before vs first 24h after:
+Metric                    24h before        First 24h after     Change          
+------------------------  ----------------  ------------------  ----------------
+New creators              2,074             7,525               +262.8%         
+Unique rate               37.6%             40.3%               +2.8 pp         
+New/page                  7.43              7.91                +6.4%           
+New/day calendar          2,074.00          7,525.00            +262.8%         
+Historical GMV-All baseline (all durable executed GMV-All partitions, not time-matched): 95,544 new from 272,741 rows / 13,851 pages; unique 35.0%, new/page 6.90. It is contextual only, not used as the causal matched comparison.
+
+============================================================
+DAILY FETCH RATE (WIB)
+============================================================
+Date           Active     Pages   Attempt…  Rows     New      Dup      Unique    Dup %     Throttl…  Thr %     New/Page   New/Hr    New/Day  
+-------------  ---------  ------  --------  -------  -------  -------  --------  --------  --------  --------  ---------  --------  ---------
+2026-08-26*    11h 14m    379     4,292     7,362    3,945    3,417    53.6%     46.4%     3,881     90.4%     10.41      351.31    8,431.56 
+2026-08-27     21h 20m    797     9,093     15,701   4,689    11,012   29.9%     70.1%     8,266     90.9%     5.88       219.72    5,273.40 
+2026-08-28     20h 4m     1,341   10,027    26,549   8,808    17,741   33.2%     66.8%     8,616     85.9%     6.57       438.85    10,532.4…
+2026-08-29*    10h 42m    830     5,493     16,502   6,046    10,456   36.6%     63.4%     4,581     83.4%     7.28       565.19    13,564.4…
+* PARTIAL DAY. Rates are normalized to its observed calendar/active span, not presented as a full 24-hour count.
+Most recent complete 24h ending 29/08/2026 10:41:51 WIB: 13,268 new; 13,268.0 calendar new/day; 13,932.5 active-runtime new/day.
+
+============================================================
+GMV PERFORMANCE — POST CHANGE
+============================================================
+GMV             Partition…  Pages    Attempts   Rows      New       Dup       Unique %   Dup %     Rows/Pg   New/Pg    New/Attemp…  New share   Attempt s…
+--------------  ----------  -------  ---------  --------  --------  --------  ---------  --------  --------  --------  -----------  ----------  ----------  -----------
+G1 Low          85          1,697    14,265     33,455    14,790    18,665    44.2%      55.8%     19.71     8.72      1.04         63.0%       49.4%     
+G2 Medium       62          1,113    9,156      22,095    7,386     14,709    33.4%      66.6%     19.85     6.64      0.81         31.4%       31.7%     
+G3 High         30          499      5,025      9,934     1,308     8,626     13.2%      86.8%     19.91     2.62      0.26         5.6%        17.4%     
+G4 Very High    13          38       459        630       4         626       0.6%       99.4%     16.58     0.11      0.01         0.0%        1.6%      
+
+============================================================
+FOLLOWER RANGE PERFORMANCE — EXACT OBSERVED RANGES
+============================================================
+Follower range        Pages    Attempts   Rows      New       Dup       Unique %   Dup %     New/Page   New/Attemp…  Share new 
+--------------------  -------  ---------  --------  --------  --------  ---------  --------  ---------  -----------  ----------
+600–799               62       958        1,206     798       408       66.2%      33.8%     12.87      0.83         3.4%      
+800–999               62       281        1,219     785       434       64.4%      35.6%     12.66      2.79         3.3%      
+1,000–1,124           41       136        801       272       529       34.0%      66.0%     6.63       2.00         1.2%      
+1,000–1,249           61       345        1,204     214       990       17.8%      82.2%     3.51       0.62         0.9%      
+1,000–1,499           64       481        1,249     494       755       39.6%      60.4%     7.72       1.03         2.1%      
+1,125–1,249           41       595        803       314       489       39.1%      60.9%     7.66       0.53         1.3%      
+1,250–1,374           41       318        801       198       603       24.7%      75.3%     4.83       0.62         0.8%      
+1,250–1,499           61       409        1,201     290       911       24.1%      75.9%     4.75       0.71         1.2%      
+1,375–1,499           40       191        800       248       552       31.0%      69.0%     6.20       1.30         1.1%      
+1,500–1,624           20       99         399       124       275       31.1%      68.9%     6.20       1.25         0.5%      
+1,500–1,749           60       934        1,200     171       1,029     14.2%      85.8%     2.85       0.18         0.7%      
+1,500–1,999           64       1,003      1,252     596       656       47.6%      52.4%     9.31       0.59         2.5%      
+1,625–1,749           20       277        400       143       257       35.8%      64.3%     7.15       0.52         0.6%      
+1,750–1,874           61       943        1,201     519       682       43.2%      56.8%     8.51       0.55         2.2%      
+1,750–1,999           61       1,061      1,201     470       731       39.1%      60.9%     7.70       0.44         2.0%      
+1,875–1,999           59       927        1,173     585       588       49.9%      50.1%     9.92       0.63         2.5%      
+2,000–2,124           21       172        401       117       284       29.2%      70.8%     5.57       0.68         0.5%      
+2,000–2,249           21       331        402       142       260       35.3%      64.7%     6.76       0.43         0.6%      
+2,000–2,499           61       638        1,200     130       1,070     10.8%      89.2%     2.13       0.20         0.6%      
+2,000–2,999           67       813        1,307     316       991       24.2%      75.8%     4.72       0.39         1.3%      
+2,125–2,249           21       118        401       116       285       28.9%      71.1%     5.52       0.98         0.5%      
+2,250–2,374           20       362        400       99        301       24.8%      75.3%     4.95       0.27         0.4%      
+2,250–2,499           20       228        400       126       274       31.5%      68.5%     6.30       0.55         0.5%      
+2,375–2,499           20       197        400       111       289       27.8%      72.3%     5.55       0.56         0.5%      
+2,500–2,624           63       960        1,241     527       714       42.5%      57.5%     8.37       0.55         2.2%      
+2,500–2,749           40       651        800       95        705       11.9%      88.1%     2.38       0.15         0.4%      
+2,500–2,999           61       756        1,201     168       1,033     14.0%      86.0%     2.75       0.22         0.7%      
+2,625–2,749           64       1,062      1,225     504       721       41.1%      58.9%     7.88       0.47         2.1%      
+2,750–2,874           21       159        401       91        310       22.7%      77.3%     4.33       0.57         0.4%      
+2,750–2,999           41       507        801       106       695       13.2%      86.8%     2.59       0.21         0.5%      
+2,875–2,999           20       96         400       83        317       20.8%      79.3%     4.15       0.86         0.4%      
+3,000–3,124           52       343        1,033     398       635       38.5%      61.5%     7.65       1.16         1.7%      
+3,000–3,249           60       394        1,200     517       683       43.1%      56.9%     8.62       1.31         2.2%      
+3,000–3,499           60       609        1,200     417       783       34.8%      65.3%     6.95       0.68         1.8%      
+3,000–3,999           66       633        1,299     547       752       42.1%      57.9%     8.29       0.86         2.3%      
+3,125–3,249           50       348        998       414       584       41.5%      58.5%     8.28       1.19         1.8%      
+3,250–3,374           40       601        800       385       415       48.1%      51.9%     9.63       0.64         1.6%      
+3,250–3,499           58       372        1,150     569       581       49.5%      50.5%     9.81       1.53         2.4%      
+3,375–3,499           40       350        800       406       394       50.7%      49.3%     10.15      1.16         1.7%      
+3,500–3,624           39       76         761       149       612       19.6%      80.4%     3.82       1.96         0.6%      
+3,500–3,749           41       373        801       106       695       13.2%      86.8%     2.59       0.28         0.5%      
+3,500–3,999           61       645        1,201     157       1,044     13.1%      86.9%     2.57       0.24         0.7%      
+3,625–3,749           39       123        762       149       613       19.6%      80.4%     3.82       1.21         0.6%      
+3,750–3,874           21       177        399       60        339       15.0%      85.0%     2.86       0.34         0.3%      
+3,750–3,999           40       362        800       130       670       16.3%      83.8%     3.25       0.36         0.6%      
+3,875–3,999           36       222        710       130       580       18.3%      81.7%     3.61       0.59         0.6%      
+4,000–4,124           35       83         690       285       405       41.3%      58.7%     8.14       3.43         1.2%      
+4,000–4,249           40       120        800       354       446       44.3%      55.8%     8.85       2.95         1.5%      
+4,000–4,499           60       171        1,200     409       791       34.1%      65.9%     6.82       2.39         1.7%      
+4,000–4,999           64       226        1,280     548       732       42.8%      57.2%     8.56       2.42         2.3%      
+4,125–4,249           36       82         709       306       403       43.2%      56.8%     8.50       3.73         1.3%      
+4,250–4,374           33       96         652       242       410       37.1%      62.9%     7.33       2.52         1.0%      
+4,250–4,499           40       152        800       429       371       53.6%      46.4%     10.73      2.82         1.8%      
+4,375–4,499           32       99         635       235       400       37.0%      63.0%     7.34       2.37         1.0%      
+4,500–4,624           32       255        625       93        532       14.9%      85.1%     2.91       0.36         0.4%      
+4,500–4,749           40       168        799       170       629       21.3%      78.7%     4.25       1.01         0.7%      
+4,500–4,999           60       395        1,200     173       1,027     14.4%      85.6%     2.88       0.44         0.7%      
+4,625–4,749           32       261        625       126       499       20.2%      79.8%     3.94       0.48         0.5%      
+4,750–4,874           20       436        400       107       293       26.8%      73.3%     5.35       0.25         0.5%      
+4,750–4,999           40       316        796       149       647       18.7%      81.3%     3.73       0.47         0.6%      
+4,875–4,999           20       168        400       119       281       29.8%      70.3%     5.95       0.71         0.5%      
+5,000–5,312           20       194        400       167       233       41.8%      58.3%     8.35       0.86         0.7%      
+5,000–5,624           20       49         400       216       184       54.0%      46.0%     10.80      4.41         0.9%      
+5,000–6,249           40       176        800       352       448       44.0%      56.0%     8.80       2.00         1.5%      
+5,000–7,499           71       355        1,388     792       596       57.1%      42.9%     11.15      2.23         3.4%      
+5,313–5,468           20       210        400       201       199       50.2%      49.8%     10.05      0.96         0.9%      
+5,313–5,624           20       92         400       225       175       56.3%      43.8%     11.25      2.45         1.0%      
+5,469–5,624           20       137        400       199       201       49.8%      50.2%     9.95       1.45         0.8%      
+5,625–5,937           20       120        400       200       200       50.0%      50.0%     10.00      1.67         0.9%      
+5,625–6,249           20       39         400       263       137       65.8%      34.3%     13.15      6.74         1.1%      
+5,938–6,249           20       183        400       200       200       50.0%      50.0%     10.00      1.09         0.9%      
+6,250–6,562           36       115        715       301       414       42.1%      57.9%     8.36       2.62         1.3%      
+6,250–6,874           40       191        800       355       445       44.4%      55.6%     8.88       1.86         1.5%      
+6,250–7,499           40       225        800       502       298       62.7%      37.3%     12.55      2.23         2.1%      
+6,563–6,874           35       422        690       302       388       43.8%      56.2%     8.63       0.72         1.3%      
+6,875–7,187           33       104        656       240       416       36.6%      63.4%     7.27       2.31         1.0%      
+6,875–7,499           40       167        800       431       369       53.9%      46.1%     10.78      2.58         1.8%      
+7,188–7,499           32       144        628       237       391       37.7%      62.3%     7.41       1.65         1.0%      
+7,500–7,656           30       317        586       312       274       53.2%      46.8%     10.40      0.98         1.3%      
+7,500–8,749           7        22         140       29        111       20.7%      79.3%     4.14       1.32         0.1%      
+7,500–9,999           60       522        1,200     223       977       18.6%      81.4%     3.72       0.43         0.9%      
+9,063–9,218           29       305        553       254       299       45.9%      54.1%     8.76       0.83         1.1%      
+9,219–9,374           28       152        543       256       287       47.1%      52.9%     9.14       1.68         1.1%      
+Canonical follower buckets from packages/domain (exact bounds only; adaptive descendants remain in the observed-range table above):
+Canonical range         Pages    Attempts   Rows      New       Dup       Unique %   New/Page 
+----------------------  -------  ---------  --------  --------  --------  ---------  ---------
+600–799                 62       958        1,206     798       408       66.2%      12.87    
+800–999                 62       281        1,219     785       434       64.4%      12.66    
+1,000–1,499             64       481        1,249     494       755       39.6%      7.72     
+1,500–1,999             64       1,003      1,252     596       656       47.6%      9.31     
+2,000–2,999             67       813        1,307     316       991       24.2%      4.72     
+3,000–3,999             66       633        1,299     547       752       42.1%      8.29     
+4,000–4,999             64       226        1,280     548       732       42.8%      8.56     
+5,000–7,499             71       355        1,388     792       596       57.1%      11.15    
+7,500–9,999             60       522        1,200     223       977       18.6%      3.72     
+10,000–14,999           0        0          0         0         0         0.0%       0.00     
+15,000–24,999           0        0          0         0         0         0.0%       0.00     
+25,000–34,999           0        0          0         0         0         0.0%       0.00     
+35,000–49,999           0        0          0         0         0         0.0%       0.00     
+50,000–74,999           0        0          0         0         0         0.0%       0.00     
+75,000–99,999           0        0          0         0         0         0.0%       0.00     
+100,000–149,999         0        0          0         0         0         0.0%       0.00     
+150,000–249,999         0        0          0         0         0         0.0%       0.00     
+250,000–349,999         0        0          0         0         0         0.0%       0.00     
+350,000–499,999         0        0          0         0         0         0.0%       0.00     
+500,000–749,999         0        0          0         0         0         0.0%       0.00     
+750,000–999,999         0        0          0         0         0         0.0%       0.00     
+1,000,000–1,499,999     0        0          0         0         0         0.0%       0.00     
+1,500,000–2,499,999     0        0          0         0         0         0.0%       0.00     
+2,500,000–4,999,999     0        0          0         0         0         0.0%       0.00     
+5,000,000–+             0        0          0         0         0         0.0%       0.00     
+Grouped summary (all executed exact ranges, including adaptive descendants):
+Group             Pages    Attempts   Rows      New       Unique %   New/Page   Share new 
+----------------  -------  ---------  --------  --------  ---------  ---------  ----------
+1K–4,999          2,542    23,425     50,190    15,648    31.2%      6.16       66.6%     
+5K–9,999          681      4,241      13,499    6,257     46.4%      9.19       26.6%     
+600–999           124      1,239      2,425     1,583     65.3%      12.77      6.7%      
+
+============================================================
+CATEGORY PERFORMANCE
+============================================================
+Ranking threshold: at least 100 returned rows. Categories with execution: 3; sufficiently sampled: 3.
+Top 20 by new creators:
+Category                                      Pages    Rows      New       Dup       Unique %   New/Page   New/Attemp…
+--------------------------------------------  -------  --------  --------  --------  ---------  ---------  -----------
+Perlengkapan Rumah → Home Organizer           3,174    62,767    21,864    40,903    34.8%      6.89       0.83       
+Perlengkapan Rumah → Perlengkapan Rumah Lai…  87       1,682     822       860       48.9%      9.45       1.06       
+Peralatan Dapur → Peralatan Teh & Kopi        86       1,665     802       863       48.2%      9.33       0.45       
+Top 20 by unique % (meaningful sample):
+Category                                            Rows      New       Unique %   New/Page 
+--------------------------------------------------  --------  --------  ---------  ---------
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya     1,682     822       48.9%      9.45     
+Peralatan Dapur → Peralatan Teh & Kopi              1,665     802       48.2%      9.33     
+Perlengkapan Rumah → Home Organizer                 62,767    21,864    34.8%      6.89     
+Worst 20 by duplicate % (meaningful sample):
+Category                                            Rows      New       Dup %     New/Page 
+--------------------------------------------------  --------  --------  --------  ---------
+Perlengkapan Rumah → Home Organizer                 62,767    21,864    65.2%     6.89     
+Peralatan Dapur → Peralatan Teh & Kopi              1,665     802       51.8%     9.33     
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya     1,682     822       51.1%     9.45     
+
+============================================================
+SAME CATEGORY + FOLLOWERS — GMV SIBLING COMPARISON
+============================================================
+Sufficient-family threshold: >=20 returned rows in every observed GMV sibling. Families: 55. Ties count for every tied bucket.
+Bucket              Best unique-rate    Worst unique-rate    First executed  
+------------------  ------------------  -------------------  ----------------
+G1 Low              89.1%               5.5%                 87.3%           
+G2 Medium           10.9%               52.7%                12.7%           
+G3 High             0.0%                30.9%                0.0%            
+G4 Very High        0.0%                10.9%                0.0%            
+Raw unique rate when the first sibling executed: 40.9% (8,671/21,197); later siblings: 27.5% (8,303/30,200). This is evidence of order sensitivity, not a causal bucket effect.
+Representative sufficiently sampled families (ordered by largest unique-rate spread):
+Category / Followers                              GMV             Rows     New      Unique %   New/Page   First run           
+------------------------------------------------  --------------  -------  -------  ---------  ---------  --------------------
+Perlengkapan Rumah → Home Organizer / 5,000–7,4…  G1 Low          401      391      97.5%      18.62      28/08/2026 23:41:02…
+Perlengkapan Rumah → Home Organizer / 5,000–7,4…  G2 Medium       400      370      92.5%      18.50      29/08/2026 00:51:46…
+Perlengkapan Rumah → Home Organizer / 5,000–7,4…  G3 High         400      31       7.8%       1.55       29/08/2026 02:44:07…
+Perlengkapan Rumah → Home Organizer / 5,000–7,4…  G4 Very High    187      0        0.0%       0.00       29/08/2026 04:23:37…
+Perlengkapan Rumah → Home Organizer / 1,500–1,9…  G1 Low          401      322      80.3%      15.33      27/08/2026 05:04:39…
+Perlengkapan Rumah → Home Organizer / 1,500–1,9…  G2 Medium       400      241      60.3%      12.05      27/08/2026 07:14:26…
+Perlengkapan Rumah → Home Organizer / 1,500–1,9…  G3 High         400      32       8.0%       1.60       27/08/2026 10:47:32…
+Perlengkapan Rumah → Home Organizer / 1,500–1,9…  G4 Very High    51       1        2.0%       0.33       27/08/2026 11:22:23…
+Perlengkapan Rumah → Home Organizer / 1,000–1,4…  G1 Low          405      292      72.1%      13.90      26/08/2026 21:03:53…
+Perlengkapan Rumah → Home Organizer / 1,000–1,4…  G2 Medium       400      179      44.8%      8.95       26/08/2026 23:24:29…
+Perlengkapan Rumah → Home Organizer / 1,000–1,4…  G3 High         400      22       5.5%       1.10       27/08/2026 02:11:59…
+Perlengkapan Rumah → Home Organizer / 1,000–1,4…  G4 Very High    44       1        2.3%       0.33       27/08/2026 05:02:43…
+Perlengkapan Rumah → Home Organizer / 4,000–4,9…  G1 Low          400      278      69.5%      13.90      28/08/2026 19:07:09…
+Perlengkapan Rumah → Home Organizer / 4,000–4,9…  G2 Medium       400      238      59.5%      11.90      28/08/2026 20:33:23…
+Perlengkapan Rumah → Home Organizer / 4,000–4,9…  G3 High         400      32       8.0%       1.60       28/08/2026 21:41:30…
+Perlengkapan Rumah → Home Organizer / 4,000–4,9…  G4 Very High    80       0        0.0%       0.00       28/08/2026 22:53:16…
+Perlengkapan Rumah → Home Organizer / 3,000–3,9…  G1 Low          401      267      66.6%      12.71      28/08/2026 08:35:43…
+Perlengkapan Rumah → Home Organizer / 3,000–3,9…  G2 Medium       400      243      60.8%      12.15      28/08/2026 12:33:57…
+Perlengkapan Rumah → Home Organizer / 3,000–3,9…  G3 High         400      37       9.3%       1.85       28/08/2026 16:32:45…
+Perlengkapan Rumah → Home Organizer / 3,000–3,9…  G4 Very High    98       0        0.0%       0.00       28/08/2026 17:50:47…
+Perlengkapan Rumah → Home Organizer / 2,000–2,9…  G1 Low          402      240      59.7%      11.43      27/08/2026 14:23:17…
+Perlengkapan Rumah → Home Organizer / 2,000–2,9…  G2 Medium       400      55       13.8%      2.75       27/08/2026 16:04:55…
+Perlengkapan Rumah → Home Organizer / 2,000–2,9…  G3 High         399      20       5.0%       1.00       28/08/2026 02:53:02…
+Perlengkapan Rumah → Home Organizer / 2,000–2,9…  G4 Very High    106      1        0.9%       0.17       28/08/2026 05:57:13…
+Perlengkapan Rumah → Home Organizer / 3,125–3,2…  G1 Low          400      213      53.3%      10.65      28/08/2026 13:50:42…
+Perlengkapan Rumah → Home Organizer / 3,125–3,2…  G2 Medium       400      195      48.8%      9.75       28/08/2026 18:49:43…
+Perlengkapan Rumah → Home Organizer / 3,125–3,2…  G3 High         198      6        3.0%       0.60       29/08/2026 00:14:30…
+Perlengkapan Rumah → Home Organizer / 1,750–1,9…  G1 Low          401      216      53.9%      10.29      27/08/2026 06:08:31…
+Perlengkapan Rumah → Home Organizer / 1,750–1,9…  G2 Medium       400      212      53.0%      10.60      27/08/2026 08:27:31…
+Perlengkapan Rumah → Home Organizer / 1,750–1,9…  G3 High         400      42       10.5%      2.10       27/08/2026 12:14:12…
+Perlengkapan Rumah → Home Organizer / 3,000–3,1…  G1 Low          400      184      46.0%      9.20       28/08/2026 13:23:31…
+Perlengkapan Rumah → Home Organizer / 3,000–3,1…  G2 Medium       400      197      49.3%      9.85       28/08/2026 18:29:11…
+Perlengkapan Rumah → Home Organizer / 3,000–3,1…  G3 High         233      17       7.3%       1.42       29/08/2026 00:05:25…
+Perlengkapan Rumah → Home Organizer / 7,188–7,4…  G1 Low          400      208      52.0%      10.40      29/08/2026 05:46:51…
+Perlengkapan Rumah → Home Organizer / 7,188–7,4…  G2 Medium       228      29       12.7%      2.42       29/08/2026 04:35:50…
+Perlengkapan Rumah → Home Organizer / 1,250–1,4…  G1 Low          401      168      41.9%      8.00       26/08/2026 21:47:28…
+Perlengkapan Rumah → Home Organizer / 1,250–1,4…  G2 Medium       400      94       23.5%      4.70       27/08/2026 01:52:29…
+Perlengkapan Rumah → Home Organizer / 1,250–1,4…  G3 High         400      28       7.0%       1.40       27/08/2026 03:37:23…
+Perlengkapan Rumah → Home Organizer / 4,250–4,3…  G1 Low          400      201      50.2%      10.05      28/08/2026 21:27:27…
+Perlengkapan Rumah → Home Organizer / 4,250–4,3…  G2 Medium       252      41       16.3%      3.15       28/08/2026 22:54:26…
+Perlengkapan Rumah → Home Organizer / 3,000–3,4…  G1 Low          400      190      47.5%      9.50       28/08/2026 10:32:04…
+Perlengkapan Rumah → Home Organizer / 3,000–3,4…  G2 Medium       400      172      43.0%      8.60       28/08/2026 14:14:31…
+Perlengkapan Rumah → Home Organizer / 3,000–3,4…  G3 High         400      55       13.8%      2.75       28/08/2026 18:38:00…
+Perlengkapan Rumah → Home Organizer / 4,375–4,4…  G1 Low          400      191      47.8%      9.55       28/08/2026 21:58:18…
+Perlengkapan Rumah → Home Organizer / 4,375–4,4…  G2 Medium       235      44       18.7%      3.67       28/08/2026 22:58:39…
+Perlengkapan Rumah → Home Organizer / 6,875–7,1…  G1 Low          400      189      47.3%      9.45       29/08/2026 05:35:25…
+Perlengkapan Rumah → Home Organizer / 6,875–7,1…  G2 Medium       256      51       19.9%      3.92       29/08/2026 04:29:47…
+Perlengkapan Rumah → Home Organizer / 1,125–1,2…  G1 Low          403      212      52.6%      10.10      27/08/2026 01:25:45…
+Perlengkapan Rumah → Home Organizer / 1,125–1,2…  G2 Medium       400      102      25.5%      5.10       27/08/2026 04:14:28…
+Perlengkapan Rumah → Home Organizer / 4,000–4,4…  G1 Low          400      174      43.5%      8.70       28/08/2026 20:49:22…
+Perlengkapan Rumah → Home Organizer / 4,000–4,4…  G2 Medium       400      168      42.0%      8.40       28/08/2026 21:06:13…
+Perlengkapan Rumah → Home Organizer / 4,000–4,4…  G3 High         400      67       16.8%      3.35       29/08/2026 06:16:46…
+Perlengkapan Rumah → Home Organizer / 4,625–4,7…  G1 Low          400      118      29.5%      5.90       29/08/2026 01:15:21…
+Perlengkapan Rumah → Home Organizer / 4,625–4,7…  G2 Medium       225      8        3.6%       0.67       29/08/2026 03:24:16…
+Perlengkapan Rumah → Home Organizer / 7,500–9,9…  G1 Low          400      123      30.8%      6.15       29/08/2026 05:21:13…
+Perlengkapan Rumah → Home Organizer / 7,500–9,9…  G2 Medium       400      80       20.0%      4.00       29/08/2026 06:58:53…
+Perlengkapan Rumah → Home Organizer / 7,500–9,9…  G3 High         400      20       5.0%       1.00       29/08/2026 09:04:56…
+Perlengkapan Rumah → Home Organizer / 3,750–3,8…  G1 Low          80       27       33.8%      5.40       28/08/2026 16:43:25…
+Perlengkapan Rumah → Home Organizer / 3,750–3,8…  G2 Medium       319      33       10.3%      2.06       28/08/2026 19:48:59…
+
+============================================================
+GMV ALL VS SPECIFIC GMV
+============================================================
+Direct comparison uses only GMV-All partitions for the pre-change matched period and specific-GMV partitions after the functional cutover. Exact category + follower matches are listed in the CSV where both forms have executed; follower-bound changes are not treated as exact comparisons.
+Defensible lower bound on creators newly exposed after cutover: 23,488 durable first-discovery IDs. Each was absent from the entire Creator database at receipt time; therefore it was absent from any previously committed GMV-All result. This proves incremental discovery but does not measure the complete result-set difference because historical receipts retain full payloads but this safety-focused run did not bulk-export payload JSON.
+Comparison classification: exact range equality is used only in the CSV match flag; parent/child or different-bound cases are labeled non-direct. No claim is made that a range-mismatched comparison is causal.
+
+============================================================
+SEARCH-ORDER BIAS AND FIRST-DISCOVERY ATTRIBUTION
+============================================================
+Raw unique rate is inherently database-growth-sensitive: a later search is more likely to return creators already stored by earlier searches. The durable newCreatorOpenIds field records first database introduction at receipt time, so it supports first-discovery attribution but not an order-neutral counterfactual.
+Within sufficiently sampled sibling families, the first-executed bucket was G1 in 87.3%, G2 in 12.7%, G3 in 0.0%, G4 in 0.0%. First siblings had 40.9% raw unique versus 27.5% later. Conclusion: MIXED — bucket differences are materially confounded by execution order, especially where G1 ran first.
+First-discovery counts by GMV:
+GMV                 First discoveries 
+------------------  ------------------
+G1 Low              14,790            
+G2 Medium           7,386             
+G3 High             1,308             
+G4 Very High        4                 
+Top first-discovery categories:
+Category                                                 First discoveries 
+-------------------------------------------------------  ------------------
+Perlengkapan Rumah → Home Organizer                      21,864            
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya          822               
+Peralatan Dapur → Peralatan Teh & Kopi                   802               
+Top first-discovery follower ranges:
+Follower range             First discoveries 
+-------------------------  ------------------
+600–799                    798               
+5,000–7,499                792               
+800–999                    785               
+1,500–1,999                596               
+1,875–1,999                585               
+3,250–3,499                569               
+4,000–4,999                548               
+3,000–3,999                547               
+2,500–2,624                527               
+1,750–1,874                519               
+3,000–3,249                517               
+2,625–2,749                504               
+6,250–7,499                502               
+1,000–1,499                494               
+1,750–1,999                470               
+6,875–7,499                431               
+4,250–4,499                429               
+3,000–3,499                417               
+3,125–3,249                414               
+4,000–4,499                409               
+3,375–3,499                406               
+3,000–3,124                398               
+3,250–3,374                385               
+6,250–6,874                355               
+4,000–4,249                354               
+5,000–6,249                352               
+2,000–2,999                316               
+1,125–1,249                314               
+7,500–7,656                312               
+4,125–4,249                306               
+
+============================================================
+SATURATION AND ADAPTIVE DEPTH
+============================================================
+Strategy               Executed parts   Observed saturate…  Rate      Avg pages sat.    Avg rows sat.    Avg new sat.   
+---------------------  ---------------  ------------------  --------  ----------------  ---------------  ---------------
+Historical GMV All     760              581                 76.4%     20.23             400.21           143.25         
+Specific GMV post      450              238                 52.9%     20.13             400.00           187.90         
+The roughly 399–405-result behavior, when present, is reported as observed Marketplace saturation only; it is not treated as an official TikTok cap.
+Type / depth              Pages    Attempts   Rows      New       Dup       Unique %   Dup %     New/Page 
+------------------------  -------  ---------  --------  --------  --------  ---------  --------  ---------
+V2_SEED / 0               580      5,272      11,400    5,099     6,301     44.7%      55.3%     8.79     
+ADAPTIVE_FOLLOWER / 1     693      6,386      13,748    3,482     10,266    25.3%      74.7%     5.02     
+ADAPTIVE_FOLLOWER / 2     924      7,906      18,327    6,561     11,766    35.8%      64.2%     7.10     
+ADAPTIVE_FOLLOWER / 3     937      6,437      18,492    6,322     12,170    34.2%      65.8%     6.75     
+ADAPTIVE_FOLLOWER / 4     40       347        800       400       400       50.0%      50.0%     10.00    
+ADAPTIVE_GMV / 4          86       1,783      1,665     802       863       48.2%      51.8%     9.33     
+ADAPTIVE_GMV / 5          87       774        1,682     822       860       48.9%      51.1%     9.45     
+
+============================================================
+SCHEDULER EFFICIENCY
+============================================================
+Claim proxy: partitions with post-change execution, grouped by durable scheduler class. Scheduler implementation reserves a 5 HIGH / 1 MEDIUM / 1 EXPLORATION conceptual cadence, with fallback classes when a slot is empty.
+Class               Claimed parts     Attempts    New        New/Attempt    New/Page   
+------------------  ----------------  ----------  ---------  -------------  -----------
+EXPLORATION         35                5,272       5,099      0.97           8.79       
+HIGH                120               17,247      14,907     0.86           7.19       
+MEDIUM              35                6,386       3,482      0.55           5.02       
+Scheduler conclusion: INSUFFICIENT DATA for GMV-bucket reprioritization. Most post-change work is early exploration and the observed bucket mix is strongly time/order-dependent.
+
+============================================================
+API / THROTTLE EFFICIENCY
+============================================================
+Window                Attempts    Success    Throttles   Throttle %   Other error…  Attempts/success   New/attempt 
+--------------------  ----------  ---------  ----------  -----------  ------------  -----------------  ------------
+Matched old           18,540      1,512      16,825      90.7%        203           12.26              0.54        
+Specific-GMV post     28,905      3,347      25,344      87.7%        214           8.64               0.81        
+Post-change error classification:
+Outcome                         Count       
+------------------------------  ------------
+HTTP 429                        25,344      
+Other error unknown             206         
+Other error 36009003            8           
+Throttling is measured, not attributed: these records do not prove that request frequency caused a throttle.
+
+============================================================
+CURRENT DATABASE STATE AND QUEUE STATE
+============================================================
+Creator DB size at strategy change: 124,887; current total: 148,558; net growth: 23,671. Valid Creator Open IDs: 148,021; created since functional strategy change: 23,671; historical snapshot appearances: 394,156.
+Crawler: state RUNNING; stage SAVING_SHEET; discovery-worker heartbeat current: YES; last page 29/08/2026 10:41:51 WIB.
+Current active partition: Perlengkapan Rumah → Home Organizer / 7,500–8,749 / G1 Low / page 8.
+Specific-GMV partitions: 22,244 total; 21,765 base seeds queued; 164 adaptive follower descendants; 177 low-value/effectively-dead branches.
+GMV              Total      Queued     Active/starting   Complete    Terminal/deep    Other    
+---------------  ---------  ---------  ----------------  ----------  ---------------  ---------
+G1 Low           5,606      5,456      1                 81          68               0        
+G2 Medium        5,574      5,447      0                 107         20               0        
+G3 High          5,544      5,449      0                 88          7                0        
+G4 Very High     5,520      5,442      0                 78          0                0        
+
+============================================================
+FULL EXACT COMBINATION TABLE
+============================================================
+Every persisted post-change combination with committed execution is listed below and in C:\Data\TikTok Outreach\reports\creator-fetch-gmv-combinations-20260829.csv. Sorted by Category, follower min/max, GMV. 190 combinations are included.
+Category | Followers | GMV | Pages | Attempts | Rows | New | Duplicates | Duplicate % | Unique % | New/Page | First Run WIB | Last Run WIB
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Peralatan Dapur → Peralatan Teh & Kopi | 2,500–2,624 | G1 Low | 20 | 505 | 400 | 363 | 37 | 9.25% | 90.75% | 18.1500 | 26/08/2026 12:46:48 WIB | 26/08/2026 13:29:58 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,500–2,624 | G2 Medium | 17 | 287 | 337 | 47 | 290 | 86.05% | 13.95% | 2.7647 | 26/08/2026 14:15:33 WIB | 26/08/2026 14:43:11 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,500–2,624 | G3 High | 5 | 5 | 100 | 3 | 97 | 97.00% | 3.00% | 0.6000 | 26/08/2026 13:30:26 WIB | 26/08/2026 13:32:21 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,500–2,624 | G4 Very High | 1 | 6 | 4 | 0 | 4 | 100.00% | 0.00% | 0.0000 | 26/08/2026 14:49:19 WIB | 26/08/2026 14:49:19 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,625–2,749 | G1 Low | 20 | 434 | 400 | 350 | 50 | 12.50% | 87.50% | 17.5000 | 26/08/2026 15:31:31 WIB | 26/08/2026 16:11:17 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,625–2,749 | G2 Medium | 16 | 342 | 302 | 37 | 265 | 87.75% | 12.25% | 2.3125 | 26/08/2026 17:53:07 WIB | 26/08/2026 18:35:54 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,625–2,749 | G3 High | 6 | 187 | 120 | 2 | 118 | 98.33% | 1.67% | 0.3333 | 26/08/2026 16:12:19 WIB | 26/08/2026 16:27:07 WIB
+Peralatan Dapur → Peralatan Teh & Kopi | 2,625–2,749 | G4 Very High | 1 | 17 | 2 | 0 | 2 | 100.00% | 0.00% | 0.0000 | 26/08/2026 19:12:02 WIB | 26/08/2026 19:12:02 WIB
+Perlengkapan Rumah → Home Organizer | 600–799 | G1 Low | 21 | 419 | 401 | 400 | 1 | 0.25% | 99.75% | 19.0476 | 26/08/2026 13:35:00 WIB | 26/08/2026 14:14:39 WIB
+Perlengkapan Rumah → Home Organizer | 600–799 | G2 Medium | 20 | 189 | 399 | 354 | 45 | 11.28% | 88.72% | 17.7000 | 26/08/2026 15:02:37 WIB | 26/08/2026 15:24:55 WIB
+Perlengkapan Rumah → Home Organizer | 600–799 | G3 High | 20 | 348 | 400 | 44 | 356 | 89.00% | 11.00% | 2.2000 | 26/08/2026 16:31:12 WIB | 26/08/2026 17:12:20 WIB
+Perlengkapan Rumah → Home Organizer | 600–799 | G4 Very High | 1 | 2 | 6 | 0 | 6 | 100.00% | 0.00% | 0.0000 | 26/08/2026 19:47:12 WIB | 26/08/2026 19:47:12 WIB
+Perlengkapan Rumah → Home Organizer | 800–999 | G1 Low | 21 | 130 | 403 | 399 | 4 | 0.99% | 99.01% | 19.0000 | 26/08/2026 19:50:44 WIB | 26/08/2026 20:17:44 WIB
+Perlengkapan Rumah → Home Organizer | 800–999 | G2 Medium | 20 | 75 | 399 | 364 | 35 | 8.77% | 91.23% | 18.2000 | 26/08/2026 20:19:07 WIB | 26/08/2026 20:40:02 WIB
+Perlengkapan Rumah → Home Organizer | 800–999 | G3 High | 20 | 65 | 400 | 21 | 379 | 94.75% | 5.25% | 1.0500 | 26/08/2026 20:40:56 WIB | 26/08/2026 21:01:08 WIB
+Perlengkapan Rumah → Home Organizer | 800–999 | G4 Very High | 1 | 11 | 17 | 1 | 16 | 94.12% | 5.88% | 1.0000 | 26/08/2026 21:02:49 WIB | 26/08/2026 21:02:49 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,124 | G1 Low | 21 | 65 | 402 | 179 | 223 | 55.47% | 44.53% | 8.5238 | 27/08/2026 00:45:39 WIB | 27/08/2026 00:59:07 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,124 | G2 Medium | 20 | 71 | 399 | 93 | 306 | 76.69% | 23.31% | 4.6500 | 27/08/2026 03:13:12 WIB | 27/08/2026 03:36:46 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,249 | G1 Low | 21 | 72 | 404 | 108 | 296 | 73.27% | 26.73% | 5.1429 | 26/08/2026 22:35:43 WIB | 26/08/2026 23:22:44 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,249 | G2 Medium | 20 | 123 | 400 | 79 | 321 | 80.25% | 19.75% | 3.9500 | 27/08/2026 00:59:51 WIB | 27/08/2026 01:19:54 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,249 | G3 High | 20 | 150 | 400 | 27 | 373 | 93.25% | 6.75% | 1.3500 | 27/08/2026 04:42:59 WIB | 27/08/2026 05:02:08 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,499 | G1 Low | 21 | 94 | 405 | 292 | 113 | 27.90% | 72.10% | 13.9048 | 26/08/2026 21:03:53 WIB | 26/08/2026 21:40:10 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,499 | G2 Medium | 20 | 223 | 400 | 179 | 221 | 55.25% | 44.75% | 8.9500 | 26/08/2026 23:24:29 WIB | 27/08/2026 00:00:35 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,499 | G3 High | 20 | 157 | 400 | 22 | 378 | 94.50% | 5.50% | 1.1000 | 27/08/2026 02:11:59 WIB | 27/08/2026 02:34:23 WIB
+Perlengkapan Rumah → Home Organizer | 1,000–1,499 | G4 Very High | 3 | 7 | 44 | 1 | 43 | 97.73% | 2.27% | 0.3333 | 27/08/2026 05:02:43 WIB | 27/08/2026 05:03:55 WIB
+Perlengkapan Rumah → Home Organizer | 1,125–1,249 | G1 Low | 21 | 269 | 403 | 212 | 191 | 47.39% | 52.61% | 10.0952 | 27/08/2026 01:25:45 WIB | 27/08/2026 01:51:54 WIB
+Perlengkapan Rumah → Home Organizer | 1,125–1,249 | G2 Medium | 20 | 326 | 400 | 102 | 298 | 74.50% | 25.50% | 5.1000 | 27/08/2026 04:14:28 WIB | 27/08/2026 04:42:30 WIB
+Perlengkapan Rumah → Home Organizer | 1,250–1,374 | G1 Low | 21 | 201 | 401 | 135 | 266 | 66.33% | 33.67% | 6.4286 | 27/08/2026 00:01:20 WIB | 27/08/2026 00:28:27 WIB
+Perlengkapan Rumah → Home Organizer | 1,250–1,374 | G2 Medium | 20 | 117 | 400 | 63 | 337 | 84.25% | 15.75% | 3.1500 | 27/08/2026 02:34:53 WIB | 27/08/2026 02:51:14 WIB
+Perlengkapan Rumah → Home Organizer | 1,250–1,499 | G1 Low | 21 | 107 | 401 | 168 | 233 | 58.10% | 41.90% | 8.0000 | 26/08/2026 21:47:28 WIB | 26/08/2026 22:34:03 WIB
+Perlengkapan Rumah → Home Organizer | 1,250–1,499 | G2 Medium | 20 | 150 | 400 | 94 | 306 | 76.50% | 23.50% | 4.7000 | 27/08/2026 01:52:29 WIB | 27/08/2026 02:11:17 WIB
+Perlengkapan Rumah → Home Organizer | 1,250–1,499 | G3 High | 20 | 152 | 400 | 28 | 372 | 93.00% | 7.00% | 1.4000 | 27/08/2026 03:37:23 WIB | 27/08/2026 03:59:57 WIB
+Perlengkapan Rumah → Home Organizer | 1,375–1,499 | G1 Low | 20 | 105 | 400 | 157 | 243 | 60.75% | 39.25% | 7.8500 | 27/08/2026 00:29:00 WIB | 27/08/2026 00:44:58 WIB
+Perlengkapan Rumah → Home Organizer | 1,375–1,499 | G2 Medium | 20 | 86 | 400 | 91 | 309 | 77.25% | 22.75% | 4.5500 | 27/08/2026 02:51:45 WIB | 27/08/2026 03:12:41 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,624 | G1 Low | 20 | 99 | 399 | 124 | 275 | 68.92% | 31.08% | 6.2000 | 27/08/2026 06:57:34 WIB | 27/08/2026 07:13:52 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,749 | G1 Low | 20 | 320 | 400 | 107 | 293 | 73.25% | 26.75% | 5.3500 | 27/08/2026 05:37:10 WIB | 27/08/2026 06:07:59 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,749 | G2 Medium | 20 | 194 | 400 | 37 | 363 | 90.75% | 9.25% | 1.8500 | 27/08/2026 08:04:28 WIB | 27/08/2026 08:25:57 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,749 | G3 High | 20 | 420 | 400 | 27 | 373 | 93.25% | 6.75% | 1.3500 | 27/08/2026 11:35:24 WIB | 27/08/2026 12:12:53 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,999 | G1 Low | 21 | 313 | 401 | 322 | 79 | 19.70% | 80.30% | 15.3333 | 27/08/2026 05:04:39 WIB | 27/08/2026 05:36:20 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,999 | G2 Medium | 20 | 133 | 400 | 241 | 159 | 39.75% | 60.25% | 12.0500 | 27/08/2026 07:14:26 WIB | 27/08/2026 07:34:23 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,999 | G3 High | 20 | 379 | 400 | 32 | 368 | 92.00% | 8.00% | 1.6000 | 27/08/2026 10:47:32 WIB | 27/08/2026 11:21:22 WIB
+Perlengkapan Rumah → Home Organizer | 1,500–1,999 | G4 Very High | 3 | 178 | 51 | 1 | 50 | 98.04% | 1.96% | 0.3333 | 27/08/2026 11:22:23 WIB | 27/08/2026 11:34:38 WIB
+Perlengkapan Rumah → Home Organizer | 1,625–1,749 | G1 Low | 20 | 277 | 400 | 143 | 257 | 64.25% | 35.75% | 7.1500 | 27/08/2026 07:35:04 WIB | 27/08/2026 08:02:36 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,874 | G1 Low | 21 | 82 | 401 | 192 | 209 | 52.12% | 47.88% | 9.1429 | 27/08/2026 06:27:45 WIB | 27/08/2026 06:42:14 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,874 | G2 Medium | 20 | 563 | 400 | 175 | 225 | 56.25% | 43.75% | 8.7500 | 27/08/2026 09:17:58 WIB | 27/08/2026 10:05:59 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,874 | G3 High | 20 | 298 | 400 | 152 | 248 | 62.00% | 38.00% | 7.6000 | 27/08/2026 12:46:13 WIB | 27/08/2026 13:16:25 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,999 | G1 Low | 21 | 123 | 401 | 216 | 185 | 46.13% | 53.87% | 10.2857 | 27/08/2026 06:08:31 WIB | 27/08/2026 06:27:13 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,999 | G2 Medium | 20 | 598 | 400 | 212 | 188 | 47.00% | 53.00% | 10.6000 | 27/08/2026 08:27:31 WIB | 27/08/2026 09:17:25 WIB
+Perlengkapan Rumah → Home Organizer | 1,750–1,999 | G3 High | 20 | 340 | 400 | 42 | 358 | 89.50% | 10.50% | 2.1000 | 27/08/2026 12:14:12 WIB | 27/08/2026 12:45:38 WIB
+Perlengkapan Rumah → Home Organizer | 1,875–1,999 | G1 Low | 20 | 81 | 400 | 207 | 193 | 48.25% | 51.75% | 10.3500 | 27/08/2026 06:42:58 WIB | 27/08/2026 06:57:01 WIB
+Perlengkapan Rumah → Home Organizer | 1,875–1,999 | G2 Medium | 20 | 453 | 400 | 214 | 186 | 46.50% | 53.50% | 10.7000 | 27/08/2026 10:06:36 WIB | 27/08/2026 10:46:18 WIB
+Perlengkapan Rumah → Home Organizer | 1,875–1,999 | G3 High | 19 | 393 | 373 | 164 | 209 | 56.03% | 43.97% | 8.6316 | 27/08/2026 13:17:19 WIB | 27/08/2026 14:22:09 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,124 | G1 Low | 21 | 172 | 401 | 117 | 284 | 70.82% | 29.18% | 5.5714 | 28/08/2026 04:17:54 WIB | 28/08/2026 04:39:48 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,249 | G1 Low | 21 | 331 | 402 | 142 | 260 | 64.68% | 35.32% | 6.7619 | 28/08/2026 03:18:57 WIB | 28/08/2026 03:51:06 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,499 | G1 Low | 21 | 202 | 401 | 75 | 326 | 81.30% | 18.70% | 3.5714 | 27/08/2026 16:46:09 WIB | 27/08/2026 17:21:47 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,499 | G2 Medium | 20 | 117 | 400 | 28 | 372 | 93.00% | 7.00% | 1.4000 | 27/08/2026 19:14:33 WIB | 27/08/2026 19:44:03 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,499 | G3 High | 20 | 319 | 399 | 27 | 372 | 93.23% | 6.77% | 1.3500 | 28/08/2026 07:02:37 WIB | 28/08/2026 07:32:18 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,999 | G1 Low | 21 | 201 | 402 | 240 | 162 | 40.30% | 59.70% | 11.4286 | 27/08/2026 14:23:17 WIB | 27/08/2026 14:52:37 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,999 | G2 Medium | 20 | 196 | 400 | 55 | 345 | 86.25% | 13.75% | 2.7500 | 27/08/2026 16:04:55 WIB | 27/08/2026 16:40:25 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,999 | G3 High | 20 | 229 | 399 | 20 | 379 | 94.99% | 5.01% | 1.0000 | 28/08/2026 02:53:02 WIB | 28/08/2026 03:18:22 WIB
+Perlengkapan Rumah → Home Organizer | 2,000–2,999 | G4 Very High | 6 | 187 | 106 | 1 | 105 | 99.06% | 0.94% | 0.1667 | 28/08/2026 05:57:13 WIB | 28/08/2026 06:01:43 WIB
+Perlengkapan Rumah → Home Organizer | 2,125–2,249 | G1 Low | 21 | 118 | 401 | 116 | 285 | 71.07% | 28.93% | 5.5238 | 28/08/2026 04:51:23 WIB | 28/08/2026 05:11:21 WIB
+Perlengkapan Rumah → Home Organizer | 2,250–2,374 | G1 Low | 20 | 362 | 400 | 99 | 301 | 75.25% | 24.75% | 4.9500 | 28/08/2026 05:12:13 WIB | 28/08/2026 05:46:23 WIB
+Perlengkapan Rumah → Home Organizer | 2,250–2,499 | G1 Low | 20 | 228 | 400 | 126 | 274 | 68.50% | 31.50% | 6.3000 | 28/08/2026 03:52:55 WIB | 28/08/2026 04:17:20 WIB
+Perlengkapan Rumah → Home Organizer | 2,375–2,499 | G1 Low | 20 | 197 | 400 | 111 | 289 | 72.25% | 27.75% | 5.5500 | 28/08/2026 06:02:23 WIB | 28/08/2026 06:25:04 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,624 | G1 Low | 20 | 157 | 400 | 114 | 286 | 71.50% | 28.50% | 5.7000 | 28/08/2026 06:31:13 WIB | 28/08/2026 06:45:47 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,749 | G1 Low | 20 | 271 | 400 | 58 | 342 | 85.50% | 14.50% | 2.9000 | 27/08/2026 17:26:30 WIB | 27/08/2026 18:17:23 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,749 | G2 Medium | 20 | 380 | 400 | 37 | 363 | 90.75% | 9.25% | 1.8500 | 28/08/2026 09:08:04 WIB | 28/08/2026 09:43:18 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,999 | G1 Low | 21 | 463 | 401 | 85 | 316 | 78.80% | 21.20% | 4.0476 | 27/08/2026 14:53:07 WIB | 27/08/2026 16:03:54 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,999 | G2 Medium | 20 | 272 | 400 | 62 | 338 | 84.50% | 15.50% | 3.1000 | 28/08/2026 07:32:59 WIB | 28/08/2026 08:00:26 WIB
+Perlengkapan Rumah → Home Organizer | 2,500–2,999 | G3 High | 20 | 21 | 400 | 21 | 379 | 94.75% | 5.25% | 1.0500 | 28/08/2026 04:40:26 WIB | 28/08/2026 04:50:40 WIB
+Perlengkapan Rumah → Home Organizer | 2,625–2,749 | G1 Low | 21 | 82 | 401 | 115 | 286 | 71.32% | 28.68% | 5.4762 | 28/08/2026 06:46:21 WIB | 28/08/2026 07:02:03 WIB
+Perlengkapan Rumah → Home Organizer | 2,750–2,874 | G1 Low | 21 | 159 | 401 | 91 | 310 | 77.31% | 22.69% | 4.3333 | 27/08/2026 19:45:30 WIB | 27/08/2026 20:24:50 WIB
+Perlengkapan Rumah → Home Organizer | 2,750–2,999 | G1 Low | 21 | 160 | 401 | 74 | 327 | 81.55% | 18.45% | 3.5238 | 27/08/2026 18:24:01 WIB | 27/08/2026 19:13:03 WIB
+Perlengkapan Rumah → Home Organizer | 2,750–2,999 | G2 Medium | 20 | 347 | 400 | 32 | 368 | 92.00% | 8.00% | 1.6000 | 28/08/2026 08:01:30 WIB | 28/08/2026 08:34:48 WIB
+Perlengkapan Rumah → Home Organizer | 2,875–2,999 | G1 Low | 20 | 96 | 400 | 83 | 317 | 79.25% | 20.75% | 4.1500 | 27/08/2026 20:26:30 WIB | 27/08/2026 21:26:44 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,124 | G1 Low | 20 | 178 | 400 | 184 | 216 | 54.00% | 46.00% | 9.2000 | 28/08/2026 13:23:31 WIB | 28/08/2026 13:45:00 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,124 | G2 Medium | 20 | 70 | 400 | 197 | 203 | 50.75% | 49.25% | 9.8500 | 28/08/2026 18:29:11 WIB | 28/08/2026 18:37:41 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,124 | G3 High | 12 | 95 | 233 | 17 | 216 | 92.70% | 7.30% | 1.4167 | 29/08/2026 00:05:25 WIB | 29/08/2026 00:14:13 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,249 | G1 Low | 20 | 126 | 400 | 170 | 230 | 57.50% | 42.50% | 8.5000 | 28/08/2026 11:08:13 WIB | 28/08/2026 11:32:41 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,249 | G2 Medium | 20 | 161 | 400 | 195 | 205 | 51.25% | 48.75% | 9.7500 | 28/08/2026 17:21:48 WIB | 28/08/2026 17:36:28 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,249 | G3 High | 20 | 107 | 400 | 152 | 248 | 62.00% | 38.00% | 7.6000 | 28/08/2026 23:27:56 WIB | 28/08/2026 23:40:21 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,499 | G1 Low | 20 | 199 | 400 | 190 | 210 | 52.50% | 47.50% | 9.5000 | 28/08/2026 10:32:04 WIB | 28/08/2026 11:07:22 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,499 | G2 Medium | 20 | 296 | 400 | 172 | 228 | 57.00% | 43.00% | 8.6000 | 28/08/2026 14:14:31 WIB | 28/08/2026 14:44:24 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,499 | G3 High | 20 | 114 | 400 | 55 | 345 | 86.25% | 13.75% | 2.7500 | 28/08/2026 18:38:00 WIB | 28/08/2026 18:49:27 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,999 | G1 Low | 21 | 309 | 401 | 267 | 134 | 33.42% | 66.58% | 12.7143 | 28/08/2026 08:35:43 WIB | 28/08/2026 09:07:30 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,999 | G2 Medium | 20 | 234 | 400 | 243 | 157 | 39.25% | 60.75% | 12.1500 | 28/08/2026 12:33:57 WIB | 28/08/2026 12:58:31 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,999 | G3 High | 20 | 80 | 400 | 37 | 363 | 90.75% | 9.25% | 1.8500 | 28/08/2026 16:32:45 WIB | 28/08/2026 16:42:50 WIB
+Perlengkapan Rumah → Home Organizer | 3,000–3,999 | G4 Very High | 5 | 10 | 98 | 0 | 98 | 100.00% | 0.00% | 0.0000 | 28/08/2026 17:50:47 WIB | 28/08/2026 17:51:55 WIB
+Perlengkapan Rumah → Home Organizer | 3,125–3,249 | G1 Low | 20 | 274 | 400 | 213 | 187 | 46.75% | 53.25% | 10.6500 | 28/08/2026 13:50:42 WIB | 28/08/2026 14:13:49 WIB
+Perlengkapan Rumah → Home Organizer | 3,125–3,249 | G2 Medium | 20 | 23 | 400 | 195 | 205 | 51.25% | 48.75% | 9.7500 | 28/08/2026 18:49:43 WIB | 28/08/2026 18:54:58 WIB
+Perlengkapan Rumah → Home Organizer | 3,125–3,249 | G3 High | 10 | 51 | 198 | 6 | 192 | 96.97% | 3.03% | 0.6000 | 29/08/2026 00:14:30 WIB | 29/08/2026 00:19:37 WIB
+Perlengkapan Rumah → Home Organizer | 3,250–3,374 | G1 Low | 20 | 322 | 400 | 180 | 220 | 55.00% | 45.00% | 9.0000 | 28/08/2026 11:57:49 WIB | 28/08/2026 12:32:20 WIB
+Perlengkapan Rumah → Home Organizer | 3,250–3,374 | G2 Medium | 20 | 279 | 400 | 205 | 195 | 48.75% | 51.25% | 10.2500 | 28/08/2026 17:52:12 WIB | 28/08/2026 18:15:24 WIB
+Perlengkapan Rumah → Home Organizer | 3,250–3,499 | G1 Low | 20 | 145 | 400 | 215 | 185 | 46.25% | 53.75% | 10.7500 | 28/08/2026 11:34:02 WIB | 28/08/2026 11:56:20 WIB
+Perlengkapan Rumah → Home Organizer | 3,250–3,499 | G2 Medium | 20 | 119 | 400 | 200 | 200 | 50.00% | 50.00% | 10.0000 | 28/08/2026 17:36:45 WIB | 28/08/2026 17:50:36 WIB
+Perlengkapan Rumah → Home Organizer | 3,250–3,499 | G3 High | 18 | 108 | 350 | 154 | 196 | 56.00% | 44.00% | 8.5556 | 28/08/2026 23:53:24 WIB | 29/08/2026 00:05:04 WIB
+Perlengkapan Rumah → Home Organizer | 3,375–3,499 | G1 Low | 20 | 209 | 400 | 219 | 181 | 45.25% | 54.75% | 10.9500 | 28/08/2026 12:59:15 WIB | 28/08/2026 13:22:30 WIB
+Perlengkapan Rumah → Home Organizer | 3,375–3,499 | G2 Medium | 20 | 141 | 400 | 187 | 213 | 53.25% | 46.75% | 9.3500 | 28/08/2026 18:15:43 WIB | 28/08/2026 18:28:57 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,624 | G1 Low | 21 | 56 | 401 | 96 | 305 | 76.06% | 23.94% | 4.5714 | 28/08/2026 16:59:11 WIB | 28/08/2026 17:10:10 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,624 | G2 Medium | 18 | 20 | 360 | 53 | 307 | 85.28% | 14.72% | 2.9444 | 28/08/2026 20:27:51 WIB | 28/08/2026 20:33:07 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,749 | G1 Low | 21 | 267 | 401 | 64 | 337 | 84.04% | 15.96% | 3.0476 | 28/08/2026 14:46:38 WIB | 28/08/2026 16:16:28 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,749 | G2 Medium | 20 | 106 | 400 | 42 | 358 | 89.50% | 10.50% | 2.1000 | 28/08/2026 19:18:21 WIB | 28/08/2026 19:29:08 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,999 | G1 Low | 21 | 523 | 401 | 64 | 337 | 84.04% | 15.96% | 3.0476 | 28/08/2026 09:44:05 WIB | 28/08/2026 10:30:21 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,999 | G2 Medium | 20 | 77 | 400 | 54 | 346 | 86.50% | 13.50% | 2.7000 | 28/08/2026 17:10:34 WIB | 28/08/2026 17:21:17 WIB
+Perlengkapan Rumah → Home Organizer | 3,500–3,999 | G3 High | 20 | 45 | 400 | 39 | 361 | 90.25% | 9.75% | 1.9500 | 28/08/2026 23:10:49 WIB | 28/08/2026 23:18:46 WIB
+Perlengkapan Rumah → Home Organizer | 3,625–3,749 | G1 Low | 20 | 79 | 400 | 107 | 293 | 73.25% | 26.75% | 5.3500 | 28/08/2026 18:55:18 WIB | 28/08/2026 19:06:21 WIB
+Perlengkapan Rumah → Home Organizer | 3,625–3,749 | G2 Medium | 19 | 44 | 362 | 42 | 320 | 88.40% | 11.60% | 2.2105 | 28/08/2026 20:42:23 WIB | 28/08/2026 20:49:00 WIB
+Perlengkapan Rumah → Home Organizer | 3,750–3,874 | G1 Low | 5 | 15 | 80 | 27 | 53 | 66.25% | 33.75% | 5.4000 | 28/08/2026 16:43:25 WIB | 28/08/2026 16:46:59 WIB
+Perlengkapan Rumah → Home Organizer | 3,750–3,874 | G2 Medium | 16 | 162 | 319 | 33 | 286 | 89.66% | 10.34% | 2.0625 | 28/08/2026 19:48:59 WIB | 28/08/2026 20:02:53 WIB
+Perlengkapan Rumah → Home Organizer | 3,750–3,999 | G1 Low | 20 | 146 | 400 | 71 | 329 | 82.25% | 17.75% | 3.5500 | 28/08/2026 16:20:58 WIB | 28/08/2026 16:32:22 WIB
+Perlengkapan Rumah → Home Organizer | 3,750–3,999 | G2 Medium | 20 | 216 | 400 | 59 | 341 | 85.25% | 14.75% | 2.9500 | 28/08/2026 19:29:33 WIB | 28/08/2026 19:48:19 WIB
+Perlengkapan Rumah → Home Organizer | 3,875–3,999 | G1 Low | 20 | 85 | 400 | 96 | 304 | 76.00% | 24.00% | 4.8000 | 28/08/2026 16:47:45 WIB | 28/08/2026 16:58:53 WIB
+Perlengkapan Rumah → Home Organizer | 3,875–3,999 | G2 Medium | 16 | 137 | 310 | 34 | 276 | 89.03% | 10.97% | 2.1250 | 28/08/2026 20:15:21 WIB | 28/08/2026 20:27:34 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,124 | G1 Low | 20 | 58 | 400 | 196 | 204 | 51.00% | 49.00% | 9.8000 | 28/08/2026 22:14:04 WIB | 28/08/2026 22:23:00 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,124 | G2 Medium | 15 | 25 | 290 | 89 | 201 | 69.31% | 30.69% | 5.9333 | 28/08/2026 23:04:34 WIB | 28/08/2026 23:09:48 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,249 | G1 Low | 20 | 86 | 400 | 172 | 228 | 57.00% | 43.00% | 8.6000 | 28/08/2026 20:55:56 WIB | 28/08/2026 21:05:56 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,249 | G2 Medium | 20 | 34 | 400 | 182 | 218 | 54.50% | 45.50% | 9.1000 | 28/08/2026 22:37:50 WIB | 28/08/2026 22:45:09 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,499 | G1 Low | 20 | 34 | 400 | 174 | 226 | 56.50% | 43.50% | 8.7000 | 28/08/2026 20:49:22 WIB | 28/08/2026 20:55:39 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,499 | G2 Medium | 20 | 52 | 400 | 168 | 232 | 58.00% | 42.00% | 8.4000 | 28/08/2026 21:06:13 WIB | 28/08/2026 21:14:04 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,499 | G3 High | 20 | 85 | 400 | 67 | 333 | 83.25% | 16.75% | 3.3500 | 29/08/2026 06:16:46 WIB | 29/08/2026 06:35:01 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,999 | G1 Low | 20 | 94 | 400 | 278 | 122 | 30.50% | 69.50% | 13.9000 | 28/08/2026 19:07:09 WIB | 28/08/2026 19:18:03 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,999 | G2 Medium | 20 | 67 | 400 | 238 | 162 | 40.50% | 59.50% | 11.9000 | 28/08/2026 20:33:23 WIB | 28/08/2026 20:42:08 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,999 | G3 High | 20 | 61 | 400 | 32 | 368 | 92.00% | 8.00% | 1.6000 | 28/08/2026 21:41:30 WIB | 28/08/2026 21:57:29 WIB
+Perlengkapan Rumah → Home Organizer | 4,000–4,999 | G4 Very High | 4 | 4 | 80 | 0 | 80 | 100.00% | 0.00% | 0.0000 | 28/08/2026 22:53:16 WIB | 28/08/2026 22:53:52 WIB
+Perlengkapan Rumah → Home Organizer | 4,125–4,249 | G1 Low | 20 | 25 | 400 | 202 | 198 | 49.50% | 50.50% | 10.1000 | 28/08/2026 22:23:18 WIB | 28/08/2026 22:30:03 WIB
+Perlengkapan Rumah → Home Organizer | 4,125–4,249 | G2 Medium | 16 | 57 | 309 | 104 | 205 | 66.34% | 33.66% | 6.5000 | 28/08/2026 23:19:15 WIB | 28/08/2026 23:26:59 WIB
+Perlengkapan Rumah → Home Organizer | 4,250–4,374 | G1 Low | 20 | 81 | 400 | 201 | 199 | 49.75% | 50.25% | 10.0500 | 28/08/2026 21:27:27 WIB | 28/08/2026 21:41:03 WIB
+Perlengkapan Rumah → Home Organizer | 4,250–4,374 | G2 Medium | 13 | 15 | 252 | 41 | 211 | 83.73% | 16.27% | 3.1538 | 28/08/2026 22:54:26 WIB | 28/08/2026 22:58:20 WIB
+Perlengkapan Rumah → Home Organizer | 4,250–4,499 | G1 Low | 20 | 118 | 400 | 216 | 184 | 46.00% | 54.00% | 10.8000 | 28/08/2026 21:14:26 WIB | 28/08/2026 21:27:11 WIB
+Perlengkapan Rumah → Home Organizer | 4,250–4,499 | G2 Medium | 20 | 34 | 400 | 213 | 187 | 46.75% | 53.25% | 10.6500 | 28/08/2026 22:45:27 WIB | 28/08/2026 22:53:05 WIB
+Perlengkapan Rumah → Home Organizer | 4,375–4,499 | G1 Low | 20 | 65 | 400 | 191 | 209 | 52.25% | 47.75% | 9.5500 | 28/08/2026 21:58:18 WIB | 28/08/2026 22:13:48 WIB
+Perlengkapan Rumah → Home Organizer | 4,375–4,499 | G2 Medium | 12 | 34 | 235 | 44 | 191 | 81.28% | 18.72% | 3.6667 | 28/08/2026 22:58:39 WIB | 28/08/2026 23:04:02 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,624 | G1 Low | 20 | 123 | 399 | 89 | 310 | 77.69% | 22.31% | 4.4500 | 29/08/2026 01:03:01 WIB | 29/08/2026 01:15:01 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,624 | G2 Medium | 12 | 132 | 226 | 4 | 222 | 98.23% | 1.77% | 0.3333 | 29/08/2026 03:13:44 WIB | 29/08/2026 03:24:00 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,749 | G1 Low | 20 | 53 | 399 | 91 | 308 | 77.19% | 22.81% | 4.5500 | 29/08/2026 00:30:23 WIB | 29/08/2026 00:38:02 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,749 | G2 Medium | 20 | 115 | 400 | 79 | 321 | 80.25% | 19.75% | 3.9500 | 29/08/2026 02:32:08 WIB | 29/08/2026 02:43:48 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,999 | G1 Low | 20 | 115 | 400 | 66 | 334 | 83.50% | 16.50% | 3.3000 | 28/08/2026 20:04:01 WIB | 28/08/2026 20:14:45 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,999 | G2 Medium | 20 | 24 | 400 | 54 | 346 | 86.50% | 13.50% | 2.7000 | 28/08/2026 22:30:21 WIB | 28/08/2026 22:37:16 WIB
+Perlengkapan Rumah → Home Organizer | 4,500–4,999 | G3 High | 20 | 256 | 400 | 53 | 347 | 86.75% | 13.25% | 2.6500 | 29/08/2026 08:22:35 WIB | 29/08/2026 08:40:28 WIB
+Perlengkapan Rumah → Home Organizer | 4,625–4,749 | G1 Low | 20 | 177 | 400 | 118 | 282 | 70.50% | 29.50% | 5.9000 | 29/08/2026 01:15:21 WIB | 29/08/2026 01:31:31 WIB
+Perlengkapan Rumah → Home Organizer | 4,625–4,749 | G2 Medium | 12 | 84 | 225 | 8 | 217 | 96.44% | 3.56% | 0.6667 | 29/08/2026 03:24:16 WIB | 29/08/2026 03:35:48 WIB
+Perlengkapan Rumah → Home Organizer | 4,750–4,874 | G1 Low | 20 | 436 | 400 | 107 | 293 | 73.25% | 26.75% | 5.3500 | 29/08/2026 01:31:50 WIB | 29/08/2026 02:05:08 WIB
+Perlengkapan Rumah → Home Organizer | 4,750–4,999 | G1 Low | 20 | 135 | 400 | 74 | 326 | 81.50% | 18.50% | 3.7000 | 29/08/2026 00:38:19 WIB | 29/08/2026 00:51:29 WIB
+Perlengkapan Rumah → Home Organizer | 4,750–4,999 | G2 Medium | 20 | 181 | 396 | 75 | 321 | 81.06% | 18.94% | 3.7500 | 29/08/2026 02:56:41 WIB | 29/08/2026 03:13:06 WIB
+Perlengkapan Rumah → Home Organizer | 4,875–4,999 | G1 Low | 20 | 168 | 400 | 119 | 281 | 70.25% | 29.75% | 5.9500 | 29/08/2026 02:16:03 WIB | 29/08/2026 02:31:48 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–5,312 | G1 Low | 20 | 194 | 400 | 167 | 233 | 58.25% | 41.75% | 8.3500 | 29/08/2026 07:57:57 WIB | 29/08/2026 08:16:54 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–5,624 | G1 Low | 20 | 49 | 400 | 216 | 184 | 46.00% | 54.00% | 10.8000 | 29/08/2026 06:35:29 WIB | 29/08/2026 06:46:05 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–6,249 | G1 Low | 20 | 83 | 400 | 187 | 213 | 53.25% | 46.75% | 9.3500 | 29/08/2026 00:20:03 WIB | 29/08/2026 00:29:46 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–6,249 | G2 Medium | 20 | 93 | 400 | 165 | 235 | 58.75% | 41.25% | 8.2500 | 29/08/2026 02:05:24 WIB | 29/08/2026 02:15:45 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–7,499 | G1 Low | 21 | 98 | 401 | 391 | 10 | 2.49% | 97.51% | 18.6190 | 28/08/2026 23:41:02 WIB | 28/08/2026 23:52:52 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–7,499 | G2 Medium | 20 | 107 | 400 | 370 | 30 | 7.50% | 92.50% | 18.5000 | 29/08/2026 00:51:46 WIB | 29/08/2026 01:02:44 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–7,499 | G3 High | 20 | 121 | 400 | 31 | 369 | 92.25% | 7.75% | 1.5500 | 29/08/2026 02:44:07 WIB | 29/08/2026 02:56:21 WIB
+Perlengkapan Rumah → Home Organizer | 5,000–7,499 | G4 Very High | 10 | 29 | 187 | 0 | 187 | 100.00% | 0.00% | 0.0000 | 29/08/2026 04:23:37 WIB | 29/08/2026 04:29:31 WIB
+Perlengkapan Rumah → Home Organizer | 5,313–5,468 | G1 Low | 20 | 210 | 400 | 201 | 199 | 49.75% | 50.25% | 10.0500 | 29/08/2026 09:57:43 WIB | 29/08/2026 10:18:47 WIB
+Perlengkapan Rumah → Home Organizer | 5,313–5,624 | G1 Low | 20 | 92 | 400 | 225 | 175 | 43.75% | 56.25% | 11.2500 | 29/08/2026 08:40:50 WIB | 29/08/2026 08:52:50 WIB
+Perlengkapan Rumah → Home Organizer | 5,469–5,624 | G1 Low | 20 | 137 | 400 | 199 | 201 | 50.25% | 49.75% | 9.9500 | 29/08/2026 10:19:10 WIB | 29/08/2026 10:35:41 WIB
+Perlengkapan Rumah → Home Organizer | 5,625–5,937 | G1 Low | 20 | 120 | 400 | 200 | 200 | 50.00% | 50.00% | 10.0000 | 29/08/2026 07:20:09 WIB | 29/08/2026 07:38:49 WIB
+Perlengkapan Rumah → Home Organizer | 5,625–6,249 | G1 Low | 20 | 39 | 400 | 263 | 137 | 34.25% | 65.75% | 13.1500 | 29/08/2026 06:46:27 WIB | 29/08/2026 06:58:16 WIB
+Perlengkapan Rumah → Home Organizer | 5,938–6,249 | G1 Low | 20 | 183 | 400 | 200 | 200 | 50.00% | 50.00% | 10.0000 | 29/08/2026 07:39:10 WIB | 29/08/2026 07:57:29 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–6,562 | G1 Low | 20 | 84 | 399 | 197 | 202 | 50.63% | 49.37% | 9.8500 | 29/08/2026 08:53:10 WIB | 29/08/2026 09:04:29 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–6,562 | G2 Medium | 16 | 31 | 316 | 104 | 212 | 67.09% | 32.91% | 6.5000 | 29/08/2026 04:41:31 WIB | 29/08/2026 04:47:42 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–6,874 | G1 Low | 20 | 34 | 400 | 179 | 221 | 55.25% | 44.75% | 8.9500 | 29/08/2026 04:58:50 WIB | 29/08/2026 05:05:09 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–6,874 | G2 Medium | 20 | 157 | 400 | 176 | 224 | 56.00% | 44.00% | 8.8000 | 29/08/2026 03:59:56 WIB | 29/08/2026 04:14:48 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–7,499 | G1 Low | 20 | 88 | 400 | 262 | 138 | 34.50% | 65.50% | 13.1000 | 29/08/2026 04:48:07 WIB | 29/08/2026 04:58:33 WIB
+Perlengkapan Rumah → Home Organizer | 6,250–7,499 | G2 Medium | 20 | 137 | 400 | 240 | 160 | 40.00% | 60.00% | 12.0000 | 29/08/2026 03:37:38 WIB | 29/08/2026 03:57:44 WIB
+Perlengkapan Rumah → Home Organizer | 6,563–6,874 | G1 Low | 20 | 317 | 400 | 205 | 195 | 48.75% | 51.25% | 10.2500 | 29/08/2026 09:33:41 WIB | 29/08/2026 09:56:57 WIB
+Perlengkapan Rumah → Home Organizer | 6,563–6,874 | G2 Medium | 15 | 105 | 290 | 97 | 193 | 66.55% | 33.45% | 6.4667 | 29/08/2026 06:03:55 WIB | 29/08/2026 06:14:41 WIB
+Perlengkapan Rumah → Home Organizer | 6,875–7,187 | G1 Low | 20 | 78 | 400 | 189 | 211 | 52.75% | 47.25% | 9.4500 | 29/08/2026 05:35:25 WIB | 29/08/2026 05:45:09 WIB
+Perlengkapan Rumah → Home Organizer | 6,875–7,187 | G2 Medium | 13 | 26 | 256 | 51 | 205 | 80.08% | 19.92% | 3.9231 | 29/08/2026 04:29:47 WIB | 29/08/2026 04:35:18 WIB
+Perlengkapan Rumah → Home Organizer | 6,875–7,499 | G1 Low | 20 | 143 | 400 | 216 | 184 | 46.00% | 54.00% | 10.8000 | 29/08/2026 05:05:45 WIB | 29/08/2026 05:20:08 WIB
+Perlengkapan Rumah → Home Organizer | 6,875–7,499 | G2 Medium | 20 | 24 | 400 | 215 | 185 | 46.25% | 53.75% | 10.7500 | 29/08/2026 04:15:04 WIB | 29/08/2026 04:23:24 WIB
+Perlengkapan Rumah → Home Organizer | 7,188–7,499 | G1 Low | 20 | 96 | 400 | 208 | 192 | 48.00% | 52.00% | 10.4000 | 29/08/2026 05:46:51 WIB | 29/08/2026 06:03:35 WIB
+Perlengkapan Rumah → Home Organizer | 7,188–7,499 | G2 Medium | 12 | 48 | 228 | 29 | 199 | 87.28% | 12.72% | 2.4167 | 29/08/2026 04:35:50 WIB | 29/08/2026 04:41:14 WIB
+Perlengkapan Rumah → Home Organizer | 7,500–8,749 | G1 Low | 7 | 22 | 140 | 29 | 111 | 79.29% | 20.71% | 4.1429 | 29/08/2026 10:36:21 WIB | 29/08/2026 10:41:51 WIB
+Perlengkapan Rumah → Home Organizer | 7,500–9,999 | G1 Low | 20 | 85 | 400 | 123 | 277 | 69.25% | 30.75% | 6.1500 | 29/08/2026 05:21:13 WIB | 29/08/2026 05:33:08 WIB
+Perlengkapan Rumah → Home Organizer | 7,500–9,999 | G2 Medium | 20 | 224 | 400 | 80 | 320 | 80.00% | 20.00% | 4.0000 | 29/08/2026 06:58:53 WIB | 29/08/2026 07:19:41 WIB
+Perlengkapan Rumah → Home Organizer | 7,500–9,999 | G3 High | 20 | 213 | 400 | 20 | 380 | 95.00% | 5.00% | 1.0000 | 29/08/2026 09:04:56 WIB | 29/08/2026 09:25:00 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 7,500–7,656 | G1 Low | 20 | 137 | 400 | 276 | 124 | 31.00% | 69.00% | 13.8000 | 26/08/2026 19:13:32 WIB | 26/08/2026 19:46:36 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 7,500–7,656 | G2 Medium | 6 | 10 | 116 | 29 | 87 | 75.00% | 25.00% | 4.8333 | 26/08/2026 16:27:39 WIB | 26/08/2026 16:30:36 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 7,500–7,656 | G3 High | 3 | 167 | 58 | 7 | 51 | 87.93% | 12.07% | 2.3333 | 26/08/2026 14:58:33 WIB | 26/08/2026 15:02:07 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 7,500–7,656 | G4 Very High | 1 | 3 | 12 | 0 | 12 | 100.00% | 0.00% | 0.0000 | 26/08/2026 15:25:31 WIB | 26/08/2026 15:25:31 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,063–9,218 | G1 Low | 20 | 286 | 400 | 238 | 162 | 40.50% | 59.50% | 11.9000 | 26/08/2026 17:14:08 WIB | 26/08/2026 17:46:18 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,063–9,218 | G2 Medium | 5 | 7 | 91 | 15 | 76 | 83.52% | 16.48% | 3.0000 | 26/08/2026 15:26:05 WIB | 26/08/2026 15:28:31 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,063–9,218 | G3 High | 3 | 11 | 52 | 1 | 51 | 98.08% | 1.92% | 0.3333 | 26/08/2026 13:32:52 WIB | 26/08/2026 13:34:18 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,063–9,218 | G4 Very High | 1 | 1 | 10 | 0 | 10 | 100.00% | 0.00% | 0.0000 | 26/08/2026 14:15:03 WIB | 26/08/2026 14:15:03 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,219–9,374 | G1 Low | 20 | 94 | 400 | 242 | 158 | 39.50% | 60.50% | 12.1000 | 26/08/2026 18:39:48 WIB | 26/08/2026 19:10:00 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,219–9,374 | G2 Medium | 4 | 6 | 78 | 9 | 69 | 88.46% | 11.54% | 2.2500 | 26/08/2026 15:29:06 WIB | 26/08/2026 15:30:45 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,219–9,374 | G3 High | 3 | 48 | 52 | 5 | 47 | 90.38% | 9.62% | 1.6667 | 26/08/2026 14:46:47 WIB | 26/08/2026 14:47:50 WIB
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya | 9,219–9,374 | G4 Very High | 1 | 4 | 13 | 0 | 13 | 100.00% | 0.00% | 0.0000 | 26/08/2026 14:48:31 WIB | 26/08/2026 14:48:31 WIB
+
+Ranked exact-combination highlights (minimum 20 returned rows):
+Highest unique %:
+Category / Followers / GMV                                                Rows      New       Unique %   Dup %     New/Page 
+------------------------------------------------------------------------  --------  --------  ---------  --------  ---------
+Perlengkapan Rumah → Home Organizer / 600–799 / G1 Low                    401       400       99.8%      0.2%      19.05    
+Perlengkapan Rumah → Home Organizer / 800–999 / G1 Low                    403       399       99.0%      1.0%      19.00    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G1 Low                401       391       97.5%      2.5%      18.62    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G2 Medium             400       370       92.5%      7.5%      18.50    
+Perlengkapan Rumah → Home Organizer / 800–999 / G2 Medium                 399       364       91.2%      8.8%      18.20    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,500–2,624 / G1 Low             400       363       90.8%      9.3%      18.15    
+Perlengkapan Rumah → Home Organizer / 600–799 / G2 Medium                 399       354       88.7%      11.3%     17.70    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,625–2,749 / G1 Low             400       350       87.5%      12.5%     17.50    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G1 Low                401       322       80.3%      19.7%     15.33    
+Perlengkapan Rumah → Home Organizer / 1,000–1,499 / G1 Low                405       292       72.1%      27.9%     13.90    
+Perlengkapan Rumah → Home Organizer / 4,000–4,999 / G1 Low                400       278       69.5%      30.5%     13.90    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 7,500–7,656 / G1 Low    400       276       69.0%      31.0%     13.80    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G1 Low                401       267       66.6%      33.4%     12.71    
+Perlengkapan Rumah → Home Organizer / 5,625–6,249 / G1 Low                400       263       65.8%      34.3%     13.15    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G1 Low                400       262       65.5%      34.5%     13.10    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G2 Medium             400       243       60.8%      39.3%     12.15    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 9,219–9,374 / G1 Low    400       242       60.5%      39.5%     12.10    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G2 Medium             400       241       60.3%      39.8%     12.05    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G2 Medium             400       240       60.0%      40.0%     12.00    
+Perlengkapan Rumah → Home Organizer / 2,000–2,999 / G1 Low                402       240       59.7%      40.3%     11.43    
+Highest duplicate %:
+Category / Followers / GMV                                                Rows      New       Unique %   Dup %     New/Page 
+------------------------------------------------------------------------  --------  --------  ---------  --------  ---------
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G4 Very High          98        0         0.0%       100.0%    0.00     
+Perlengkapan Rumah → Home Organizer / 4,000–4,999 / G4 Very High          80        0         0.0%       100.0%    0.00     
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G4 Very High          187       0         0.0%       100.0%    0.00     
+Perlengkapan Rumah → Home Organizer / 2,000–2,999 / G4 Very High          106       1         0.9%       99.1%     0.17     
+Peralatan Dapur → Peralatan Teh & Kopi / 2,625–2,749 / G3 High            120       2         1.7%       98.3%     0.33     
+Perlengkapan Rumah → Home Organizer / 4,500–4,624 / G2 Medium             226       4         1.8%       98.2%     0.33     
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 9,063–9,218 / G3 High   52        1         1.9%       98.1%     0.33     
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G4 Very High          51        1         2.0%       98.0%     0.33     
+Perlengkapan Rumah → Home Organizer / 1,000–1,499 / G4 Very High          44        1         2.3%       97.7%     0.33     
+Peralatan Dapur → Peralatan Teh & Kopi / 2,500–2,624 / G3 High            100       3         3.0%       97.0%     0.60     
+Perlengkapan Rumah → Home Organizer / 3,125–3,249 / G3 High               198       6         3.0%       97.0%     0.60     
+Perlengkapan Rumah → Home Organizer / 4,625–4,749 / G2 Medium             225       8         3.6%       96.4%     0.67     
+Perlengkapan Rumah → Home Organizer / 7,500–9,999 / G3 High               400       20        5.0%       95.0%     1.00     
+Perlengkapan Rumah → Home Organizer / 2,000–2,999 / G3 High               399       20        5.0%       95.0%     1.00     
+Perlengkapan Rumah → Home Organizer / 800–999 / G3 High                   400       21        5.3%       94.8%     1.05     
+Perlengkapan Rumah → Home Organizer / 2,500–2,999 / G3 High               400       21        5.3%       94.8%     1.05     
+Perlengkapan Rumah → Home Organizer / 1,000–1,499 / G3 High               400       22        5.5%       94.5%     1.10     
+Perlengkapan Rumah → Home Organizer / 1,000–1,249 / G3 High               400       27        6.8%       93.3%     1.35     
+Perlengkapan Rumah → Home Organizer / 1,500–1,749 / G3 High               400       27        6.8%       93.3%     1.35     
+Perlengkapan Rumah → Home Organizer / 2,000–2,499 / G3 High               399       27        6.8%       93.2%     1.35     
+Highest new creators:
+Category / Followers / GMV                                                Rows      New       Unique %   Dup %     New/Page 
+------------------------------------------------------------------------  --------  --------  ---------  --------  ---------
+Perlengkapan Rumah → Home Organizer / 600–799 / G1 Low                    401       400       99.8%      0.2%      19.05    
+Perlengkapan Rumah → Home Organizer / 800–999 / G1 Low                    403       399       99.0%      1.0%      19.00    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G1 Low                401       391       97.5%      2.5%      18.62    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G2 Medium             400       370       92.5%      7.5%      18.50    
+Perlengkapan Rumah → Home Organizer / 800–999 / G2 Medium                 399       364       91.2%      8.8%      18.20    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,500–2,624 / G1 Low             400       363       90.8%      9.3%      18.15    
+Perlengkapan Rumah → Home Organizer / 600–799 / G2 Medium                 399       354       88.7%      11.3%     17.70    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,625–2,749 / G1 Low             400       350       87.5%      12.5%     17.50    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G1 Low                401       322       80.3%      19.7%     15.33    
+Perlengkapan Rumah → Home Organizer / 1,000–1,499 / G1 Low                405       292       72.1%      27.9%     13.90    
+Perlengkapan Rumah → Home Organizer / 4,000–4,999 / G1 Low                400       278       69.5%      30.5%     13.90    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 7,500–7,656 / G1 Low    400       276       69.0%      31.0%     13.80    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G1 Low                401       267       66.6%      33.4%     12.71    
+Perlengkapan Rumah → Home Organizer / 5,625–6,249 / G1 Low                400       263       65.8%      34.3%     13.15    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G1 Low                400       262       65.5%      34.5%     13.10    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G2 Medium             400       243       60.8%      39.3%     12.15    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 9,219–9,374 / G1 Low    400       242       60.5%      39.5%     12.10    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G2 Medium             400       241       60.3%      39.8%     12.05    
+Perlengkapan Rumah → Home Organizer / 2,000–2,999 / G1 Low                402       240       59.7%      40.3%     11.43    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G2 Medium             400       240       60.0%      40.0%     12.00    
+Highest new/page:
+Category / Followers / GMV                                                Rows      New       Unique %   Dup %     New/Page 
+------------------------------------------------------------------------  --------  --------  ---------  --------  ---------
+Perlengkapan Rumah → Home Organizer / 600–799 / G1 Low                    401       400       99.8%      0.2%      19.05    
+Perlengkapan Rumah → Home Organizer / 800–999 / G1 Low                    403       399       99.0%      1.0%      19.00    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G1 Low                401       391       97.5%      2.5%      18.62    
+Perlengkapan Rumah → Home Organizer / 5,000–7,499 / G2 Medium             400       370       92.5%      7.5%      18.50    
+Perlengkapan Rumah → Home Organizer / 800–999 / G2 Medium                 399       364       91.2%      8.8%      18.20    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,500–2,624 / G1 Low             400       363       90.8%      9.3%      18.15    
+Perlengkapan Rumah → Home Organizer / 600–799 / G2 Medium                 399       354       88.7%      11.3%     17.70    
+Peralatan Dapur → Peralatan Teh & Kopi / 2,625–2,749 / G1 Low             400       350       87.5%      12.5%     17.50    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G1 Low                401       322       80.3%      19.7%     15.33    
+Perlengkapan Rumah → Home Organizer / 1,000–1,499 / G1 Low                405       292       72.1%      27.9%     13.90    
+Perlengkapan Rumah → Home Organizer / 4,000–4,999 / G1 Low                400       278       69.5%      30.5%     13.90    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 7,500–7,656 / G1 Low    400       276       69.0%      31.0%     13.80    
+Perlengkapan Rumah → Home Organizer / 5,625–6,249 / G1 Low                400       263       65.8%      34.3%     13.15    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G1 Low                400       262       65.5%      34.5%     13.10    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G1 Low                401       267       66.6%      33.4%     12.71    
+Perlengkapan Rumah → Home Organizer / 3,000–3,999 / G2 Medium             400       243       60.8%      39.3%     12.15    
+Perlengkapan Rumah → Perlengkapan Rumah Lainnya / 9,219–9,374 / G1 Low    400       242       60.5%      39.5%     12.10    
+Perlengkapan Rumah → Home Organizer / 1,500–1,999 / G2 Medium             400       241       60.3%      39.8%     12.05    
+Perlengkapan Rumah → Home Organizer / 6,250–7,499 / G2 Medium             400       240       60.0%      40.0%     12.00    
+Perlengkapan Rumah → Home Organizer / 4,000–4,999 / G2 Medium             400       238       59.5%      40.5%     11.90    
+
+============================================================
+CONCLUSIONS
+============================================================
+A. Did removing GMV All improve the crawler? SUPPORTED: matched-period new/page 6.64 → 7.02 (+5.7%); unique 33.4% → 35.5% (+2.1 pp).
+B. By how much? Calendar new/day 3,443.3 → 8,060.2 (+134.1%); active-runtime new/day 7,785.9 → 8,897.1 (+14.3%).
+C. Best current GMV bucket: G1 Low by new/page; status: MIXED because of limited G4 sample and strong order bias.
+D. Follower ranges producing most new creators: 600–799 (798), 5,000–7,499 (792), 800–999 (785), 1,500–1,999 (596), 1,875–1,999 (585).
+E. Categories producing most new creators: Perlengkapan Rumah → Home Organizer (21,864); Perlengkapan Rumah → Perlengkapan Rumah Lainnya (822); Peralatan Dapur → Peralatan Teh & Kopi (802).
+F. Are High / Very High genuinely worse? INSUFFICIENT DATA for causality. Their raw rates are observed, but later execution and database growth are material confounders.
+G. Are specific GMV searches exposing creators GMV All missed? SUPPORTED as a lower bound: 23,488 post-cutover durable first discoveries were absent from the pre-cutover database (hence absent from prior committed GMV-All receipts).
+H. Current realistic rate: 13,268.0 creators/day calendar; 13,932.5 creators/day active-runtime (most recent 24h).
+I. Is the architecture worth keeping? SUPPORTED; preserve it while collecting more balanced, temporally interleaved bucket evidence.
+J. Enough evidence to optimize Low/Medium/High/Very High scheduler priority? INSUFFICIENT DATA — do not alter priority solely from this early, order-confounded sample.
+Simple active-runtime extrapolation at 13,932.5 new/day: +10k ≈ 0.7 days; +25k ≈ 1.8 days; +50k ≈ 3.6 days; +100k ≈ 7.2 days. Not guarantees.

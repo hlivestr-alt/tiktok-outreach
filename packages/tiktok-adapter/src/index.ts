@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { TikTokAffiliateAdapter, AdapterCapabilities, CreatorSearchPage, ProviderMessage, SendMessageResult } from "@affiliate/contracts";
+import type { TikTokAffiliateAdapter, AdapterCapabilities, CreatorSearchPage, ProviderMessage, SendMessageResult, TikTokShopCategory } from "@affiliate/contracts";
 import type { CreatorCandidate, CreatorFilters } from "@affiliate/domain";
 export * from "./signing";
 export * from "./real-read-only";
@@ -52,6 +52,10 @@ export class MockTikTokAffiliateAdapter implements TikTokAffiliateAdapter {
       filters: ["keyword", "category", "followers", "gmv", "unitsSold", "avgVideoViews", "avgLiveViewers", "engagementRate", "followerDemographics"],
       rankingMetrics: ["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]
     };
+  }
+
+  async getCategories(): Promise<TikTokShopCategory[]> {
+    return categories.map((name, index) => ({ id: `mock-category-${index + 1}`, parentId: "0", localName: name, isLeaf: false }));
   }
 
   async searchCreators(

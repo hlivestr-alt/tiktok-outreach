@@ -38,7 +38,11 @@ export class CreatorIdentityResolver {
 
   async ensureMarketplaceCreator(candidate: CreatorCandidate) {
     if (!candidate.creatorOpenId) throw new BadRequestException("Marketplace creator_open_id is required");
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction((tx) => this.ensureMarketplaceCreatorInTransaction(tx, candidate));
+  }
+
+  async ensureMarketplaceCreatorInTransaction(tx: Prisma.TransactionClient, candidate: CreatorCandidate) {
+    if (!candidate.creatorOpenId) throw new BadRequestException("Marketplace creator_open_id is required");
       const byOpen = await tx.creator.findUnique({ where: { creatorOpenId: candidate.creatorOpenId } });
       const byUser = candidate.creatorUserId ? await tx.creator.findUnique({ where: { creatorUserId: candidate.creatorUserId } }) : null;
       if (byOpen && byUser && byOpen.id !== byUser.id) throw new BadRequestException("Conflicting exact Marketplace creator identifiers");
@@ -59,7 +63,6 @@ export class CreatorIdentityResolver {
       await this.identity(tx, updated.id, "TIKTOK_CREATOR_OPEN_ID", candidate.creatorOpenId, "VERIFIED", "MARKETPLACE_EXACT_FIELD");
       if (candidate.creatorUserId) await this.identity(tx, updated.id, "TIKTOK_CREATOR_USER_ID", candidate.creatorUserId, "VERIFIED", "MARKETPLACE_EXACT_FIELD");
       return updated;
-    });
   }
 
   async ensureConversationCreator(conversation: ProviderConversation) {

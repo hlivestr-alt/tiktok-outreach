@@ -11,7 +11,9 @@ const encryptionKey = Buffer.alloc(32, 7).toString("base64");
 const originalConfig = {
   TIKTOK_APP_KEY: config.TIKTOK_APP_KEY, TIKTOK_APP_SECRET: config.TIKTOK_APP_SECRET,
   TIKTOK_SERVICE_ID: config.TIKTOK_SERVICE_ID, TIKTOK_TOKEN_ENCRYPTION_KEY: config.TIKTOK_TOKEN_ENCRYPTION_KEY,
-  TIKTOK_AUTH_BASE_URL: config.TIKTOK_AUTH_BASE_URL, TIKTOK_API_BASE_URL: config.TIKTOK_API_BASE_URL
+  TIKTOK_AUTH_BASE_URL: config.TIKTOK_AUTH_BASE_URL, TIKTOK_API_BASE_URL: config.TIKTOK_API_BASE_URL,
+  TIKTOK_CATEGORY_APP_KEY: config.TIKTOK_CATEGORY_APP_KEY, TIKTOK_CATEGORY_APP_SECRET: config.TIKTOK_CATEGORY_APP_SECRET,
+  TIKTOK_CATEGORY_ACCESS_TOKEN: config.TIKTOK_CATEGORY_ACCESS_TOKEN, TIKTOK_CATEGORY_SHOP_CIPHER: config.TIKTOK_CATEGORY_SHOP_CIPHER
 };
 const stamp = () => `refresh_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 const authorizationScope = `AUTHORIZATION:${createHash("sha256").update("test-service").digest("hex").slice(0, 16)}`;
@@ -41,14 +43,14 @@ async function connection(overrides: Record<string, unknown> = {}) {
     accessTokenCiphertext: encryptTikTokToken("known-access", encryptionKey),
     refreshTokenCiphertext: encryptTikTokToken("known-refresh", encryptionKey),
     accessTokenExpiresAt: new Date(Date.now() - 1_000), refreshTokenExpiresAt: new Date(Date.now() + 86_400_000),
-    grantedScopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write"],
+    grantedScopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write", "seller.product.basic"],
     capabilityStatus: { authorizedShop: { available: true }, creatorMarketplace: { available: true }, affiliateMessageHistory: { available: true } },
     ...overrides
   } as any });
   return { shop, connection: value };
 }
 
-function successfulFetch(shopId: string, scopes = ["seller.creator_marketplace.read", "seller.affiliate_messages.write"], delayMs = 0) {
+function successfulFetch(shopId: string, scopes = ["seller.creator_marketplace.read", "seller.affiliate_messages.write", "seller.product.basic"], delayMs = 0) {
   return vi.fn(async (input: string | URL | Request) => {
     const url = new URL(String(input));
     if (url.pathname === "/api/v2/token/refresh") {
@@ -280,7 +282,7 @@ describe.sequential("persisted TikTok refresh lease", () => {
         access_token_expire_in: Math.floor(Date.now() / 1000) + 86_400,
         refresh_token_expire_in: Math.floor(Date.now() / 1000) + 604_800,
         open_id: "seller", user_type: 0,
-        granted_scopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write"]
+        granted_scopes: ["seller.creator_marketplace.read", "seller.affiliate_messages.write", "seller.product.basic"]
       } });
       if (url.pathname === "/authorization/202309/shops") return response({ code: 0, data: { shops: [{
         id: seed.shop.externalShopId, cipher: "reauthorized-cipher", name: "Shop", region: "ID"
@@ -297,5 +299,50 @@ describe.sequential("persisted TikTok refresh lease", () => {
     });
     expect(stored.accessTokenCiphertext).not.toBeNull();
     expect(stored.refreshTokenCiphertext).not.toBeNull();
+  });
+});
+
+describe.sequential("separate category metadata credentials", () => {
+  it("fails closed when category credentials are missing and never falls back to Outreach", async () => {
+    const seed = await connection({ accessTokenExpiresAt: new Date(Date.now() + 86_400_000) });
+    await prisma.shop.updateMany({ where: { id: { in: [...shopIds] } }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: seed.shop.id }, data: { selectedForReadOnly: true } });
+    Object.assign(config, { TIKTOK_CATEGORY_APP_KEY: undefined, TIKTOK_CATEGORY_APP_SECRET: undefined,
+      TIKTOK_CATEGORY_ACCESS_TOKEN: undefined, TIKTOK_CATEGORY_SHOP_CIPHER: undefined });
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    await expect(new TikTokIntegrationService(prisma as any).categoryMetadataAdapter()).rejects.toThrow(/CATEGORY_METADATA_NOT_CONFIGURED/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("uses category credentials only for Get Categories and Outreach credentials for creator search", async () => {
+    const seed = await connection({ accessTokenExpiresAt: new Date(Date.now() + 86_400_000) });
+    await prisma.shop.updateMany({ where: { id: { in: [...shopIds] } }, data: { selectedForReadOnly: false } });
+    await prisma.shop.update({ where: { id: seed.shop.id }, data: { selectedForReadOnly: true, shopCipher: "outreach-cipher" } });
+    Object.assign(config, { TIKTOK_CATEGORY_APP_KEY: "category-app", TIKTOK_CATEGORY_APP_SECRET: "category-secret",
+      TIKTOK_CATEGORY_ACCESS_TOKEN: "category-token", TIKTOK_CATEGORY_SHOP_CIPHER: "category-cipher" });
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/product/202309/categories") {
+        expect(url.searchParams.get("app_key")).toBe("category-app");
+        expect(url.searchParams.get("shop_cipher")).toBe("category-cipher");
+        expect(new Headers(init?.headers).get("x-tts-access-token")).toBe("category-token");
+        return response({ code: 0, data: { categories: [{ id: "600001", parent_id: "0", local_name: "Beauty", is_leaf: false }] } });
+      }
+      if (url.pathname === "/affiliate_seller/202508/marketplace_creators/search") {
+        expect(url.searchParams.get("app_key")).toBe("test-app");
+        expect(url.searchParams.get("shop_cipher")).toBe("outreach-cipher");
+        expect(new Headers(init?.headers).get("x-tts-access-token")).toBe("known-access");
+        return response({ code: 0, data: { creators: [], search_key: "search", next_page_token: "" } });
+      }
+      throw new Error(`Unexpected test path ${url.pathname}`);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const service = new TikTokIntegrationService(prisma as any);
+    const category = await service.categoryMetadataAdapter();
+    await expect(category.getCategories!()).resolves.toEqual([{ id: "600001", parentId: "0", localName: "Beauty", isLeaf: false }]);
+    const marketplace = await service.discoveryAdapter();
+    await marketplace.searchCreators({}, { pageSize: 20 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(await service.status())).not.toContain("category-secret");
   });
 });

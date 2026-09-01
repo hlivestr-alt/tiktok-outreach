@@ -1,5 +1,29 @@
 export type Money = { amount: string; currency: string };
 
+/** Canonical creator segments shared by crawler partitioning and campaign input UI. */
+export const CREATOR_FOLLOWER_BUCKETS = [
+  { code: "F01", min: 600, max: 799 }, { code: "F02", min: 800, max: 999 },
+  { code: "F03", min: 1_000, max: 1_499 }, { code: "F04", min: 1_500, max: 1_999 },
+  { code: "F05", min: 2_000, max: 2_999 }, { code: "F06", min: 3_000, max: 3_999 },
+  { code: "F07", min: 4_000, max: 4_999 }, { code: "F08", min: 5_000, max: 7_499 },
+  { code: "F09", min: 7_500, max: 9_999 }, { code: "F10", min: 10_000, max: 14_999 },
+  { code: "F11", min: 15_000, max: 24_999 }, { code: "F12", min: 25_000, max: 34_999 },
+  { code: "F13", min: 35_000, max: 49_999 }, { code: "F14", min: 50_000, max: 74_999 },
+  { code: "F15", min: 75_000, max: 99_999 }, { code: "F16", min: 100_000, max: 149_999 },
+  { code: "F17", min: 150_000, max: 249_999 }, { code: "F18", min: 250_000, max: 349_999 },
+  { code: "F19", min: 350_000, max: 499_999 }, { code: "F20", min: 500_000, max: 749_999 },
+  { code: "F21", min: 750_000, max: 999_999 }, { code: "F22", min: 1_000_000, max: 1_499_999 },
+  { code: "F23", min: 1_500_000, max: 2_499_999 }, { code: "F24", min: 2_500_000, max: 4_999_999 },
+  { code: "F25", min: 5_000_000, max: null }
+] as const;
+
+export const CREATOR_GMV_BUCKETS = [
+  { code: "G1", label: "Low", range: "GMV_RANGE_0_100", min: 0, max: 100 },
+  { code: "G2", label: "Medium", range: "GMV_RANGE_100_1000", min: 100, max: 1_000 },
+  { code: "G3", label: "High", range: "GMV_RANGE_1000_10000", min: 1_000, max: 10_000 },
+  { code: "G4", label: "Very High", range: "GMV_RANGE_10000_AND_ABOVE", min: 10_000, max: null }
+] as const;
+
 export type CreatorCandidate = {
   creatorOpenId: string;
   creatorUserId?: string;
@@ -35,6 +59,10 @@ export type CreatorFilters = {
   minAvgVideoViews?: number;
   minAvgLiveViewers?: number;
   minEngagementRate?: number;
+  /** Exact Marketplace 202508 category shape; not used by local Outreach filtering. */
+  marketplaceCategory?: { parentCategoryId: string; childCategoryIds?: string[] };
+  /** TikTok-documented Marketplace GMV interval enums. */
+  marketplaceGmvRanges?: Array<"GMV_RANGE_0_100" | "GMV_RANGE_100_1000" | "GMV_RANGE_1000_10000" | "GMV_RANGE_10000_AND_ABOVE">;
 };
 
 export type RankingMetric =

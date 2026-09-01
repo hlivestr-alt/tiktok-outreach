@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { lockCreatorEligibility, PrismaClient } from "@affiliate/db";
 import { Queue } from "bullmq";
 import type { TikTokAffiliateAdapter } from "@affiliate/contracts";
@@ -12,7 +12,11 @@ import { createHash } from "node:crypto";
 import { TikTokIntegrationService } from "./integrations/tiktok.service";
 
 const prisma = new PrismaClient();
-const tiktokStub = { activeShop: () => ensureMockShop(prisma as any), adapter: async () => new MockTikTokAffiliateAdapter() } as any;
+const tiktokStub = {
+  activeShop: () => ensureMockShop(prisma as any),
+  adapter: async () => new MockTikTokAffiliateAdapter(),
+  outboundCapability: async () => ({ mode: "MOCK", mutationCapability: true, available: true, workerState: "NOT_REQUIRED", reason: null })
+} as any;
 const testIds = new Set<string>();
 const stamp = () => `hardening_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
@@ -75,6 +79,30 @@ describe("TikTok authorization state persistence", () => {
 });
 
 describe.sequential("PostgreSQL campaign reservation safety", () => {
+  it("one Send action freezes and queues exactly once", async () => {
+    const shop = await createShop();
+    const seed = await createRecipient(shop.id);
+    const queues = { reconcile: vi.fn(async () => ({ enqueued: 1, failed: 0 })) };
+    const service = new OutreachService(prisma as any, queues as any, tiktokStub);
+
+    const sent = await service.send(seed.campaign.id, seed.campaign.version);
+    expect(sent.state).toBe("QUEUED");
+    expect(await prisma.campaignRecipient.findUniqueOrThrow({ where: { id: seed.recipient.id } })).toMatchObject({
+      selected: true, state: "QUEUED", frozenMessage: "Hi there"
+    });
+    expect(await prisma.outreachDelivery.count({ where: { campaignId: seed.campaign.id } })).toBe(1);
+    expect(await prisma.queueOutbox.count({ where: { campaignId: seed.campaign.id } })).toBe(1);
+    expect(await prisma.outreachReservation.count({ where: { campaignRecipientId: seed.recipient.id } })).toBe(1);
+    expect(await prisma.auditEvent.count({ where: { campaignId: seed.campaign.id, eventType: "CAMPAIGN_QUEUED" } })).toBe(1);
+
+    const refreshed = await service.send(seed.campaign.id, 3);
+    expect(refreshed.state).toBe("QUEUED");
+    expect(await prisma.outreachDelivery.count({ where: { campaignId: seed.campaign.id } })).toBe(1);
+    expect(await prisma.queueOutbox.count({ where: { campaignId: seed.campaign.id } })).toBe(1);
+    expect(queues.reconcile).toHaveBeenCalledTimes(1);
+    await prisma.shop.delete({ where: { id: shop.id } });
+  });
+
   it("serializes concurrent campaign freezes and reserves a creator only once", async () => {
     const shop = await createShop();
     const creatorId = stamp();
@@ -137,7 +165,7 @@ describe.sequential("PostgreSQL campaign reservation safety", () => {
     expect(await prisma.campaign.findUniqueOrThrow({ where: { id: seed.campaign.id } })).toMatchObject({ state: "PREVIEW_EXPIRED" });
     expect(await prisma.outreachReservation.count({ where: { shopId: shop.id } })).toBe(0);
     const service = new OutreachService(prisma as any, { reconcile: async () => ({ enqueued: 0, failed: 0 }) } as any, tiktokStub);
-    await expect(service.start(seed.campaign.id, { version: 2, confirmationName: seed.campaign.name, confirmationCount: 1 })).rejects.toThrow("stale or expired");
+    await expect(service.send(seed.campaign.id, 2)).rejects.toThrow("preview is not ready to send");
   });
 });
 

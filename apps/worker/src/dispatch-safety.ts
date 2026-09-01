@@ -26,7 +26,7 @@ export async function reserveDispatchSlot(prisma: PrismaClient, recipient: any, 
     let exclusionDetail: string | undefined;
     if (contact?.doNotContact) {
       exclusionReason = "DO_NOT_CONTACT";
-      exclusionDetail = "Creator was marked do-not-contact after campaign confirmation";
+      exclusionDetail = "Creator was marked do-not-contact after campaign queueing";
     } else if (contact?.unresolvedDelivery && contact.lastDeliveryId !== currentDelivery.id) {
       exclusionReason = "DELIVERY_UNKNOWN";
       exclusionDetail = "Creator has an unresolved delivery from another outreach delivery";

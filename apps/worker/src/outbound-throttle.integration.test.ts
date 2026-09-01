@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { performance } from "node:perf_hooks";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@affiliate/db";
 import { OutboundProviderGovernor } from "./outbound-throttle";
@@ -20,71 +19,61 @@ afterAll(async () => {
 });
 
 describe.sequential("durable outbound provider governor", () => {
-  it("processes 1000 immediate mock recipients without a local minute/hour/spacing ceiling", async () => {
+  it("admits at most one Send Message per 1000ms across concurrent callers", async () => {
     const selected = await shop();
     const governor = new OutboundProviderGovernor(prisma, {
-      provider: "MOCK_TIKTOK", appScope, initialConcurrency: 4, technicalMaxConcurrency: 16, permitLeaseMs: 120_000, random: () => 0
+      provider: "MOCK_TIKTOK", appScope, initialConcurrency: 16, technicalMaxConcurrency: 16,
+      permitLeaseMs: 120_000, sendMessageIntervalMs: 1_000, random: () => 0
     });
-    let cursor = 0;
-    const seen = new Set<number>();
-    const started = performance.now();
-    await Promise.all(Array.from({ length: 16 }, async (_, workerIndex) => {
-      for (;;) {
-        const recipient = cursor++;
-        if (recipient >= 1_000) return;
-        const permit = await governor.waitForPermit(selected.id, "SEND_MESSAGE", `mock-${workerIndex}-${recipient}`);
-        expect(seen.has(recipient)).toBe(false);
-        seen.add(recipient);
-        await governor.healthy(permit, "ACCEPTED", { httpStatus: 200, businessCode: "0" });
-      }
-    }));
-    const elapsedMs = performance.now() - started;
+    const base = new Date("2026-08-29T00:00:00.000Z");
+    const simultaneous = await Promise.all(Array.from({ length: 16 }, (_, index) =>
+      governor.acquire(selected.id, "SEND_MESSAGE", `campaign-a-${index}`, base)
+    ));
+    const admitted = simultaneous.filter((result) => result.acquired);
+    expect(admitted).toHaveLength(1);
+    if (!admitted[0]?.acquired) throw new Error("Expected one permit");
+    await governor.healthy(admitted[0].permit, "ACCEPTED", { httpStatus: 200, businessCode: "0" }, base);
+
+    const admissionTimes = [base.getTime()];
+    for (let index = 1; index < 10; index++) {
+      const tooSoon = await governor.acquire(selected.id, "SEND_MESSAGE", `retry-${index}`, new Date(base.getTime() + index * 1_000 - 1));
+      expect(tooSoon.acquired).toBe(false);
+      const now = new Date(base.getTime() + index * 1_000);
+      const next = await governor.acquire(selected.id, "SEND_MESSAGE", `campaign-b-${index}`, now);
+      if (!next.acquired) throw new Error(`Expected admission ${index}: ${next.state}`);
+      admissionTimes.push(now.getTime());
+      await governor.healthy(next.permit, "ACCEPTED", { httpStatus: 200, businessCode: "0" }, now);
+    }
+    expect(admissionTimes.at(-1)! - admissionTimes[0]).toBe(9_000);
     const limiter = await prisma.providerOutboundLimiter.findUniqueOrThrow({
       where: { provider_appScope_shopId_operation: { provider: "MOCK_TIKTOK", appScope, shopId: selected.id, operation: "SEND_MESSAGE" } }
     });
-    const [attempts, accepted, permits] = await Promise.all([
-      prisma.providerOutboundEvent.count({ where: { limiterId: limiter.id, outcome: "ATTEMPT" } }),
-      prisma.providerOutboundEvent.count({ where: { limiterId: limiter.id, outcome: "ACCEPTED" } }),
-      prisma.providerOutboundPermit.count({ where: { limiterId: limiter.id } })
-    ]);
-    console.log(JSON.stringify({ test: "durable-mock-outbound-throughput", recipients: 1_000, elapsedMs, acceptedPerSecond: 1_000 / (elapsedMs / 1_000), finalConcurrency: limiter.effectiveConcurrency }));
-    expect({ attempts, accepted, permits, recipients: seen.size }).toEqual({ attempts: 1_000, accepted: 1_000, permits: 0, recipients: 1_000 });
-    expect(limiter.effectiveConcurrency).toBe(16);
-    expect(elapsedMs).toBeLessThan(30_000);
-  }, 45_000);
+    expect(limiter).toMatchObject({ effectiveConcurrency: 1, technicalMaxConcurrency: 1 });
+  }, 15_000);
 
-  it("coordinates repeated throttles, honors Retry-After, and ramps again after recovery", async () => {
+  it("persists pacing across governor restarts and never catches up after Retry-After", async () => {
     const selected = await shop();
-    const governor = new OutboundProviderGovernor(prisma, {
-      provider: "MOCK_TIKTOK", appScope, initialConcurrency: 8, technicalMaxConcurrency: 16, permitLeaseMs: 120_000, random: () => 0
-    });
+    const options = { provider: "MOCK_TIKTOK", appScope, initialConcurrency: 8, technicalMaxConcurrency: 16, permitLeaseMs: 120_000, sendMessageIntervalMs: 1_000, random: () => 0 };
+    const governor = new OutboundProviderGovernor(prisma, options);
     const base = new Date("2026-08-24T08:00:00.000Z");
-    const permits = [];
-    for (let index = 0; index < 3; index++) {
-      const result = await governor.acquire(selected.id, "SEND_MESSAGE", `throttle-${index}`, base);
-      if (!result.acquired) throw new Error("Expected initial permit");
-      permits.push(result.permit);
-    }
-    const first = await governor.throttle(permits[0], { httpStatus: 429, businessCode: "36009002", retryAfterMs: 5_000 }, base);
-    const second = await governor.throttle(permits[1], { businessCode: "36009002", retryAfterMs: 5_000 }, base);
-    const third = await governor.throttle(permits[2], { httpStatus: 429, retryAfterMs: 5_000 }, base);
-    expect([first.effectiveConcurrency, second.effectiveConcurrency, third.effectiveConcurrency]).toEqual([4, 2, 1]);
-    expect(first.delayMs).toBe(5_000);
-    const blocked = await governor.acquire(selected.id, "SEND_MESSAGE", "blocked", new Date(base.getTime() + 4_999));
+    const first = await governor.acquire(selected.id, "SEND_MESSAGE", "initial", base);
+    if (!first.acquired) throw new Error("Expected initial permit");
+    await governor.throttle(first.permit, { httpStatus: 429, businessCode: "36009002", retryAfterMs: 10_000 }, base);
+
+    const restartedGovernor = new OutboundProviderGovernor(prisma, options);
+    const blocked = await restartedGovernor.acquire(selected.id, "SEND_MESSAGE", "after-restart", new Date(base.getTime() + 9_999));
     expect(blocked).toMatchObject({ acquired: false, state: "THROTTLED" });
 
-    let fakeNow = new Date(base.getTime() + 5_001);
-    for (let index = 0; index < 80; index++) {
-      const acquired = await governor.acquire(selected.id, "SEND_MESSAGE", `recovery-${index}`, fakeNow);
-      if (!acquired.acquired) throw new Error(`Expected recovery permit: ${acquired.state}`);
-      await governor.healthy(acquired.permit, "ACCEPTED", { httpStatus: 200, businessCode: "0" }, fakeNow);
-      fakeNow = new Date(fakeNow.getTime() + 1);
-    }
-    const limiter = await prisma.providerOutboundLimiter.findUniqueOrThrow({
-      where: { provider_appScope_shopId_operation: { provider: "MOCK_TIKTOK", appScope, shopId: selected.id, operation: "SEND_MESSAGE" } }
-    });
-    expect(limiter.effectiveConcurrency).toBeGreaterThan(1);
-    expect(limiter.nextPermittedAt).toBeNull();
+    const recoveryAt = new Date(base.getTime() + 10_000);
+    const recovered = await restartedGovernor.acquire(selected.id, "SEND_MESSAGE", "recovered", recoveryAt);
+    if (!recovered.acquired) throw new Error(`Expected recovery permit: ${recovered.state}`);
+    await restartedGovernor.healthy(recovered.permit, "ACCEPTED", { httpStatus: 200, businessCode: "0" }, recoveryAt);
+    const catchUp = await Promise.all(Array.from({ length: 10 }, (_, index) =>
+      restartedGovernor.acquire(selected.id, "SEND_MESSAGE", `catch-up-${index}`, recoveryAt)
+    ));
+    expect(catchUp.filter((result) => result.acquired)).toHaveLength(0);
+    const next = await restartedGovernor.acquire(selected.id, "SEND_MESSAGE", "next-paced", new Date(recoveryAt.getTime() + 1_000));
+    expect(next.acquired).toBe(true);
   }, 15_000);
 
   it("persists shop IM quota as a hard provider block without hot-loop attempts", async () => {

@@ -1,0 +1,3 @@
+ALTER TABLE "CreatorSearchPartition"
+  ADD COLUMN "business16032001RetryCount" INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN "business16032001RetryPage" INTEGER;

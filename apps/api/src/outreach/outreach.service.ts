@@ -1,8 +1,11 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, HttpException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCloneFromPreviewInput, CampaignCreateInput } from "@affiliate/contracts";
-import { assertCampaignWithinLimit, renderMessage, type CreatorFilters } from "@affiliate/domain";
+import {
+  assertCampaignWithinLimit, buildPreview, renderMessage,
+  type ContactState, type CreatorCandidate, type CreatorFilters, type EvaluatedCreator, type RankingMetric
+} from "@affiliate/domain";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { publicDiscoveryRun } from "./discovery-processor";
@@ -10,6 +13,8 @@ import { rebuildLocalPreview } from "./local-preview";
 
 @Injectable()
 export class OutreachService {
+  private readonly logger = new Logger(OutreachService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
@@ -73,52 +78,153 @@ export class OutreachService {
   }
 
   private async rebuildFromCreatorDatabase(campaign: Awaited<ReturnType<OutreachService["requiredCampaign"]>>) {
-    const allSnapshots = await this.prisma.creatorMetricSnapshot.findMany({
-      where: { shopId: campaign.shopId, creator: { creatorOpenId: { not: null }, providerIdentities: { some: {
-        provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED"
-      } } } },
-      include: { creator: { include: { providerIdentities: { where: {
-        provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED"
-      } } } } }, orderBy: { sourceFetchedAt: "desc" }
-    });
-    const seen = new Set<string>();
-    const candidates = allSnapshots.flatMap((snapshot) => {
-      const creatorOpenId = snapshot.creator.creatorOpenId;
-      const exactIdentity = creatorOpenId && snapshot.creator.providerIdentities.some((identity) => identity.identifier === creatorOpenId);
-      if (!creatorOpenId || !exactIdentity || seen.has(creatorOpenId)) return [];
-      seen.add(creatorOpenId);
-      const raw = snapshot.rawPayload as Record<string, unknown>;
-      return [{
-        creatorOpenId, creatorUserId: snapshot.creator.creatorUserId ?? undefined,
-        username: snapshot.creator.username ?? undefined, nickname: snapshot.creator.nickname ?? undefined,
-        avatarUrl: snapshot.creator.avatarUrl ?? undefined,
-        categoryIds: Array.isArray(snapshot.categoryIds) ? snapshot.categoryIds.filter((value): value is string => typeof value === "string") : [],
-        followerCount: snapshot.followerCount,
-        gmv: snapshot.gmvAmount != null && snapshot.gmvCurrency ? { amount: String(snapshot.gmvAmount), currency: snapshot.gmvCurrency } : null,
-        unitsSold: snapshot.unitsSold, avgVideoViews: snapshot.avgVideoViews, avgLiveViewers: snapshot.avgLiveViewers,
-        engagementRate: snapshot.engagementRate == null ? undefined : Number(snapshot.engagementRate),
-        selectionRegion: snapshot.creator.selectionRegion, discoveryOrdinal: seen.size - 1,
-        databaseSnapshotId: snapshot.id,
-        liveGmv: raw.liveGmv, videoGmv: raw.videoGmv, gmvRange: raw.gmvRange,
-        topAgeRanges: raw.topAgeRanges, majorGender: raw.majorGender, majorGenderPercentage: raw.majorGenderPercentage
-      }];
-    });
+    type DatabaseCandidate = CreatorCandidate & {
+      databaseCreatorId: string;
+      databaseSnapshotId: string;
+      databaseSourceFetchedAt: Date;
+    };
+    const candidates: DatabaseCandidate[] = [];
+    const contacts = new Map<string, ContactState>();
+    const pageSize = 1_000;
+    let cursorId: string | undefined;
+    while (true) {
+      const creators = await this.prisma.creator.findMany({
+        where: {
+          creatorOpenId: { not: null },
+          providerIdentities: { some: {
+            provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED"
+          } },
+          snapshots: { some: { shopId: campaign.shopId } }
+        },
+        orderBy: { id: "asc" }, take: pageSize,
+        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+        include: {
+          snapshots: {
+            where: { shopId: campaign.shopId },
+            orderBy: [{ sourceFetchedAt: "desc" }, { id: "desc" }], take: 1
+          },
+          contacts: { where: { shopId: campaign.shopId } },
+          providerIdentities: { where: {
+            provider: "TIKTOK_SHOP", identityType: "TIKTOK_CREATOR_OPEN_ID", linkState: "VERIFIED"
+          } }
+        }
+      });
+      for (const creator of creators) {
+        const creatorOpenId = creator.creatorOpenId;
+        const snapshot = creator.snapshots[0];
+        const exactIdentity = creatorOpenId && creator.providerIdentities.some((identity) => identity.identifier === creatorOpenId);
+        if (!creatorOpenId || !snapshot || !exactIdentity) continue;
+        const raw = snapshot.rawPayload as Record<string, unknown>;
+        candidates.push({
+          creatorOpenId, creatorUserId: creator.creatorUserId ?? undefined,
+          username: creator.username ?? undefined, nickname: creator.nickname ?? undefined,
+          avatarUrl: creator.avatarUrl ?? undefined,
+          categoryIds: Array.isArray(snapshot.categoryIds) ? snapshot.categoryIds.filter((value): value is string => typeof value === "string") : [],
+          followerCount: snapshot.followerCount,
+          gmv: snapshot.gmvAmount != null && snapshot.gmvCurrency ? { amount: String(snapshot.gmvAmount), currency: snapshot.gmvCurrency } : null,
+          unitsSold: snapshot.unitsSold, avgVideoViews: snapshot.avgVideoViews, avgLiveViewers: snapshot.avgLiveViewers,
+          engagementRate: snapshot.engagementRate == null ? undefined : Number(snapshot.engagementRate),
+          selectionRegion: creator.selectionRegion, discoveryOrdinal: 0,
+          databaseCreatorId: creator.id, databaseSnapshotId: snapshot.id, databaseSourceFetchedAt: snapshot.sourceFetchedAt,
+          liveGmv: raw.liveGmv as CreatorCandidate["liveGmv"], videoGmv: raw.videoGmv as CreatorCandidate["videoGmv"],
+          gmvRange: typeof raw.gmvRange === "string" ? raw.gmvRange : undefined,
+          topAgeRanges: Array.isArray(raw.topAgeRanges) ? raw.topAgeRanges.filter((value): value is string => typeof value === "string") : undefined,
+          majorGender: typeof raw.majorGender === "string" ? raw.majorGender : undefined,
+          majorGenderPercentage: typeof raw.majorGenderPercentage === "number" ? raw.majorGenderPercentage : undefined
+        });
+        const contact = creator.contacts[0];
+        contacts.set(creatorOpenId, {
+          contactCount: contact?.contactCount ?? 0,
+          lastContactedAt: contact?.lastContactedAt ?? undefined,
+          firstContactedAt: contact?.firstContactedAt ?? undefined,
+          doNotContact: contact?.doNotContact,
+          unresolvedDelivery: contact?.unresolvedDelivery,
+          historical: Boolean(contact?.historyCoverageStart) && !contact?.lastCampaignId
+        });
+      }
+      if (creators.length < pageSize) break;
+      cursorId = creators.at(-1)!.id;
+    }
+    candidates.sort((left, right) =>
+      right.databaseSourceFetchedAt.getTime() - left.databaseSourceFetchedAt.getTime() || left.creatorOpenId.localeCompare(right.creatorOpenId)
+    );
+    candidates.forEach((candidate, index) => { candidate.discoveryOrdinal = index; });
     if (!candidates.length) throw new BadRequestException("Creator database is empty; import or sync creators before creating an Outreach preview");
+    const now = new Date();
+    const reservations = await this.prisma.outreachReservation.findMany({
+      where: { shopId: campaign.shopId, expiresAt: { gt: now } },
+      select: { creator: { select: { creatorOpenId: true } } }
+    });
+    const preview = buildPreview({
+      creators: candidates,
+      filters: campaign.filters as CreatorFilters,
+      contacts,
+      activeReservations: new Set(reservations.flatMap((reservation) => reservation.creator.creatorOpenId ? [reservation.creator.creatorOpenId] : [])),
+      requested: campaign.targetCount,
+      cooldownDays: campaign.cooldownDays,
+      rankingMetric: campaign.rankingMetric as RankingMetric,
+      rankingDirection: campaign.rankingDirection as "ASC" | "DESC",
+      now,
+      truncated: false
+    });
+    const unresolved = await this.prisma.creatorShopContactState.aggregate({
+      where: { shopId: campaign.shopId, contactCount: { gt: 0 }, creator: { creatorOpenId: null } },
+      _count: { _all: true }, _sum: { contactCount: true }
+    });
+    const summary = {
+      ...preview.summary,
+      historyIdentityCoverageIncomplete: unresolved._count._all > 0,
+      unresolvedHistoricalCreators: unresolved._count._all,
+      unresolvedHistoricalOutboundContacts: unresolved._sum.contactCount ?? 0
+    };
+    const selected = preview.creators.filter((creator) => creator.selected);
+    const selectedIds = new Set(selected.map((creator) => creator.creatorOpenId));
+    const retained = selected.concat(preview.creators.filter((creator) => !selectedIds.has(creator.creatorOpenId)))
+      .slice(0, campaign.candidateLimit);
+    const candidateByOpenId = new Map(candidates.map((candidate) => [candidate.creatorOpenId, candidate]));
     return this.prisma.$transaction(async (tx) => {
       await tx.discoveryRun.deleteMany({ where: { campaignId: campaign.id } });
+      await tx.campaignRecipient.deleteMany({ where: { campaignId: campaign.id } });
       await tx.campaign.update({ where: { id: campaign.id }, data: { state: "DISCOVERING", version: { increment: 1 } } });
       const run = await tx.discoveryRun.create({ data: {
         campaignId: campaign.id, shopId: campaign.shopId, state: "RUNNING",
-        requestedTarget: campaign.targetCount, candidateLimit: candidates.length,
+        requestedTarget: campaign.targetCount, candidateLimit: campaign.candidateLimit,
         pagesFetched: 0, candidatesFetched: candidates.length, totalProviderRequests: 0, providerHasMore: false
       } });
-      for (let offset = 0; offset < candidates.length; offset += 1000) await tx.discoveryCandidate.createMany({ data:
-        candidates.slice(offset, offset + 1000).map((candidate) => ({ discoveryRunId: run.id, creatorOpenId: candidate.creatorOpenId,
-          discoveryOrdinal: candidate.discoveryOrdinal, candidate: candidate as unknown as Prisma.InputJsonValue }))
+      for (let offset = 0; offset < retained.length; offset += 1000) await tx.discoveryCandidate.createMany({ data:
+        retained.slice(offset, offset + 1000).map((evaluated) => {
+          const candidate = candidateByOpenId.get(evaluated.creatorOpenId)!;
+          const { databaseCreatorId: _creatorId, databaseSourceFetchedAt: _sourceFetchedAt, ...persistedCandidate } = candidate;
+          return { discoveryRunId: run.id, creatorOpenId: candidate.creatorOpenId,
+            discoveryOrdinal: candidate.discoveryOrdinal, candidate: persistedCandidate as unknown as Prisma.InputJsonValue };
+        })
       });
+      const recipientRows: Prisma.CampaignRecipientCreateManyInput[] = retained.map((evaluated: EvaluatedCreator) => {
+        const candidate = candidateByOpenId.get(evaluated.creatorOpenId)!;
+        return {
+          campaignId: campaign.id, creatorId: candidate.databaseCreatorId, snapshotId: candidate.databaseSnapshotId,
+          discoveryOrdinal: candidate.discoveryOrdinal, eligibility: evaluated.eligibility,
+          skipReason: evaluated.skipReason, skipDetail: evaluated.skipDetail,
+          rankingValue: new Prisma.Decimal(evaluated.rankingValue), selected: evaluated.selected,
+          state: evaluated.selected ? "SELECTED" : evaluated.eligibility === "ELIGIBLE" ? "ELIGIBLE" : "DISCOVERED"
+        };
+      });
+      for (let offset = 0; offset < recipientRows.length; offset += 1000) {
+        await tx.campaignRecipient.createMany({ data: recipientRows.slice(offset, offset + 1000) });
+      }
       await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: campaign.id, eventType: "LOCAL_CREATOR_DATABASE_FILTERED",
-        payload: { creatorDatabaseSize: candidates.length, providerRequests: 0 } } });
-      await rebuildLocalPreview(tx, run.id, new Date());
+        payload: { creatorDatabaseSize: candidates.length, persistedCandidates: retained.length, providerRequests: 0 } } });
+      await tx.campaign.update({ where: { id: campaign.id }, data: {
+        state: "PREVIEW_READY", summary: summary as unknown as Prisma.InputJsonValue,
+        truncated: false, version: { increment: 1 }
+      } });
+      await tx.discoveryRun.update({ where: { id: run.id }, data: {
+        state: "COMPLETE", completedAt: now, nextAttemptAt: null, leaseId: null, leaseExpiresAt: null
+      } });
+      await tx.auditEvent.create({ data: {
+        shopId: campaign.shopId, campaignId: campaign.id, eventType: "PREVIEW_READY",
+        payload: summary as unknown as Prisma.InputJsonValue
+      } });
       return tx.discoveryRun.findUniqueOrThrow({ where: { id: run.id } });
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 120_000 });
   }
@@ -129,8 +235,16 @@ export class OutreachService {
     const existing = await this.prisma.discoveryRun.findUnique({ where: { campaignId: id } });
     if (existing && existing.state === "COMPLETE" && campaign.state === "PREVIEW_READY") return publicDiscoveryRun(existing);
     if (!["DRAFT", "PREVIEW_READY", "PREVIEW_EXPIRED"].includes(campaign.state)) throw new BadRequestException("Campaign cannot be rediscovered in its current state");
-    const run = await this.rebuildFromCreatorDatabase(campaign);
-    return publicDiscoveryRun(run);
+    try {
+      const run = await this.rebuildFromCreatorDatabase(campaign);
+      return publicDiscoveryRun(run);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      const code = typeof error === "object" && error && "code" in error ? String(error.code) : "UNEXPECTED";
+      this.logger.error(`Local Creator Database preview failed campaignId=${campaign.id} shopId=${campaign.shopId} code=${code}`,
+        error instanceof Error ? error.stack : undefined);
+      throw new ServiceUnavailableException("The local Creator Database preview could not be built. No messages were queued or sent; retrying this campaign is safe.");
+    }
   }
 
   private validateCloneInput(input: CampaignCloneFromPreviewInput, shop: { maxRecipientsPerCampaign: number }) {
@@ -240,27 +354,48 @@ export class OutreachService {
     if (view === "selected") where.selected = true;
     else if (view === "excluded") where.eligibility = "EXCLUDED";
     else if (view === "eligible") where.eligibility = "ELIGIBLE";
-    return this.prisma.campaignRecipient.findMany({ where, include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 1000 });
+    return this.prisma.campaignRecipient.findMany({ where, include: { creator: true, snapshot: true, delivery: { include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 10 } } } }, orderBy: { rankingValue: "desc" }, take: 1000 });
   }
 
   async get(id: string) {
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.prisma.campaign.findUnique({ where: { id }, include: {
-      shop: true, discoveryRun: true, recipients: { include: { creator: true, snapshot: true, delivery: true }, orderBy: { rankingValue: "desc" }, take: 250 },
+      shop: true, discoveryRun: true, recipients: { include: { creator: true, snapshot: true, delivery: { include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 10 } } } }, orderBy: { rankingValue: "desc" }, take: 250 },
       _count: { select: { recipients: true, deliveries: true } }
     }});
     if (!campaign) throw new NotFoundException("Campaign not found");
+    const [frozenRecipientCount, recipientStateGroups] = await Promise.all([
+      this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true, frozenMessage: { not: null } } }),
+      this.prisma.campaignRecipient.groupBy({
+        by: ["state"], where: { campaignId: id, selected: true, frozenMessage: { not: null } }, _count: { _all: true }
+      })
+    ]);
+    const recipientStateCounts = Object.fromEntries(recipientStateGroups.map((group) => [group.state, group._count._all]));
+    const terminalStates = ["SENT", "RESTRICTED", "FAILED", "DELIVERY_UNKNOWN_UNRESOLVED", "CANCELLED"];
+    const completedRecipientCount = terminalStates.reduce((sum, state) => sum + (recipientStateCounts[state] ?? 0), 0);
     const { discoveryRun, shop, ...publicCampaign } = campaign;
     const { shopCipher: _shopCipher, ...publicShop } = shop;
     const heartbeat = discoveryRun && ["QUEUED", "RUNNING", "BACKING_OFF"].includes(discoveryRun.state)
       ? await this.prisma.workerHeartbeat.findUnique({ where: { role: "discovery-worker" } }) : null;
     const discoveryWorkerState = heartbeat?.status === "RUNNING"
       ? (Date.now() - heartbeat.lastSeenAt.getTime() <= config.WORKER_STALE_AFTER_MS ? "RUNNING" : "STALE") : "STOPPED";
+    const outboundCapability = await this.tiktok.outboundCapability();
     return {
       ...publicCampaign, shop: publicShop, discovery: discoveryRun ? publicDiscoveryRun(discoveryRun) : null,
+      progress: {
+        frozen: frozenRecipientCount,
+        completed: completedRecipientCount,
+        remaining: Math.max(0, frozenRecipientCount - completedRecipientCount),
+        states: recipientStateCounts
+      },
+      recipientPage: { shown: campaign.recipients.length, total: campaign._count.recipients, limit: 250 },
+      outboundPacing: {
+        sendMessageMaxPerSecond: 1,
+        sendMessageMinIntervalMs: config.OUTBOUND_SEND_MESSAGE_INTERVAL_MS,
+        idealMinimumDurationSeconds: frozenRecipientCount
+      },
       discoveryWorkerState,
-      outboundMode: config.OUTBOUND_MODE.toUpperCase(), outboundEnabled: config.OUTBOUND_MODE === "mock"
-        || (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES"),
+      outboundMode: outboundCapability.mode, outboundEnabled: outboundCapability.available, outboundCapability,
       cooldownCapability: {
         appOriginated: "APP_ORIGINATED_DEDUPE_SAFE",
         historical: (publicCampaign.summary as Record<string, unknown> | null)?.historyIdentityCoverageIncomplete
@@ -280,7 +415,7 @@ export class OutreachService {
   }
 
   async freeze(id: string, version: number) {
-    if (config.OUTBOUND_MODE === "read_only") throw new BadRequestException("READ_ONLY_PREVIEW: outbound is physically unavailable until an outbound mode is explicitly enabled");
+    await this.requireOutboundAvailable();
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
     if (campaign.state !== "PREVIEW_READY" || campaign.version !== version) throw new BadRequestException("Preview is stale; refresh it before freezing");
@@ -382,19 +517,25 @@ export class OutreachService {
     return this.get(id);
   }
 
-  async start(id: string, input: { version: number; confirmationName: string; confirmationCount: number }) {
-    if (config.OUTBOUND_MODE === "read_only") throw new BadRequestException("OUTBOUND_DISABLED: outbound is physically unavailable until an outbound mode is explicitly enabled");
-    if (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND !== "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES") {
-      throw new BadRequestException("LIVE_OUTBOUND_NOT_ACKNOWLEDGED: explicit live-send configuration is required");
+  private async requireOutboundAvailable() {
+    const capability = await this.tiktok.outboundCapability();
+    if (!capability.available) {
+      throw new ServiceUnavailableException(`OUTBOUND_UNAVAILABLE: ${capability.reason ?? "outbound capability is unavailable"}`);
     }
+    return capability;
+  }
+
+  private async queueFrozen(id: string, version: number) {
     await expireFrozenCampaigns(this.prisma);
     const campaign = await this.requiredCampaign(id);
-    const selectedCount = await this.prisma.campaignRecipient.count({ where: { campaignId: id, selected: true, state: "RESERVED" } });
-    if (campaign.state !== "FROZEN" || campaign.version !== input.version || !campaign.freezeExpiresAt || campaign.freezeExpiresAt <= new Date()) throw new BadRequestException("Frozen preview is stale or expired");
-    if (input.confirmationName !== campaign.name || input.confirmationCount !== selectedCount) throw new BadRequestException("Typed campaign name and selected count must match exactly");
-    if (!selectedCount) throw new BadRequestException("No frozen recipients remain; rediscover and freeze again");
-    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId: id, selected: true, state: "RESERVED" } });
+    if (campaign.state !== "FROZEN" || campaign.version !== version || !campaign.freezeExpiresAt || campaign.freezeExpiresAt <= new Date()) {
+      throw new BadRequestException("Frozen preview is stale or expired");
+    }
     await this.prisma.$transaction(async (tx) => {
+      const changed = await tx.campaign.updateMany({ where: { id, state: "FROZEN", version }, data: { state: "QUEUED", version: { increment: 1 } } });
+      if (changed.count !== 1) throw new BadRequestException("Campaign was already queued; refresh the campaign");
+      const recipients = await tx.campaignRecipient.findMany({ where: { campaignId: id, selected: true, state: "RESERVED" } });
+      if (!recipients.length) throw new BadRequestException("No frozen recipients remain; rediscover and freeze again");
       await tx.outreachReservation.updateMany({
         where: { recipient: { campaignId: id, selected: true } },
         data: { expiresAt: new Date("9999-12-31T23:59:59.999Z") }
@@ -414,11 +555,56 @@ export class OutreachService {
         });
         await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } });
       }
-      await tx.campaign.update({ where: { id }, data: { state: "QUEUED", version: { increment: 1 } } });
-      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_CONFIRMED", payload: { selectedCount } } });
+      await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_QUEUED", payload: { selectedCount: recipients.length } } });
     });
     await this.queues.reconcile();
     return this.get(id);
+  }
+
+  /**
+   * One operator action for both PREVIEW_READY and legacy FROZEN campaigns.
+   * The existing freeze and queue transactions remain the safety boundaries;
+   * if the second transaction fails, the frozen campaign is safely retryable.
+   */
+  async send(id: string, version: number) {
+    await expireFrozenCampaigns(this.prisma);
+    let campaign = await this.requiredCampaign(id);
+    if (["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED", "COMPLETED", "COMPLETED_WITH_ERRORS", "CANCELLED"].includes(campaign.state)) {
+      return this.get(id);
+    }
+    await this.requireOutboundAvailable();
+    if (campaign.state === "PREVIEW_READY") {
+      try {
+        await this.freeze(id, version);
+      } catch (error) {
+        campaign = await this.requiredCampaign(id);
+        if (campaign.state !== "FROZEN") throw error;
+      }
+      campaign = await this.requiredCampaign(id);
+      if (campaign.state !== "FROZEN") return this.get(id);
+      try {
+        return await this.queueFrozen(id, campaign.version);
+      } catch (error) {
+        const current = await this.requiredCampaign(id);
+        if (["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED", "COMPLETED", "COMPLETED_WITH_ERRORS", "CANCELLED"].includes(current.state)) return this.get(id);
+        throw error;
+      }
+    }
+    if (campaign.state === "FROZEN") {
+      try {
+        return await this.queueFrozen(id, version);
+      } catch (error) {
+        const current = await this.requiredCampaign(id);
+        if (["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED", "COMPLETED", "COMPLETED_WITH_ERRORS", "CANCELLED"].includes(current.state)) return this.get(id);
+        throw error;
+      }
+    }
+    throw new BadRequestException("Campaign preview is not ready to send");
+  }
+
+  /** Backwards-compatible server method; it delegates to the one-click Send flow. */
+  async start(id: string, input: { version: number }) {
+    return this.send(id, input.version);
   }
 
   async pause(id: string) {

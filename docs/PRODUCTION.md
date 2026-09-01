@@ -8,38 +8,32 @@ This guide is for the TikTok Outreach repository only. Production uses Docker Co
 2. Copy `.env.example` to `.env` in the repository root.
 3. Set the dedicated TikTok Outreach app values: `TIKTOK_APP_KEY`, `TIKTOK_APP_SECRET`, `TIKTOK_SERVICE_ID`, and a strong `TIKTOK_TOKEN_ENCRYPTION_KEY`. Do not reuse TikTok Orders Reporting credentials.
 4. Give a Google service account Editor access to spreadsheet `1h_r1eaSHH0nIu6-0P70tMc03lxsQ1Jg9b1xl9xiCPX4`, base64-encode its JSON file as one line, and set that value in `GOOGLE_SERVICE_ACCOUNT_JSON`. The browser never receives it.
-5. Keep `APP_MODE=read_only`. For the safe mode, keep `OUTBOUND_MODE=read_only` and the live acknowledgement unset.
+5. Keep `APP_MODE=read_only`. Production Compose sets `OUTBOUND_MODE=live` for API and the dedicated outbound worker; there is no recurring acknowledgement setting.
 6. Authorize and select the intended Indonesian shop in **Integration & safety** if it is not already selected.
 
 `.env` is ignored by Git. Compose loads it directly into each applicable container; production roles explicitly override runtime mode, database/Redis networking, and activation state. Windows user-level TikTok variables are not inherited into containers unless they are intentionally written into this repository's `.env`.
 
 ## Build, migrate, and start
 
-Safe production read-only (recommended daily default):
+Production (outbound stays live):
 
 ```powershell
 .\scripts\start-production.cmd
 ```
 
-Production live outbound:
-
-```powershell
-.\scripts\start-production.cmd -LiveOutbound
-```
-
-The live command explicitly supplies both required gates: `OUTBOUND_MODE=live` and `ENABLE_LIVE_TIKTOK_OUTBOUND=I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES`. The worker still cannot send until a user previews, freezes, types the exact campaign name and selected count, confirms, and queues a campaign.
+Production outbound is configured as `LIVE` by the Compose production profile. The worker still sends only durable, frozen campaign deliveries created by the Send action.
 
 The start script records the current Git SHA/build time, rebuilds current images, removes the obsolete `tiktokoutreach-validation-api` container if present, runs additive Prisma migrations through API startup, starts the selected profile, and removes obsolete services from this Compose project. It never resets the database.
 
-Manual equivalent for safe mode:
+Manual equivalent:
 
 ```powershell
 $env:APP_VERSION=(git rev-parse HEAD).Trim()
 $env:BUILD_TIMESTAMP=[DateTime]::UtcNow.ToString('o')
-$env:OUTBOUND_MODE='read_only'
-$env:ENABLE_LIVE_TIKTOK_OUTBOUND='NOT_ACKNOWLEDGED'
-docker compose --profile production build
-docker compose --profile production up -d --remove-orphans
+$env:OUTBOUND_MODE='live'
+$services = @('api', 'web', 'outbound-live')
+docker compose --profile production build $services
+docker compose --profile production up -d --remove-orphans $services
 ```
 
 Apply migrations without starting the API (safe, additive deploy only):
@@ -65,11 +59,10 @@ The status script reports container health, build version, worker heartbeats, ou
 1. Create a campaign. The API persists a `DiscoveryRun`; page navigation never calls TikTok.
 2. The always-running discovery worker claims the one shop-level Creator Database job. It stages a page, reconciles PostgreSQL and the existing Google Sheet, and advances the cursor only after the whole page is saved.
 3. Outreach previews filter stored creator snapshots and make no Marketplace call. **Clone campaign** explicitly uses the previous persisted candidate snapshot.
-4. In live mode, freeze recipients and immutable rendered messages.
-5. Type the exact campaign name and selected count, then **Confirm & queue**.
-6. Pause to stop starting new recipients. **Cancel unsent** terminates only work that has not begun provider dispatch.
+4. **Send to X affiliates** freezes recipients and immutable rendered messages, materializes deliveries and outbox intents, and queues the campaign in one action.
+5. Pause to stop starting new recipients. **Cancel unsent** terminates only work that has not begun provider dispatch.
 
-The outbound worker may run continuously but is idle with no confirmed durable outbox jobs. Exact Creator Open ID, endpoint-scoped adaptive provider permits, deterministic jobs, exact positive send evidence, and restart-safe dedupe remain enforced. Daily/hourly/minute dispatch counters are observability only; they do not throttle successful sends, and there is no fixed spacing after success.
+The outbound worker may run continuously but is idle with no confirmed durable outbox jobs. Exact Creator Open ID, endpoint-scoped provider permits, deterministic jobs, exact positive send evidence, and restart-safe dedupe remain enforced. PostgreSQL serializes Send Message admission per App × Shop with at least 1,000ms between permits, including across workers and restarts. Create Conversation remains adaptive. Daily/hourly/minute dispatch counters are observability only; provider cooldown and backoff can make the one-per-second maximum slower and never produce a catch-up burst.
 
 TikTok documents dynamic production rate allocation rather than one fixed QPS for these IM endpoints. HTTP 429 or business code `36009002` stops new calls in the affected App × Shop × endpoint limiter, honors `Retry-After`, or uses exponential backoff plus jitter, then automatically recovers with reduced concurrency. Healthy responses add capacity back. Create Conversation code `16030002` is a shop IM quota: the limiter persists `QUOTA_BLOCKED` and affected campaigns enter `SAFETY_PAUSED` until an operator verifies recovery and explicitly retries. `36009003` and structured HTTP 5xx responses use bounded transient backoff.
 
@@ -128,6 +121,6 @@ If authorization needs attention after reboot, outbound fails closed. If Redis w
 
 ## Service topology
 
-Always-on safe profile: PostgreSQL, Redis, API, web, Creator Database sync worker, and read-only history worker. Live profile adds the mutation-only outbound worker. Only Creator Database sync receives `SEARCH_CREATORS`; Outreach filtering receives no TikTok adapter; history receives only `LIST_CONVERSATIONS` and `LIST_MESSAGES`; outbound receives only Create/Get Conversation and Send Message capabilities.
+Always-on production profile: PostgreSQL, Redis, API, web, Creator Database sync worker, read-only history worker, and the mutation-only outbound worker. Only Creator Database sync receives `SEARCH_CREATORS`; Outreach filtering receives no TikTok adapter; history receives only `LIST_CONVERSATIONS` and `LIST_MESSAGES`; outbound receives only Create/Get Conversation and Send Message capabilities.
 
 PostgreSQL and Redis use persistent named volumes. API and web expose loopback-only ports. Health checks cover PostgreSQL, Redis, API readiness, and web readiness. Worker heartbeats update every 15 seconds, are stale after 45 seconds, and write only one small row per role.

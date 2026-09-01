@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DelayedError, Job, Queue, Worker } from "bullmq";
 import { lockCreatorEligibility, Prisma, PrismaClient } from "@affiliate/db";
-import { liveOutboundExplicitlyEnabled, loadConfig } from "@affiliate/config";
+import { configuredOutboundCapability, loadConfig } from "@affiliate/config";
 import type { TikTokOutboundAdapter } from "@affiliate/contracts";
 import { reconcileUnknownDelivery } from "@affiliate/domain";
 import { decryptTikTokToken, MockTikTokAffiliateAdapter, RealTikTokOutboundAdapter, TikTokOutboundError } from "@affiliate/tiktok-adapter";
 import { reserveDispatchSlot } from "./dispatch-safety";
 import { deliveryAction, recoverDispatchingDelivery } from "./delivery-policy";
-import { campaignCompletionSummary } from "./campaign-completion";
+import { allFrozenRecipientsTerminal, campaignCompletionSummary } from "./campaign-completion";
 import { isProviderThrottle, OutboundProviderGovernor } from "./outbound-throttle";
 
 const config = loadConfig();
@@ -21,7 +21,8 @@ const providerGovernor = new OutboundProviderGovernor(prisma, {
   appScope: providerAppScope,
   initialConcurrency: config.OUTBOUND_PROVIDER_INITIAL_CONCURRENCY,
   technicalMaxConcurrency: config.OUTBOUND_PROVIDER_MAX_CONCURRENCY,
-  permitLeaseMs: config.OUTBOUND_PROVIDER_PERMIT_LEASE_MS
+  permitLeaseMs: config.OUTBOUND_PROVIDER_PERMIT_LEASE_MS,
+  sendMessageIntervalMs: config.OUTBOUND_SEND_MESSAGE_INTERVAL_MS
 });
 function required(name: "TIKTOK_APP_KEY" | "TIKTOK_APP_SECRET" | "TIKTOK_TOKEN_ENCRYPTION_KEY"): string {
   const value = config[name];
@@ -33,7 +34,7 @@ const disabledOutbound: TikTokOutboundAdapter = {
   sendMessage: async () => { throw new Error("OUTBOUND_DISABLED"); }
 };
 const adapter: TikTokOutboundAdapter = config.OUTBOUND_MODE === "mock" ? new MockTikTokAffiliateAdapter()
-  : liveOutboundExplicitlyEnabled(config) ? new RealTikTokOutboundAdapter({
+  : config.OUTBOUND_MODE === "live" ? new RealTikTokOutboundAdapter({
     baseUrl: config.TIKTOK_API_BASE_URL, appKey: required("TIKTOK_APP_KEY"), appSecret: required("TIKTOK_APP_SECRET"),
     shopCipher: async () => {
       const shop = await prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true }, select: { shopCipher: true } });
@@ -57,6 +58,13 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 async function publishHeartbeat(status: "RUNNING" | "STOPPED"): Promise<void> {
   const now = new Date();
   const since = new Date(now.getTime() - 60_000);
+  await prisma.providerOutboundLimiter.updateMany({
+    where: {
+      appScope: providerAppScope, operation: "SEND_MESSAGE",
+      OR: [{ effectiveConcurrency: { not: 1 } }, { technicalMaxConcurrency: { not: 1 } }]
+    },
+    data: { effectiveConcurrency: 1, technicalMaxConcurrency: 1, healthySuccessCount: 0 }
+  });
   const [limiters, attemptsLastMinute, acceptedLastMinute, throttlesLastMinute, queueDepth] = await Promise.all([
     prisma.providerOutboundLimiter.findMany({ where: { appScope: providerAppScope }, select: {
       shopId: true, operation: true, state: true, effectiveConcurrency: true, technicalMaxConcurrency: true,
@@ -68,8 +76,10 @@ async function publishHeartbeat(status: "RUNNING" | "STOPPED"): Promise<void> {
     queue.getJobCounts("waiting", "active", "delayed", "prioritized")
   ]);
   const metadata = {
+    ...configuredOutboundCapability(config),
     outboundMode: config.OUTBOUND_MODE,
-    mutationCapability: config.OUTBOUND_MODE === "live",
+    sendMessageMinIntervalMs: config.OUTBOUND_SEND_MESSAGE_INTERVAL_MS,
+    sendMessageMaxPerSecond: 1,
     acceptedSendsPerMinute: acceptedLastMinute,
     providerAttemptsPerMinute: attemptsLastMinute,
     recentThrottles: throttlesLastMinute,
@@ -86,6 +96,13 @@ async function publishHeartbeat(status: "RUNNING" | "STOPPED"): Promise<void> {
 
 async function maintenanceSweep(): Promise<void> {
   const now = new Date();
+  await prisma.queueOutbox.updateMany({
+    where: {
+      state: { in: ["PENDING", "ENQUEUED"] },
+      delivery: { state: { in: ["SENT", "RESTRICTED", "FAILED_TERMINAL", "DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED", "CANCELLED"] } }
+    },
+    data: { state: "COMPLETED", lastError: null }
+  });
   await prisma.$transaction(async (tx) => {
     const expired = await tx.campaign.findMany({ where: { state: "FROZEN", freezeExpiresAt: { lte: now } }, select: { id: true, shopId: true } });
     for (const campaign of expired) {
@@ -116,7 +133,10 @@ async function maintenanceSweep(): Promise<void> {
         else continue;
       }
       await queue.add("send", { recipientId: recipient.id }, { jobId: entry.deterministicJobId, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000 });
-      await prisma.queueOutbox.update({ where: { id: entry.id }, data: { state: "ENQUEUED", enqueuedAt: new Date(), enqueueAttempts: { increment: 1 }, lastError: null } });
+      await prisma.queueOutbox.updateMany({
+        where: { id: entry.id, state: { in: ["PENDING", "ENQUEUED"] }, delivery: { recipient: { state: "QUEUED" } } },
+        data: { state: "ENQUEUED", enqueuedAt: new Date(), enqueueAttempts: { increment: 1 }, lastError: null }
+      });
     } catch (error) {
       await prisma.queueOutbox.update({ where: { id: entry.id }, data: { state: "PENDING", enqueueAttempts: { increment: 1 }, lastError: error instanceof Error ? error.message : "Queue reconciliation failed" } });
     }
@@ -215,9 +235,10 @@ async function markDeliveryUnknown(recipient: any, attemptId: string, requestId:
 }
 
 async function completeCampaignIfDone(campaignId: string) {
-  const unfinished = await prisma.campaignRecipient.count({ where: { campaignId, selected: true, state: { in: ["RESERVED", "QUEUED", "PROCESSING", "DELIVERY_UNKNOWN"] } } });
-  if (unfinished) return;
-  const recipients = await prisma.campaignRecipient.findMany({ where: { campaignId, selected: true }, select: { state: true } });
+  const recipients = await prisma.campaignRecipient.findMany({
+    where: { campaignId, selected: true, frozenMessage: { not: null } }, select: { state: true }
+  });
+  if (!allFrozenRecipientsTerminal(recipients.map((recipient) => recipient.state))) return;
   const completion = campaignCompletionSummary(recipients.map((recipient) => recipient.state));
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { state: true, summary: true } });
   if (campaign.state === "CANCELLED") return;
@@ -268,7 +289,7 @@ async function makeDeliveryRetryable(recipient: any, errorCode: string, errorDet
 }
 
 async function processSend(job: Job<{ recipientId: string }>) {
-  if (config.OUTBOUND_MODE === "read_only" || (config.OUTBOUND_MODE === "live" && !liveOutboundExplicitlyEnabled(config))) throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable");
+  if (!configuredOutboundCapability(config).mutationCapability) throw new Error("OUTBOUND_DISABLED: worker dispatch is unavailable");
   const recipient = await prisma.campaignRecipient.findUnique({
     where: { id: job.data.recipientId },
     include: { creator: true, campaign: { include: { shop: true } }, delivery: true, reservation: true }
@@ -553,6 +574,7 @@ console.log(JSON.stringify({
   workerConcurrency: config.OUTBOUND_WORKER_CONCURRENCY,
   providerInitialConcurrency: config.OUTBOUND_PROVIDER_INITIAL_CONCURRENCY,
   providerTechnicalMaxConcurrency: config.OUTBOUND_PROVIDER_MAX_CONCURRENCY,
+  sendMessageMinIntervalMs: config.OUTBOUND_SEND_MESSAGE_INTERVAL_MS,
   queuePollIntervalMs: config.OUTBOUND_QUEUE_POLL_INTERVAL_MS, queueReconcileBatchSize: config.OUTBOUND_QUEUE_RECONCILE_BATCH_SIZE
 }));
 

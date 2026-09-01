@@ -17,7 +17,11 @@ const message = (id: string, conversationId: string, direction: "OUTBOUND" | "IN
 
 async function fixture() {
   const shop = await prisma.shop.create({ data: { name: stamp(), connectionMode: "MOCK" } }); shopIds.add(shop.id);
-  const tiktok = { activeShop: async () => shop, historyAdapter: vi.fn() };
+  const tiktok = {
+    activeShop: async () => shop,
+    historyAdapter: vi.fn(),
+    outboundCapability: async () => ({ mode: "MOCK", mutationCapability: true, available: true, workerState: "NOT_REQUIRED", reason: null })
+  };
   const identities = new CreatorIdentityResolver(prisma as any);
   const service = new HistoryService(prisma as any, tiktok as any, identities);
   const processor = new HistoryProcessor(prisma as any, tiktok as any, identities, { now: () => now, random: () => 0, leaseMs: 1000 });

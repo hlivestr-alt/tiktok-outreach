@@ -63,12 +63,14 @@ export type SendMessageResult =
   | { status: "RESTRICTED"; requestId: string; errorCode: string; httpStatus?: number };
 
 export type AuthorizedTikTokShop = { id: string; cipher: string; code?: string; name: string; region: string; sellerType?: string };
+export type TikTokShopCategory = { id: string; parentId: string; localName: string; isLeaf: boolean };
 
 export interface TikTokReadAdapter {
   getCapabilities(): Promise<AdapterCapabilities>;
   searchCreators(filters: CreatorFilters, cursor?: { pageToken?: string; searchKey?: string; pageSize: number }): Promise<CreatorSearchPage>;
   getCreatorPerformance(creatorOpenId: string): Promise<CreatorCandidate>;
   getAuthorizedShops?(): Promise<AuthorizedTikTokShop[]>;
+  getCategories?(): Promise<TikTokShopCategory[]>;
   listConversations(cursor?: { pageToken?: string; pageSize: number }): Promise<ProviderPage<ProviderConversation>>;
   listMessages(conversationId: string, cursor?: { pageToken?: string; pageSize: number; creatorImId?: string }): Promise<ProviderPage<ProviderMessage>>;
   getLatestUnreadMessages?(): Promise<ProviderMessage[]>;

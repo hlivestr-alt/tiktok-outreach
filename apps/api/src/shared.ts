@@ -70,14 +70,19 @@ export async function reconcileOutbox(prisma: PrismaClient, outreach: OutreachQu
         const state = await existing.getState();
         if (state === "completed" || state === "failed") await existing.remove();
         else {
-          await prisma.queueOutbox.update({ where: { id: entry.id }, data: { state: "ENQUEUED", enqueuedAt: new Date(), lastError: null } });
+          await prisma.queueOutbox.updateMany({
+            where: { id: entry.id, state: { in: ["PENDING", "ENQUEUED"] }, delivery: { recipient: { state: "QUEUED" } } },
+            data: { state: "ENQUEUED", enqueuedAt: new Date(), lastError: null }
+          });
           continue;
         }
       }
       await outreach.add(entry.jobName, { recipientId: entry.recipientId }, {
         jobId: entry.deterministicJobId, attempts: 4, backoff: { type: "exponential", delay: 1000 }, removeOnComplete: 1000
       });
-      await prisma.queueOutbox.update({ where: { id: entry.id }, data: {
+      await prisma.queueOutbox.updateMany({ where: {
+        id: entry.id, state: { in: ["PENDING", "ENQUEUED"] }, delivery: { recipient: { state: "QUEUED" } }
+      }, data: {
         state: "ENQUEUED", enqueuedAt: new Date(), enqueueAttempts: { increment: 1 }, lastError: null
       } });
       enqueued++;

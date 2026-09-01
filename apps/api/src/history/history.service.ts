@@ -373,6 +373,7 @@ export class HistoryService {
     const discoveryUsableForAnalysis = paginationComplete && fresh;
     const futureOutboundSafe = discoveryUsableForAnalysis && identityReconciliationComplete;
     const identityCoveragePercent = totalHistoricalCreators === 0 ? 100 : Math.round((fullyLinkedHistoricalCreators / totalHistoricalCreators) * 10_000) / 100;
+    const outbound = await this.tiktok.outboundCapability();
     return {
       mode: config.APP_MODE === "mock" ? "MOCK" : "READ_ONLY",
       historyReady: futureOutboundSafe,
@@ -381,7 +382,8 @@ export class HistoryService {
       discoveryUsableForAnalysis,
       futureOutboundSafe,
       cooldownDedupeCoverageComplete: futureOutboundSafe,
-      outboundEnabled: config.OUTBOUND_MODE === "mock" || (config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES"),
+      outboundEnabled: outbound.available,
+      outboundCapability: outbound,
       outboundProvider: config.OUTBOUND_MODE === "live" ? "DEDICATED_MUTATION_WORKER" : config.OUTBOUND_MODE === "mock" ? "MOCK_ONLY" : "PHYSICALLY_UNAVAILABLE",
       cooldownCapabilities: {
         appOriginated: "APP_ORIGINATED_DEDUPE_SAFE",
@@ -408,9 +410,9 @@ export class HistoryService {
       ...(imOnlyHistoricalCreators ? [`${imOnlyHistoricalCreators} IM-only historical creator identities cannot yet be safely linked to Marketplace identities`] : []),
       ...(historicalCreatorsMissingVerifiedMarketplaceIdentity ? [`${historicalCreatorsMissingVerifiedMarketplaceIdentity} historical creators lack a verified Marketplace identity link`] : []),
       ...(outboundContactsOnUnresolvedIdentities ? [`${outboundContactsOnUnresolvedIdentities} outbound historical contacts are attached to unresolved identities`] : []),
-      config.OUTBOUND_MODE === "mock" ? "Only mock outbound dispatch is available"
-        : config.OUTBOUND_MODE === "live" ? "Live outbound is separately configured; unresolved history remains a visible limitation, not a false exact match"
-        : "Real TikTok outbound is physically unavailable in read-only mode"
+       outbound.reason ?? (config.OUTBOUND_MODE === "mock" ? "Only mock outbound dispatch is available"
+         : config.OUTBOUND_MODE === "live" ? "Live outbound is available; unresolved history remains a visible limitation, not a false exact match"
+         : "Real TikTok outbound is physically unavailable in read-only mode")
     ] };
   }
 

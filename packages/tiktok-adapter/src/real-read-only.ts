@@ -1,14 +1,15 @@
 import type {
   AdapterCapabilities, AuthorizedTikTokShop, CreatorSearchPage, ProviderConversation, ProviderMessage,
-  ProviderPage, TikTokReadAdapter
+  ProviderPage, TikTokReadAdapter, TikTokShopCategory
 } from "@affiliate/contracts";
 import type { CreatorCandidate, CreatorFilters } from "@affiliate/domain";
 import { signTikTokShopRequest } from "./signing";
 
-export type TikTokReadOperation = "GET_AUTHORIZED_SHOPS" | "SEARCH_CREATORS" | "GET_CREATOR_PERFORMANCE" | "LIST_CONVERSATIONS" | "LIST_MESSAGES";
+export type TikTokReadOperation = "GET_AUTHORIZED_SHOPS" | "GET_CATEGORIES" | "SEARCH_CREATORS" | "GET_CREATOR_PERFORMANCE" | "LIST_CONVERSATIONS" | "LIST_MESSAGES";
 
 const ALLOWED_REQUESTS: ReadonlyArray<{ operation: TikTokReadOperation; method: "GET" | "POST"; path: RegExp }> = [
   { operation: "GET_AUTHORIZED_SHOPS", method: "GET", path: /^\/authorization\/202309\/shops$/ },
+  { operation: "GET_CATEGORIES", method: "GET", path: /^\/product\/202309\/categories$/ },
   { operation: "SEARCH_CREATORS", method: "POST", path: /^\/affiliate_seller\/202508\/marketplace_creators\/search$/ },
   { operation: "GET_CREATOR_PERFORMANCE", method: "GET", path: /^\/affiliate_seller\/202508\/marketplace_creators\/[^/]+$/ },
   { operation: "LIST_CONVERSATIONS", method: "GET", path: /^\/affiliate_seller\/202412\/conversations$/ },
@@ -49,7 +50,7 @@ export type TikTokDiagnostics = {
 };
 
 export type TikTokReadLease = { provider: "TIKTOK_SHOP"; shopScope: string; operation: TikTokReadOperation; leaseOperation: string; leaseId: string };
-export type TikTokReadGovernorEvent = { requestId?: string; retryAfterMs?: number; providerCode?: number };
+export type TikTokReadGovernorEvent = { requestId?: string; retryAfterMs?: number; providerCode?: number; httpStatus?: number };
 export interface TikTokReadRequestGovernor {
   acquire(input: Omit<TikTokReadLease, "leaseId" | "leaseOperation">): Promise<TikTokReadLease>;
   requestStarted(lease: TikTokReadLease): Promise<void>;
@@ -141,7 +142,7 @@ export class TikTokReadOnlyHttpClient {
       catch {
         if (response.status === 429) {
           this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, requestId: requestIdHeader, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
-          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter }) : undefined;
+          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter, httpStatus: response.status }) : undefined;
           finalized = Boolean(lease);
           throw new TikTokApiError("RATE_LIMIT", input.operation, response.status, undefined, requestIdHeader, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
         }
@@ -152,7 +153,7 @@ export class TikTokReadOnlyHttpClient {
       catch {
         if (response.status === 429) {
           this.options.diagnostics?.({ operation: input.operation, httpStatus: response.status, requestId: requestIdHeader, durationMs: Date.now() - started, retryCount, shopScope: input.shopScope, timestamp: new Date().toISOString() });
-          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter }) : undefined;
+          const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId: requestIdHeader, retryAfterMs: retryAfter, httpStatus: response.status }) : undefined;
           finalized = Boolean(lease);
           throw new TikTokApiError("RATE_LIMIT", input.operation, response.status, undefined, requestIdHeader, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
         }
@@ -168,7 +169,7 @@ export class TikTokReadOnlyHttpClient {
       }
       const kind = errorKind(response.status, code, string(payload.message) ?? "");
       if (kind === "RATE_LIMIT") {
-        const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId, retryAfterMs: retryAfter, providerCode: code }) : undefined;
+        const nextPermittedAt = lease ? await this.options.governor!.throttled(lease, { requestId, retryAfterMs: retryAfter, providerCode: code, httpStatus: response.status }) : undefined;
         finalized = Boolean(lease);
         throw new TikTokApiError(kind, input.operation, response.status, code, requestId, "TikTok read operation is provider-throttled", retryAfter, nextPermittedAt);
       }
@@ -234,7 +235,7 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
 
   async getCapabilities(): Promise<AdapterCapabilities> {
     return { mode: "READ_ONLY", market: "ID", currency: null, currencySource: "PROVIDER_RESPONSE_REQUIRED", pageSizes: [12, 20], messageTypes: ["TEXT"], maxMessageLength: 0,
-      filters: ["keyword:server", "category:server", "gmv:currencyAwareLocal", "unitsSoldDiscreteRanges:server", "followers:local", "avgVideoViews:local", "avgLiveViewers:local", "engagementRate:local"],
+      filters: ["keyword:server", "category:server", "gmvDiscreteRanges:server", "unitsSoldDiscreteRanges:server", "followersInclusiveRange:server", "avgVideoViews:local", "avgLiveViewers:local", "engagementRate:local"],
       rankingMetrics: ["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"] };
   }
 
@@ -249,13 +250,40 @@ export class RealTikTokReadOnlyAffiliateAdapter implements TikTokReadAdapter {
     });
   }
 
+  async getCategories(): Promise<TikTokShopCategory[]> {
+    const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
+    const response = await this.options.http.requestRaw<JsonObject>({
+      operation: "GET_CATEGORIES", method: "GET", path: "/product/202309/categories",
+      accessToken: await this.options.accessToken(), shopScope,
+      query: { shop_cipher: shopCipher, locale: "id-ID", category_version: "v2", listing_platform: "TIKTOK_SHOP", include_prohibited_categories: false }
+    });
+    const data = object(response.data, "GET_CATEGORIES.data");
+    return array(data.categories).map((item) => {
+      const category = object(item, "category");
+      const id = string(category.id), parentId = string(category.parent_id), localName = string(category.local_name);
+      if (!id || !parentId || !localName || typeof category.is_leaf !== "boolean") {
+        throw new TikTokApiError("MALFORMED_RESPONSE", "GET_CATEGORIES", undefined, undefined, string(response.request_id), "Category omitted a required field");
+      }
+      return { id, parentId, localName, isLeaf: category.is_leaf };
+    });
+  }
+
   async searchCreators(filters: CreatorFilters, cursor: { pageToken?: string; searchKey?: string; pageSize: number } = { pageSize: 20 }): Promise<CreatorSearchPage> {
     if (![12, 20].includes(cursor.pageSize)) throw new TikTokApiError("PROVIDER", "SEARCH_CREATORS", undefined, undefined, undefined, "Creator search page_size must be 12 or 20");
     const [shopCipher, shopScope] = await Promise.all([this.options.shopCipher(), this.options.shopScope?.()]);
     const body: JsonObject = {};
     if (cursor.searchKey) body.search_key = cursor.searchKey;
     if (filters.keyword) body.keyword = filters.keyword;
-    if (filters.categoryIds?.length) body.category = filters.categoryIds.map((id) => ({ id }));
+    if (filters.marketplaceCategory) body.category = [{
+      parent_category_id: filters.marketplaceCategory.parentCategoryId,
+      ...(filters.marketplaceCategory.childCategoryIds?.length ? { child_category_id_list: filters.marketplaceCategory.childCategoryIds } : {})
+    }];
+    else if (filters.categoryIds?.length) body.category = filters.categoryIds.map((id) => ({ parent_category_id: id }));
+    if (filters.minFollowers != null || filters.maxFollowers != null) body.follower_demographics = { count_range: {
+      ...(filters.minFollowers != null ? { count_ge: filters.minFollowers } : {}),
+      ...(filters.maxFollowers != null ? { count_le: filters.maxFollowers } : {})
+    } };
+    if (filters.marketplaceGmvRanges?.length) body.gmv_ranges = filters.marketplaceGmvRanges;
     const unitRanges = discreteRanges(filters.minUnitsSold, undefined, [["UNITS_SOLD_RANGE_0_10", 0, 10], ["UNITS_SOLD_RANGE_10_100", 10, 100], ["UNITS_SOLD_RANGE_100_1000", 100, 1000], ["UNITS_SOLD_RANGE_1000_AND_ABOVE", 1000, Number.POSITIVE_INFINITY]]);
     if (unitRanges) body.units_sold_ranges = unitRanges;
     const response = await this.options.http.requestRaw<JsonObject>({ operation: "SEARCH_CREATORS", method: "POST", path: "/affiliate_seller/202508/marketplace_creators/search", accessToken: await this.options.accessToken(), shopScope,

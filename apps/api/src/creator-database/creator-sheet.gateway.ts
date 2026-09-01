@@ -6,6 +6,19 @@ import { config } from "../shared";
 type ServiceAccount = { client_email: string; private_key: string; token_uri?: string };
 type SheetValues = { values?: unknown[][] };
 
+export type GoogleSheetsFailureDetails = {
+  httpStatus?: number;
+  googleApiCode?: string;
+  retryable: boolean;
+  safeReason?: string;
+};
+
+export class GoogleSheetsError extends Error {
+  constructor(readonly details: GoogleSheetsFailureDetails, options?: { cause?: unknown }) {
+    super("Google Sheets request failed", options);
+  }
+}
+
 export type CreatorSheet = Pick<GoogleSheetsCreatorGateway, "readCreators" | "reconcilePage">;
 
 function base64url(value: string | Buffer) {
@@ -21,6 +34,54 @@ function numeric(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function safeProviderMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized
+    .replace(/bearer\s+[a-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/(access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|authorization)\s*[:=]\s*[^,; ]+/gi, "$1=[redacted]")
+    .slice(0, 240);
+}
+
+type GoogleErrorPayload = { error?: { code?: unknown; message?: unknown; status?: unknown; errors?: Array<{ reason?: unknown; message?: unknown }> } };
+
+function providerCode(payload: GoogleErrorPayload): string | undefined {
+  const error = payload.error;
+  if (!error) return undefined;
+  const status = text(error.status);
+  const code = typeof error.code === "number" || typeof error.code === "string" ? String(error.code) : undefined;
+  if (status && code && status !== code) return `${status} (${code})`;
+  return status ?? code;
+}
+
+function responseIsRetryable(httpStatus: number | undefined, payload: GoogleErrorPayload): boolean {
+  const error = payload.error;
+  const status = text(error?.status)?.toUpperCase();
+  const reasons = (error?.errors ?? []).map((item) => text(item.reason)?.toLowerCase()).filter(Boolean);
+  if (["rateLimitExceeded", "userRateLimitExceeded", "backendError"].some((reason) => reasons.includes(reason))) return true;
+  if (["RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "ABORTED"].includes(status ?? "")) return true;
+  if (httpStatus == null) return true;
+  if (httpStatus === 408 || httpStatus === 409 || httpStatus === 425 || httpStatus === 429) return true;
+  return httpStatus >= 500;
+}
+
+function failureFromResponse(httpStatus: number | undefined, payload: GoogleErrorPayload, fallback: string): GoogleSheetsError {
+  const error = payload.error;
+  const retryable = responseIsRetryable(httpStatus, payload);
+  return new GoogleSheetsError({
+    httpStatus,
+    googleApiCode: providerCode(payload),
+    retryable,
+    safeReason: safeProviderMessage(error?.message) ?? safeProviderMessage(fallback)
+  });
+}
+
+export function googleSheetsFailure(error: unknown): GoogleSheetsFailureDetails {
+  if (error instanceof GoogleSheetsError) return error.details;
+  return { retryable: true, safeReason: "provider response unavailable" };
 }
 
 function money(amount: unknown, currency = "USD"): Money | null {
@@ -60,14 +121,14 @@ export class GoogleSheetsCreatorGateway {
 
   private credentials(): ServiceAccount {
     const raw = config.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
-    if (!raw) throw new Error("Google Sheets service account is not configured");
+    if (!raw) throw new GoogleSheetsError({ retryable: false, googleApiCode: "INVALID_CONFIGURATION", safeReason: "service account is not configured" });
     try {
       const decoded = raw.startsWith("{") ? raw : Buffer.from(raw, "base64").toString("utf8");
       const credentials = JSON.parse(decoded) as Partial<ServiceAccount>;
       if (!credentials.client_email || !credentials.private_key) throw new Error("missing fields");
       return credentials as ServiceAccount;
     } catch {
-      throw new Error("Google Sheets service account configuration is invalid");
+      throw new GoogleSheetsError({ retryable: false, googleApiCode: "INVALID_CONFIGURATION", safeReason: "service account configuration is invalid" });
     }
   }
 
@@ -80,26 +141,46 @@ export class GoogleSheetsCreatorGateway {
       iss: credentials.client_email, scope: "https://www.googleapis.com/auth/spreadsheets",
       aud: credentials.token_uri ?? "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600
     }));
-    const signer = createSign("RSA-SHA256"); signer.update(`${header}.${claim}`); signer.end();
-    const assertion = `${header}.${claim}.${signer.sign(credentials.private_key, "base64url")}`;
-    const response = await fetch(credentials.token_uri ?? "https://oauth2.googleapis.com/token", {
-      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion })
-    });
-    if (!response.ok) throw new Error(`Google authentication failed (${response.status})`);
-    const payload = await response.json() as { access_token?: string; expires_in?: number };
-    if (!payload.access_token) throw new Error("Google authentication returned no access token");
+    let assertion: string;
+    try {
+      const signer = createSign("RSA-SHA256"); signer.update(`${header}.${claim}`); signer.end();
+      assertion = `${header}.${claim}.${signer.sign(credentials.private_key, "base64url")}`;
+    } catch (error) {
+      throw new GoogleSheetsError({ retryable: false, googleApiCode: "INVALID_CONFIGURATION", safeReason: "service account key is invalid" }, { cause: error });
+    }
+    let response: Response;
+    try {
+      response = await fetch(credentials.token_uri ?? "https://oauth2.googleapis.com/token", {
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion })
+      });
+    } catch (error) {
+      throw new GoogleSheetsError({ retryable: true, safeReason: "authentication request failed before a response" }, { cause: error });
+    }
+    const payload = await response.json().catch(() => ({})) as GoogleErrorPayload & { access_token?: string; expires_in?: number };
+    if (!response.ok) throw failureFromResponse(response.status, payload, "Google authentication failed");
+    if (!payload.access_token) throw new GoogleSheetsError({ httpStatus: response.status, googleApiCode: "INVALID_RESPONSE", retryable: true, safeReason: "authentication response returned no access token" });
     this.accessToken = { value: payload.access_token, expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000 };
     return payload.access_token;
   }
 
   private async request<T>(url: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(url, { ...init, headers: { authorization: `Bearer ${await this.token()}`, "content-type": "application/json", ...init?.headers } });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
-      throw new Error(`Google Sheets request failed (${response.status}): ${payload.error?.message ?? "unknown error"}`);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers: { authorization: `Bearer ${await this.token()}`, "content-type": "application/json", ...init?.headers } });
+    } catch (error) {
+      if (error instanceof GoogleSheetsError) throw error;
+      throw new GoogleSheetsError({ retryable: true, safeReason: "request failed before a response" }, { cause: error });
     }
-    return response.json() as Promise<T>;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as GoogleErrorPayload;
+      throw failureFromResponse(response.status, payload, "Google Sheets request failed");
+    }
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      throw new GoogleSheetsError({ httpStatus: response.status, googleApiCode: "INVALID_RESPONSE", retryable: true, safeReason: "Google returned an unreadable response" }, { cause: error });
+    }
   }
 
   private valuesUrl(spreadsheetId: string, range: string) {
@@ -118,7 +199,8 @@ export class GoogleSheetsCreatorGateway {
     rows.forEach((row, index) => { const id = text(row[3]); if (id && !rowByCreator.has(id)) rowByCreator.set(id, index + 2); });
     const updates: Array<{ range: string; values: unknown[][] }> = [];
     const additions: unknown[][] = [];
-    for (const creator of creators) {
+    const uniqueCreators = [...new Map(creators.map((creator) => [creator.creatorOpenId, creator])).values()];
+    for (const creator of uniqueCreators) {
       const rowNumber = rowByCreator.get(creator.creatorOpenId);
       if (rowNumber) updates.push({ range: `Creators!A${rowNumber}:Q${rowNumber}`, values: [sheetRow(creator, rowNumber - 1)] });
       else additions.push(sheetRow(creator, rows.length + additions.length + 1));

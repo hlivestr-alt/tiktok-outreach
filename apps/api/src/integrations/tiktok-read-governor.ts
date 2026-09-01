@@ -3,10 +3,11 @@ import { randomBytes } from "node:crypto";
 import { TikTokApiError, type TikTokReadGovernorEvent, type TikTokReadLease, type TikTokReadRequestGovernor } from "@affiliate/tiktok-adapter";
 import { PrismaService } from "../shared";
 import { config } from "../shared";
+import { CREATOR_MARKETPLACE_RETRY_MS, DEFAULT_MARKETPLACE_RETRY_DELAY_SECONDS, MIN_MARKETPLACE_RETRY_DELAY_SECONDS, marketplaceRetryDelayMs } from "../creator-database/retry-settings";
 
 const DEFAULT_SPACING_MS = 750;
 const LEASE_MS = 120_000;
-export const CREATOR_MARKETPLACE_RETRY_MS = 5_000;
+export { CREATOR_MARKETPLACE_RETRY_MS };
 
 type GovernorOptions = { now?: () => Date; random?: () => number; spacingMs?: number; marketplaceSpacingMs?: number; leaseMs?: number; timezone?: string };
 
@@ -53,6 +54,14 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
   ) { this.options = options ?? {}; }
 
   private now(): Date { return this.options.now?.() ?? new Date(); }
+
+  private async configuredMarketplaceRetryDelayMs(shopScope: string): Promise<number> {
+    const job = await this.prisma.creatorSyncJob.findUnique({ where: { shopId: shopScope }, select: { marketplaceRetryDelaySeconds: true } });
+    const seconds = job?.marketplaceRetryDelaySeconds;
+    return typeof seconds === "number" && Number.isInteger(seconds) && seconds >= MIN_MARKETPLACE_RETRY_DELAY_SECONDS
+      ? marketplaceRetryDelayMs(seconds)
+      : marketplaceRetryDelayMs(DEFAULT_MARKETPLACE_RETRY_DELAY_SECONDS);
+  }
 
   async acquire(input: Omit<TikTokReadLease, "leaseId" | "leaseOperation">): Promise<TikTokReadLease> {
     const now = this.now();
@@ -139,8 +148,12 @@ export class TikTokReadGovernor implements TikTokReadRequestGovernor {
     });
     const count = current.consecutiveThrottleCount + 1;
     const retryAfterMs = safeDelay(event.retryAfterMs);
-    const localBackoffMs = lease.operation === "SEARCH_CREATORS"
-      ? CREATOR_MARKETPLACE_RETRY_MS
+    const marketplaceRetry = lease.operation === "SEARCH_CREATORS"
+      && (event.httpStatus === 429 || event.providerCode === 36009002);
+    const localBackoffMs = marketplaceRetry
+      ? await this.configuredMarketplaceRetryDelayMs(lease.shopScope)
+      : lease.operation === "SEARCH_CREATORS"
+        ? CREATOR_MARKETPLACE_RETRY_MS
       : Math.min(15 * 60_000, 5_000 * 2 ** Math.min(count - 1, 20));
     const cooldownMs = Math.max(localBackoffMs, retryAfterMs ?? 0);
     const now = this.now();

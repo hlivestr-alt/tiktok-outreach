@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@affiliate/domain": "workspace:*",
     "lucide-react": "^0.468.0",
     "next": "^16.0.0",
     "react": "^19.2.0",
@@ -19,4 +20,3 @@
     "@types/react-dom": "^19.2.0"
   }
 }
-

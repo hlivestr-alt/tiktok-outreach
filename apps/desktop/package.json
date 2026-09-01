@@ -1,0 +1,34 @@
+{
+  "name": "@affiliate/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Secure Electron shell for TikTok Outreach",
+  "main": "dist/main.js",
+  "scripts": {
+    "assets": "node scripts/build-icon.cjs",
+    "build": "pnpm run assets && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "ensure:electron": "node scripts/ensure-electron.cjs",
+    "postinstall": "pnpm run ensure:electron",
+    "dev": "pnpm run ensure:electron && pnpm run build && node scripts/dev.cjs",
+    "package": "pnpm run build && electron-builder --dir",
+    "dist": "pnpm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12",
+    "sharp": "^0.34.3",
+    "typescript": "^5.9.0"
+  },
+  "build": {
+    "appId": "com.local.tiktokoutreach",
+    "productName": "TikTok Outreach",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["dist/**/*", "package.json"],
+    "extraResources": [{ "from": "resources", "to": "resources" }],
+    "win": { "target": ["nsis"], "icon": "build/icon.png", "artifactName": "TikTok-Outreach-${version}-${arch}.${ext}" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true },
+    "publish": null
+  }
+}

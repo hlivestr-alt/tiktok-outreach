@@ -1,4 +1,10 @@
 export type TerminalRecipientState = "SENT" | "FAILED" | "DELIVERY_UNKNOWN_UNRESOLVED" | "CANCELLED" | string;
+export const TERMINAL_RECIPIENT_STATES = ["SENT", "RESTRICTED", "FAILED", "DELIVERY_UNKNOWN_UNRESOLVED", "CANCELLED"] as const;
+
+export function allFrozenRecipientsTerminal(states: TerminalRecipientState[]): boolean {
+  const terminal = new Set<string>(TERMINAL_RECIPIENT_STATES);
+  return states.length > 0 && states.every((state) => terminal.has(state));
+}
 
 export function campaignCompletionSummary(states: TerminalRecipientState[]) {
   const sent = states.filter((state) => state === "SENT").length;

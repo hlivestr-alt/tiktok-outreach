@@ -59,6 +59,7 @@ export class OutboundProviderGovernor {
     initialConcurrency: number;
     technicalMaxConcurrency: number;
     permitLeaseMs: number;
+    sendMessageIntervalMs?: number;
     random?: () => number;
   }) {
     if (options.initialConcurrency > options.technicalMaxConcurrency) {
@@ -73,16 +74,25 @@ export class OutboundProviderGovernor {
   async acquire(shopId: string, operation: OutboundProviderOperation, owner: string = randomUUID(), now = new Date()): Promise<PermitResult> {
     return this.prisma.$transaction(async (tx) => {
       const key = this.key(shopId, operation);
+      const isSendMessage = operation === "SEND_MESSAGE";
+      const technicalMaxConcurrency = isSendMessage ? 1 : this.options.technicalMaxConcurrency;
+      const initialConcurrency = isSendMessage ? 1 : this.options.initialConcurrency;
+      const sendMessageIntervalMs = Math.max(1_000, this.options.sendMessageIntervalMs ?? 1_000);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`outbound-provider:${key}`}))`;
       let limiter = await tx.providerOutboundLimiter.upsert({
         where: { provider_appScope_shopId_operation: { provider: this.options.provider, appScope: this.options.appScope, shopId, operation } },
-        update: { technicalMaxConcurrency: this.options.technicalMaxConcurrency },
+        update: { technicalMaxConcurrency },
         create: {
           provider: this.options.provider, appScope: this.options.appScope, shopId, operation,
-          effectiveConcurrency: this.options.initialConcurrency,
-          technicalMaxConcurrency: this.options.technicalMaxConcurrency
+          effectiveConcurrency: initialConcurrency,
+          technicalMaxConcurrency
         }
       });
+      if (limiter.effectiveConcurrency > technicalMaxConcurrency) {
+        limiter = await tx.providerOutboundLimiter.update({
+          where: { id: limiter.id }, data: { effectiveConcurrency: technicalMaxConcurrency, healthySuccessCount: 0 }
+        });
+      }
       await tx.providerOutboundPermit.deleteMany({ where: { limiterId: limiter.id, expiresAt: { lte: now } } });
       if (limiter.state === "QUOTA_BLOCKED") {
         return { acquired: false as const, delayMs: 60_000, state: limiter.state, quotaCode: limiter.quotaCode ?? undefined };
@@ -100,6 +110,17 @@ export class OutboundProviderGovernor {
           where: { id: limiter.id },
           data: { state: "RECOVERING", nextPermittedAt: null, retryAfterMs: null }
         });
+      }
+      if (isSendMessage && limiter.lastRequestAt) {
+        const nextSendAdmissionAt = new Date(limiter.lastRequestAt.getTime() + sendMessageIntervalMs);
+        if (nextSendAdmissionAt > now) {
+          return {
+            acquired: false as const,
+            delayMs: nextSendAdmissionAt.getTime() - now.getTime(),
+            state: limiter.state,
+            throttledUntil: nextSendAdmissionAt
+          };
+        }
       }
       const active = await tx.providerOutboundPermit.count({ where: { limiterId: limiter.id } });
       if (active >= limiter.effectiveConcurrency) {

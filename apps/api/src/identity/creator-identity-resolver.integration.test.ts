@@ -6,6 +6,7 @@ import { HistoryService } from "../history/history.service";
 const prisma = new PrismaClient();
 const shopIds = new Set<string>();
 const stamp = () => `identity_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const mockOutboundCapability = { outboundCapability: async () => ({ mode: "MOCK", mutationCapability: true, available: true, workerState: "NOT_REQUIRED", reason: null }) };
 
 async function shop() {
   const value = await prisma.shop.create({ data: { name: stamp(), connectionMode: "MOCK" } });
@@ -135,7 +136,7 @@ describe.sequential("identity-aware history readiness", () => {
     await prisma.contactHistorySyncRun.create({ data: {
       shopId: selectedShop.id, source: "TEST_MIGRATED", state: "COMPLETE", completedAt: new Date(), conversationsScanned: 1, messagesImported: 1
     } });
-    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any);
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop, ...mockOutboundCapability } as any);
     expect(await service.readiness()).toMatchObject({ identityReconciliationComplete: false, futureOutboundSafe: false });
 
     const resolver = new CreatorIdentityResolver(prisma as any);
@@ -152,7 +153,7 @@ describe.sequential("identity-aware history readiness", () => {
   it("does not claim provider verification for a CSV-only Creator Open ID", async () => {
     const selectedShop = await shop();
     const openId = stamp();
-    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any);
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop, ...mockOutboundCapability } as any);
     await service.importCsv({
       sourceName: `${stamp()}.csv`,
       csv: `source_system,source_record_id,creator_open_id,contacted_at,send_status\nlegacy,${stamp()},${openId},2026-08-01T00:00:00Z,SENT\n`
@@ -171,7 +172,7 @@ describe.sequential("identity-aware history readiness", () => {
     const creator = await resolver.ensureConversationCreator({ id: stamp(), creatorImId: stamp() });
     await prisma.creatorShopContactState.create({ data: { shopId: selectedShop.id, creatorId: creator.id, contactCount: 2, firstContactedAt: new Date(), lastContactedAt: new Date() } });
     await prisma.contactHistorySyncRun.create({ data: { shopId: selectedShop.id, source: "TEST", state: "COMPLETE", completedAt: new Date(), conversationsScanned: 1, messagesImported: 2 } });
-    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any, resolver);
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop, ...mockOutboundCapability } as any, resolver);
     const result = await service.readiness();
     expect(result).toMatchObject({ historyPaginationComplete: true, identityReconciliationComplete: false, discoveryUsableForAnalysis: true, futureOutboundSafe: false });
     expect(result.identityCoverage).toMatchObject({ totalHistoricalCreators: 1, imOnlyHistoricalCreators: 1, outboundContactsOnUnresolvedIdentities: 2 });
@@ -183,7 +184,7 @@ describe.sequential("identity-aware history readiness", () => {
     const creator = await resolver.ensureMarketplaceCreator({ creatorOpenId: stamp(), categoryIds: [], followerCount: null, gmv: null, unitsSold: null, avgVideoViews: null, avgLiveViewers: null, selectionRegion: "ID", discoveryOrdinal: 0 });
     await prisma.creatorShopContactState.create({ data: { shopId: selectedShop.id, creatorId: creator.id, contactCount: 1, firstContactedAt: new Date(), lastContactedAt: new Date() } });
     await prisma.contactHistorySyncRun.create({ data: { shopId: selectedShop.id, source: "TEST", state: "COMPLETE", completedAt: new Date(), conversationsScanned: 1, messagesImported: 1 } });
-    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop } as any);
+    const service = new HistoryService(prisma as any, { activeShop: async () => selectedShop, ...mockOutboundCapability } as any);
     expect(await service.readiness()).toMatchObject({ historyPaginationComplete: true, identityReconciliationComplete: true, futureOutboundSafe: true });
     await prisma.contactHistorySyncRun.create({ data: { shopId: selectedShop.id, source: "TEST_STALE", state: "COMPLETE", completedAt: new Date(Date.now() - 2 * 86_400_000) } });
     expect(await service.readiness()).toMatchObject({ historyPaginationComplete: true, discoveryUsableForAnalysis: false, futureOutboundSafe: false });

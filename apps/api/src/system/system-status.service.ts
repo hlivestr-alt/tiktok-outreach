@@ -26,7 +26,11 @@ export class SystemStatusService {
       this.infrastructure(), this.prisma.workerHeartbeat.findMany(), this.integration.status(),
       this.prisma.discoveryRun.count({ where: { state: "QUEUED" } }),
       this.prisma.discoveryRun.count({ where: { state: "BACKING_OFF" } }),
-      this.prisma.queueOutbox.count({ where: { state: { in: ["PENDING", "ENQUEUED"] } } }),
+      this.prisma.queueOutbox.count({ where: {
+        state: { in: ["PENDING", "ENQUEUED"] },
+        campaign: { state: { in: ["QUEUED", "RUNNING"] } },
+        delivery: { recipient: { state: "QUEUED" } }
+      } }),
       this.prisma.outreachDelivery.count({ where: { state: "DISPATCHING" } }),
       this.prisma.outreachDelivery.count({ where: { state: { in: ["DELIVERY_UNKNOWN", "DELIVERY_UNKNOWN_UNRESOLVED"] } } }),
       this.prisma.campaign.count({ where: { state: "SAFETY_PAUSED" } })
@@ -36,15 +40,16 @@ export class SystemStatusService {
     const outboundRuntime = outboundHeartbeat?.metadata && typeof outboundHeartbeat.metadata === "object" && !Array.isArray(outboundHeartbeat.metadata)
       ? outboundHeartbeat.metadata as Record<string, unknown> : {};
     const connection = (integration as any).connection ?? null;
+    const outbound = (integration as any).outboundCapability ?? await this.integration.outboundCapability();
     return {
       generatedAt: now, version: { gitSha: config.APP_VERSION, buildTimestamp: config.BUILD_TIMESTAMP },
       services: { api: "HEALTHY", web: infrastructure.web ? "HEALTHY" : "UNHEALTHY", postgres: infrastructure.postgres ? "HEALTHY" : "UNHEALTHY", redis: infrastructure.redis ? "HEALTHY" : "UNHEALTHY" },
       workers: {
         discovery: workerOperationalState(heartbeat("discovery-worker"), now),
         history: workerOperationalState(heartbeat("history-worker"), now),
-        outbound: config.OUTBOUND_MODE === "live" ? workerOperationalState(outboundHeartbeat, now) : "STOPPED"
+        outbound: workerOperationalState(outboundHeartbeat, now)
       },
-      outbound: { mode: config.OUTBOUND_MODE.toUpperCase(), enabled: (integration as any).outboundEnabled === true, runtime: outboundRuntime },
+      outbound: { mode: outbound.mode, enabled: outbound.available, mutationCapability: outbound.mutationCapability, workerState: outbound.workerState, reason: outbound.reason, runtime: outboundRuntime },
       tiktok: { state: (integration as any).configurationState, selectedShop: (integration as any).selectedShop ?? (integration as any).shop ?? null, accessTokenExpiresAt: connection?.accessTokenExpiresAt ?? null, refreshState: connection?.refreshState ?? "IDLE", reauthorizationRequired: Boolean(connection && connection.status !== "HEALTHY") },
       workload: { pendingDiscovery, backingOffDiscovery, queuedOutbound, currentlySending: sending, unknownDeliveries: unknown, safetyPausedCampaigns: safetyPaused }
     };

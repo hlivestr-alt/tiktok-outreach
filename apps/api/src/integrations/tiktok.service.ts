@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
-import { tiktokCredentialsConfigured } from "@affiliate/config";
+import { configuredOutboundCapability, tiktokCategoryCredentialsConfigured, tiktokCredentialsConfigured } from "@affiliate/config";
 import type { TikTokReadAdapter } from "@affiliate/contracts";
 import {
   decryptTikTokToken, encryptTikTokToken, MockTikTokAffiliateAdapter, RealTikTokReadOnlyAffiliateAdapter,
@@ -10,10 +10,17 @@ import { config, ensureMockShop, PrismaService } from "../shared";
 import { Prisma } from "@affiliate/db";
 import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.service";
 import { TikTokReadGovernor } from "./tiktok-read-governor";
+import { workerOperationalState } from "../worker-heartbeat";
 
 const stateHash = (state: string) => createHash("sha256").update(state).digest("hex");
 export const REQUIRED_RETURNED_READ_SCOPES = ["seller.creator_marketplace.read", "seller.affiliate_messages.write"] as const;
 const AMBIGUOUS_REFRESH_ERROR_CODES = new Set(["TOKEN_NETWORK_ERROR", "TOKEN_MALFORMED_RESPONSE", "WRONG_AUTHORIZATION_IDENTITY"]);
+
+export type OutboundCapabilityStatus = ReturnType<typeof configuredOutboundCapability> & {
+  available: boolean;
+  workerState: "RUNNING" | "STALE" | "STOPPED" | "NOT_REQUIRED";
+  reason: string | null;
+};
 
 export function evaluateTikTokReadCapabilities(grantedScopes: string[], authorizedShopVerified: boolean, authorizedShopDetail?: string) {
   const missingReturnedScopes = REQUIRED_RETURNED_READ_SCOPES.filter((scope) => !grantedScopes.includes(scope));
@@ -21,6 +28,7 @@ export function evaluateTikTokReadCapabilities(grantedScopes: string[], authoriz
     authorizedShop: { available: authorizedShopVerified, basis: "PARTNER_CENTER_SHOP_AUTHORIZED_INFORMATION_GRANT", detail: authorizedShopDetail ?? null },
     creatorMarketplace: { available: grantedScopes.includes("seller.creator_marketplace.read"), returnedScope: "seller.creator_marketplace.read" },
     affiliateMessageHistory: { available: grantedScopes.includes("seller.affiliate_messages.write"), returnedScope: "seller.affiliate_messages.write" },
+    productCategories: { available: tiktokCategoryCredentialsConfigured(config), basis: "SEPARATE_CATEGORY_METADATA_CREDENTIALS" },
     missingReturnedScopes,
     missingCapabilities: [
       ...(!authorizedShopVerified ? ["AUTHORIZED_SHOP"] : []),
@@ -110,10 +118,33 @@ export class TikTokIntegrationService {
     });
   }
 
-  /** The discovery process is deliberately handed only Marketplace Search. */
+  /** Discovery receives only Marketplace search, always signed with Outreach credentials. */
   async discoveryAdapter(): Promise<Pick<TikTokReadAdapter, "searchCreators">> {
     const adapter = await this.adapter();
     return { searchCreators: adapter.searchCreators.bind(adapter) };
+  }
+
+  /** Category refresh has a deliberately narrow, non-fallback credential and method boundary. */
+  async categoryMetadataAdapter(): Promise<Pick<TikTokReadAdapter, "getCategories">> {
+    if (config.APP_MODE === "mock") return { getCategories: this.mock.getCategories!.bind(this.mock) };
+    if (!tiktokCategoryCredentialsConfigured(config) || !config.TIKTOK_CATEGORY_APP_KEY || !config.TIKTOK_CATEGORY_APP_SECRET
+      || !config.TIKTOK_CATEGORY_ACCESS_TOKEN || !config.TIKTOK_CATEGORY_SHOP_CIPHER) {
+      throw new ServiceUnavailableException("CATEGORY_METADATA_NOT_CONFIGURED");
+    }
+    const selected = await this.selectedShop();
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({
+        baseUrl: config.TIKTOK_API_BASE_URL,
+        appKey: config.TIKTOK_CATEGORY_APP_KEY,
+        appSecret: config.TIKTOK_CATEGORY_APP_SECRET,
+        governor: this.governor,
+        automaticRetries: false
+      }),
+      accessToken: async () => config.TIKTOK_CATEGORY_ACCESS_TOKEN!,
+      shopCipher: async () => config.TIKTOK_CATEGORY_SHOP_CIPHER!,
+      shopScope: async () => `CATEGORY_METADATA:${selected.id}`
+    });
+    return { getCategories: adapter.getCategories!.bind(adapter) };
   }
 
   /** The history process is deliberately handed only the two read-only history operations. */
@@ -128,6 +159,46 @@ export class TikTokIntegrationService {
   async activeShop() {
     if (config.APP_MODE === "mock") return ensureMockShop(this.prisma);
     return this.selectedShop();
+  }
+
+  /**
+   * Resolve the effective outbound capability for the API. Configuration is
+   * authoritative for the mode; the durable worker heartbeat proves that the
+   * same capability is actually available to accept queue work.
+   */
+  async outboundCapability(): Promise<OutboundCapabilityStatus> {
+    const configured = configuredOutboundCapability(config);
+    if (configured.mode === "MOCK") {
+      return { ...configured, available: true, workerState: "NOT_REQUIRED", reason: null };
+    }
+    if (!configured.mutationCapability) {
+      return { ...configured, available: false, workerState: "NOT_REQUIRED", reason: "Outbound mode is READ_ONLY; mutation capability is disabled" };
+    }
+
+    const heartbeat = await this.prisma.workerHeartbeat.findUnique({ where: { role: "outbound-worker" } });
+    const workerState = workerOperationalState(heartbeat);
+    const runtime = heartbeat?.metadata && typeof heartbeat.metadata === "object" && !Array.isArray(heartbeat.metadata)
+      ? heartbeat.metadata as Record<string, unknown> : {};
+    let reason: string | null = null;
+    if (workerState !== "RUNNING") reason = `Outbound worker is ${workerState.toLowerCase()}`;
+    else if (String(runtime.outboundMode ?? "").toLowerCase() !== "live" || runtime.mutationCapability !== true) {
+      reason = "Outbound worker capability does not match API LIVE capability";
+    }
+
+    const shop = await this.prisma.shop.findFirst({ where: { connectionMode: "READ_ONLY", selectedForReadOnly: true }, orderBy: { updatedAt: "desc" } });
+    const connection = shop ? await this.prisma.integrationConnection.findUnique({ where: { shopId_provider: { shopId: shop.id, provider: "TIKTOK_SHOP" } } }) : null;
+    if (!reason && !shop?.shopCipher) reason = "A selected Indonesian TikTok shop is required";
+    else if (!reason && !connection) reason = "TikTok authorization is required for outbound messaging";
+    else if (!reason && connection?.status !== "HEALTHY") reason = `TikTok connection is ${connection?.status ?? "unavailable"}`;
+    else if (!reason && (!connection?.accessTokenCiphertext || !connection.accessTokenExpiresAt || connection.accessTokenExpiresAt <= new Date())) {
+      reason = "TikTok access token is unavailable or expired";
+    }
+
+    const limiters = Array.isArray(runtime.limiters) ? runtime.limiters : [];
+    const quotaBlocked = limiters.find((limiter) => limiter && typeof limiter === "object" && (limiter as Record<string, unknown>).state === "QUOTA_BLOCKED") as Record<string, unknown> | undefined;
+    if (!reason && quotaBlocked) reason = `TikTok outbound quota is blocked${quotaBlocked.quotaCode ? ` (${String(quotaBlocked.quotaCode)})` : ""}`;
+
+    return { ...configured, available: !reason, workerState, reason };
   }
 
   async initiateAuthorization() {
@@ -424,7 +495,8 @@ export class TikTokIntegrationService {
   async status() {
     if (config.APP_MODE === "mock") {
       const shop = await ensureMockShop(this.prisma);
-      return { mode: "MOCK", outboundMode: config.OUTBOUND_MODE.toUpperCase(), configurationState: "MOCK_READY", shop, capabilities: await this.mock.getCapabilities(), outboundEnabled: config.OUTBOUND_MODE === "mock", outboundProvider: "MOCK_ONLY" };
+      const outbound = await this.outboundCapability();
+      return { mode: "MOCK", outboundMode: outbound.mode, configurationState: "MOCK_READY", shop, capabilities: await this.mock.getCapabilities(), outboundEnabled: outbound.available, outboundProvider: "MOCK_ONLY", outboundCapability: outbound };
     }
     const shops = await this.prisma.shop.findMany({ where: { connectionMode: "READ_ONLY" }, orderBy: { createdAt: "asc" } });
     const selected = shops.find((shop) => shop.selectedForReadOnly);
@@ -433,18 +505,27 @@ export class TikTokIntegrationService {
       provider_shopScope_operation: { provider: "TIKTOK_SHOP", shopScope: selected.id, operation: "SEARCH_CREATORS" }
     } }) : null;
     const now = new Date();
+    const publicConnection = connection ? publicTikTokConnection(connection) : null;
+    if (publicConnection) {
+      const storedCapabilities = publicConnection.capabilityStatus && typeof publicConnection.capabilityStatus === "object"
+        && !Array.isArray(publicConnection.capabilityStatus) ? publicConnection.capabilityStatus as Record<string, unknown> : {};
+      publicConnection.capabilityStatus = { ...storedCapabilities,
+        productCategories: { available: tiktokCategoryCredentialsConfigured(config), basis: "SEPARATE_CATEGORY_METADATA_CREDENTIALS" } };
+    }
+    const outbound = await this.outboundCapability();
     return {
-      mode: "READ_ONLY", outboundMode: config.OUTBOUND_MODE.toUpperCase(), configurationState: this.configured ? connection ? connection.status : "AUTHORIZATION_REQUIRED" : "READ_ONLY_NOT_CONFIGURED",
-      outboundEnabled: config.OUTBOUND_MODE === "live" && config.ENABLE_LIVE_TIKTOK_OUTBOUND === "I_UNDERSTAND_THIS_SENDS_REAL_MESSAGES",
-      outboundProvider: config.OUTBOUND_MODE === "live" ? "LIVE_CONFIGURATION_GATED" : "PHYSICALLY_UNAVAILABLE",
-      readOnlyStatus: config.OUTBOUND_MODE === "live" ? "REAL TIKTOK — LIVE OUTBOUND CONFIGURED" : "REAL TIKTOK — READ ONLY",
+      mode: "READ_ONLY", outboundMode: outbound.mode, configurationState: this.configured ? connection ? connection.status : "AUTHORIZATION_REQUIRED" : "READ_ONLY_NOT_CONFIGURED",
+      outboundEnabled: outbound.available,
+      outboundProvider: config.OUTBOUND_MODE === "live" ? "DEDICATED_MUTATION_WORKER" : "PHYSICALLY_UNAVAILABLE",
+      readOnlyStatus: config.OUTBOUND_MODE === "live" ? "REAL TIKTOK — OUTBOUND LIVE" : "REAL TIKTOK — READ ONLY",
+      outboundCapability: outbound,
       selectedShop: selected ? {
         id: selected.id, externalShopId: selected.externalShopId, name: selected.name, region: selected.region, code: selected.shopCode,
         currency: selected.currency, currencyEvidence: selected.currency === "UNKNOWN" ? "NOT_RETURNED_BY_AUTHORIZED_SHOPS" : "LOCAL_CONFIGURATION",
         maxRecipientsPerCampaign: selected.maxRecipientsPerCampaign
       } : null,
       authorizedShops: shops.map((shop) => ({ id: shop.id, externalShopId: shop.externalShopId, name: shop.name, region: shop.region, code: shop.shopCode, selected: shop.selectedForReadOnly })),
-      connection: connection ? publicTikTokConnection(connection) : null,
+      connection: publicConnection,
       marketplaceRateLimit: marketplace ? {
         lastSuccessAt: marketplace.lastSuccessAt,
         last429At: marketplace.lastThrottleAt,

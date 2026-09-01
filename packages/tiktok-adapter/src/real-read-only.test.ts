@@ -51,6 +51,37 @@ describe("seller token API", () => {
 });
 
 describe("real read-only adapter", () => {
+  it("sends the exact documented 202508 partition filter structure", async () => {
+    const fetcher = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        follower_demographics: { count_range: { count_ge: 600, count_le: 799 } },
+        category: [{ parent_category_id: "600001", child_category_id_list: ["851848"] }],
+        gmv_ranges: ["GMV_RANGE_0_100"]
+      });
+      return jsonResponse({ code: 0, data: { search_key: "stable", creators: [] } });
+    });
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch }),
+      accessToken: async () => "token", shopCipher: async () => "cipher"
+    });
+    await adapter.searchCreators({ minFollowers: 600, maxFollowers: 799,
+      marketplaceCategory: { parentCategoryId: "600001", childCategoryIds: ["851848"] },
+      marketplaceGmvRanges: ["GMV_RANGE_0_100"] }, { pageSize: 20 });
+  });
+
+  it("omits count_le for the documented open-ended follower range", async () => {
+    const fetcher = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({ follower_demographics: { count_range: { count_ge: 5_000_000 } },
+        category: [{ parent_category_id: "600001", child_category_id_list: ["851848"] }] });
+      return jsonResponse({ code: 0, data: { search_key: "stable", creators: [] } });
+    });
+    const adapter = new RealTikTokReadOnlyAffiliateAdapter({
+      http: new TikTokReadOnlyHttpClient({ baseUrl: "https://example.test", appKey: "a", appSecret: "s", fetch: fetcher as typeof fetch }),
+      accessToken: async () => "token", shopCipher: async () => "cipher"
+    });
+    await adapter.searchCreators({ minFollowers: 5_000_000,
+      marketplaceCategory: { parentCategoryId: "600001", childCategoryIds: ["851848"] } }, { pageSize: 20 });
+  });
   it("parses authorized shops, creator pages/performance, conversations, and messages", async () => {
     const responses = [
       { code: 0, data: { shops: [{ id: "shop-1", cipher: "cipher-1", code: "IDABC", name: "Indonesia Shop", region: "ID", seller_type: "LOCAL" }] }, request_id: "r1" },
