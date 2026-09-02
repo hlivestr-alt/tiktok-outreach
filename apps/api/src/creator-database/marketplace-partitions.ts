@@ -9,6 +9,11 @@ export const DEFAULT_DEEP_SPLIT_MIN_INCREMENTAL_YIELD = 0.10;
 export const DEFAULT_LOW_VALUE_COMBINED_YIELD = 0.05;
 export const DEFAULT_OBSERVED_SATURATION_MIN_ROWS = 380;
 export const DEFAULT_OBSERVED_SATURATION_MAX_ROWS = 405;
+export const DEFAULT_BRANCH_EVIDENCE_MIN_ROWS = 200;
+export const DEFAULT_FIRST_SPLIT_MIN_UNIQUE_RATE = 0.20;
+export const DEFAULT_FIRST_SPLIT_MIN_NEW_PER_PAGE = 4;
+export const DEFAULT_G4_RECURSION_MIN_UNIQUE_RATE = 0.10;
+export const DEFAULT_G4_RECURSION_MIN_NEW_PER_PAGE = 4;
 
 export const PRODUCTION_PARTITION_TYPES = ["V2_SEED", "ADAPTIVE_FOLLOWER", "ADAPTIVE_GMV"] as const;
 export type ProductionPartitionType = typeof PRODUCTION_PARTITION_TYPES[number];
@@ -118,25 +123,51 @@ export function combinedIncrementalYield(children: ReadonlyArray<{ rowsReturned:
 }
 
 export type AdaptiveExpansion =
-  | { kind: "FOLLOWER"; bounds: readonly [{ min: number; max: number }, { min: number; max: number }] }
-  | { kind: "NONE" };
+  | { kind: "FOLLOWER"; bounds: readonly [{ min: number; max: number }, { min: number; max: number }]; reason: string }
+  | { kind: "NONE"; reason: string };
 
 export function adaptiveExpansion(input: { partitionType: ProductionPartitionType; observedSaturationState: ObservedSaturationState;
-  followersMin: number; followersMax: number | null; yield: number | null; followerSplitExplored: boolean;
+  followersMin: number; followersMax: number | null; yield: number | null; rowsReturned: number; successfulPages: number;
+  uniqueCreatorsAdded: number; followerSplitExplored: boolean;
   followerRecursionTerminal: boolean; gmvSplitCreated: boolean; gmvBucket?: string | null; gmvRange?: string | null }, rules: FollowerWidthRules = DEFAULT_FOLLOWER_WIDTH_RULES,
-  firstSplitMinWidth = DEFAULT_FIRST_SPLIT_MIN_WIDTH, deepMinimumYield = DEFAULT_DEEP_SPLIT_MIN_INCREMENTAL_YIELD): AdaptiveExpansion {
+  _firstSplitMinWidth = DEFAULT_FIRST_SPLIT_MIN_WIDTH, deepMinimumYield = DEFAULT_DEEP_SPLIT_MIN_INCREMENTAL_YIELD,
+  minimumEvidenceRows = DEFAULT_BRANCH_EVIDENCE_MIN_ROWS): AdaptiveExpansion {
   // GMV is now part of the branch identity from the first request. Historical
   // GMV-All rows are never eligible for adaptive expansion.
   if (!isSpecificGmvPartition({ gmvBucket: input.gmvBucket ?? null, gmvRange: input.gmvRange ?? null })
-    || input.observedSaturationState !== "OBSERVED_SATURATED" || input.followerRecursionTerminal || input.gmvSplitCreated) return { kind: "NONE" };
-  if (input.partitionType === "V2_SEED" && !input.followerSplitExplored) {
-    const first = firstExploratoryFollowerSplit(input.followersMin, input.followersMax, firstSplitMinWidth);
-    if (first) return { kind: "FOLLOWER", bounds: first };
-    return { kind: "NONE" };
+    ) return { kind: "NONE", reason: "UNSUPPORTED_GMV_BRANCH" };
+  if (input.followerRecursionTerminal) return { kind: "NONE", reason: "ALREADY_TERMINAL" };
+  if (input.gmvSplitCreated || input.followerSplitExplored) return { kind: "NONE", reason: "ALREADY_EXPLORED" };
+  const bounds = splitFollowerRange(input.followersMin, input.followersMax, rules);
+  if (!bounds) return { kind: "NONE", reason: "RANGE_AT_MINIMUM_WIDTH" };
+  if (input.rowsReturned < minimumEvidenceRows) return { kind: "NONE", reason: "INSUFFICIENT_SAMPLE" };
+  const uniqueRate = input.rowsReturned ? input.uniqueCreatorsAdded / input.rowsReturned : 0;
+  const newPerPage = input.successfulPages ? input.uniqueCreatorsAdded / input.successfulPages : 0;
+  const saturated = input.observedSaturationState === "OBSERVED_SATURATED";
+
+  if (input.gmvBucket === "G4") {
+    const exceptional = uniqueRate >= DEFAULT_G4_RECURSION_MIN_UNIQUE_RATE && newPerPage >= DEFAULT_G4_RECURSION_MIN_NEW_PER_PAGE;
+    return exceptional ? { kind: "FOLLOWER", bounds, reason: "G4_EXCEPTIONAL_EVIDENCE" }
+      : { kind: "NONE", reason: "G4_EVIDENCE_GATE_NOT_MET" };
   }
-  if (input.partitionType !== "ADAPTIVE_FOLLOWER" || input.followerSplitExplored || input.yield == null || input.yield < deepMinimumYield) return { kind: "NONE" };
-  const deeper = deeperFollowerSplit(input.followersMin, input.followersMax, input.yield, rules, deepMinimumYield);
-  return deeper ? { kind: "FOLLOWER", bounds: deeper } : { kind: "NONE" };
+
+  if (input.gmvBucket === "G3") {
+    const productive = uniqueRate >= DEFAULT_FIRST_SPLIT_MIN_UNIQUE_RATE && newPerPage >= DEFAULT_FIRST_SPLIT_MIN_NEW_PER_PAGE;
+    return productive ? { kind: "FOLLOWER", bounds, reason: "G3_LOCAL_PRODUCTIVITY_OVERRIDE" }
+      : { kind: "NONE", reason: "G3_LOCAL_EVIDENCE_NOT_PRODUCTIVE" };
+  }
+
+  if (input.gmvBucket !== "G1" && input.gmvBucket !== "G2") return { kind: "NONE", reason: "UNSUPPORTED_GMV_BRANCH" };
+  if (input.partitionType === "V2_SEED") {
+    const eligible = saturated || uniqueRate >= DEFAULT_FIRST_SPLIT_MIN_UNIQUE_RATE || newPerPage >= DEFAULT_FIRST_SPLIT_MIN_NEW_PER_PAGE;
+    return eligible ? { kind: "FOLLOWER", bounds, reason: "G1_G2_FIRST_SPLIT_EVIDENCE" }
+      : { kind: "NONE", reason: "FIRST_SPLIT_EVIDENCE_NOT_PRODUCTIVE" };
+  }
+  if (input.partitionType !== "ADAPTIVE_FOLLOWER" || input.yield == null) return { kind: "NONE", reason: "NOT_FOLLOWER_RECURSION" };
+  const deeperEligible = input.yield >= deepMinimumYield && newPerPage >= DEFAULT_FIRST_SPLIT_MIN_NEW_PER_PAGE
+    && (saturated || uniqueRate >= DEFAULT_FIRST_SPLIT_MIN_UNIQUE_RATE);
+  return deeperEligible ? { kind: "FOLLOWER", bounds, reason: "G1_G2_DEEP_PRODUCTIVITY" }
+    : { kind: "NONE", reason: "DEEPER_EVIDENCE_NOT_PRODUCTIVE" };
 }
 
 export function partitionFilters(partition: { categoryId: string | null; categoryChildIds: string[]; followersMin: number | null;

@@ -116,6 +116,7 @@ enum CreatorSearchPartitionStatus {
   SUPERSEDED
   DEEPLY_SATURATED
   DISABLED_BY_STRATEGY
+  EXPERIMENT_ONLY
 }
 
 enum CreatorSearchPartitionType {
@@ -146,6 +147,7 @@ enum CreatorSchedulerClass {
   MEDIUM
   EXPLORATION
   LOW
+  EXPERIMENT_ONLY
 }
 
 enum HistorySyncState {
@@ -697,6 +699,16 @@ model CreatorSearchPartition {
   schedulerFollowerWeight       Decimal?                       @db.Decimal(12, 6)
   schedulerAncestorYield        Decimal?                       @db.Decimal(10, 8)
   schedulerNewPerSuccessfulPage Decimal?                       @db.Decimal(14, 6)
+  schedulerFamilyKey            String?
+  schedulerG1G2FirstBucket      String?
+  schedulerWasFirstG1G2Sibling  Boolean                        @default(false)
+  schedulerIsG4Probe            Boolean                        @default(false)
+  splitDecisionReason           String?
+  splitParentRows               Int?
+  splitParentUniqueRate         Decimal?                       @db.Decimal(10, 8)
+  splitParentNewPerPage         Decimal?                       @db.Decimal(14, 6)
+  splitParentObservedSaturated  Boolean?
+  followerRecursionStopReason   String?
   mayStillBeDense               Boolean                        @default(false)
   categoryChildIds              String[]                       @default([])
   business16032001RetryCount    Int                            @default(0)

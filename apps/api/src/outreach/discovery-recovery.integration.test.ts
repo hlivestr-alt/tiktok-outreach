@@ -546,6 +546,53 @@ describe.sequential("creator database continuation sync", () => {
     expect(await prisma.creatorSearchPartition.count({ where: { creatorSyncJobId: seed.job.id, adaptiveDepth: 2 } })).toBe(0);
   });
 
+  it("lets a productive child recurse independently of a poor sibling", async () => {
+    const seed = await fixture();
+    const parent = await prisma.creatorSearchPartition.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id } });
+    await prisma.creatorSearchPartition.update({ where: { id: parent.id }, data: { status: "COMPLETE", followerSplitExplored: true } });
+    const children = [];
+    for (const [index, [min, max]] of ([[1_000, 1_249], [1_250, 1_499]] as const).entries()) children.push(
+      await prisma.creatorSearchPartition.create({ data: { creatorSyncJobId: seed.job.id,
+        partitionKey: `v3:${parent.partitionKey}:f${min}-${max}`, generation: 3, partitionType: "ADAPTIVE_FOLLOWER", adaptiveDepth: 1,
+        categoryId: parent.categoryId, categoryName: parent.categoryName, categoryChildId: parent.categoryChildId,
+        categoryChildName: parent.categoryChildName, categoryChildIds: parent.categoryChildIds, followersMin: min, followersMax: max,
+        gmvBucket: "G1", gmvRange: "GMV_RANGE_0_100", parentPartitionId: parent.id, status: "COMPLETE", queuePosition: BigInt(min),
+        rowsReturned: 400, uniqueCreatorsAdded: index === 0 ? 200 : 0, pagesCompleted: 20,
+        incrementalYield: new Prisma.Decimal(index === 0 ? 0.50 : 0), observedSaturationState: "OBSERVED_SATURATED" } }));
+    await seed.processor.prepareAdaptiveQueue(seed.job.id);
+    expect(await prisma.creatorSearchPartition.count({ where: { parentPartitionId: children[0].id } })).toBe(2);
+    expect(await prisma.creatorSearchPartition.count({ where: { parentPartitionId: children[1].id } })).toBe(0);
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: children[0].id } })).toMatchObject({ followerSplitExplored: true });
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: children[1].id } })).toMatchObject({
+      followerRecursionTerminal: true, followerRecursionStopReason: "DEEPER_EVIDENCE_NOT_PRODUCTIVE"
+    });
+  });
+
+  it("keeps G4 recursion experiment-only and requires the exceptional evidence gate", async () => {
+    const seed = await fixture();
+    const poor = await prisma.creatorSearchPartition.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id } });
+    await prisma.creatorSearchPartition.update({ where: { id: poor.id }, data: { status: "COMPLETE", gmvBucket: "G4",
+      gmvRange: "GMV_RANGE_10000_AND_ABOVE", rowsReturned: 200, uniqueCreatorsAdded: 1, pagesCompleted: 10,
+      originalYield: new Prisma.Decimal(0.005), observedSaturationState: "NOT_OBSERVED_SATURATED" } });
+    await seed.processor.prepareAdaptiveQueue(seed.job.id);
+    expect(await prisma.creatorSearchPartition.count({ where: { parentPartitionId: poor.id } })).toBe(0);
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: poor.id } })).toMatchObject({
+      followerRecursionTerminal: true, followerRecursionStopReason: "G4_EVIDENCE_GATE_NOT_MET"
+    });
+
+    const strong = await prisma.creatorSearchPartition.create({ data: { creatorSyncJobId: seed.job.id,
+      partitionKey: `v2:600001:600001-child:f2000-2999:g4`, generation: 3, partitionType: "V2_SEED", adaptiveDepth: 0,
+      categoryId: poor.categoryId, categoryName: poor.categoryName, categoryChildId: poor.categoryChildId,
+      categoryChildName: poor.categoryChildName, categoryChildIds: poor.categoryChildIds, followersMin: 2_000, followersMax: 2_999,
+      gmvBucket: "G4", gmvRange: "GMV_RANGE_10000_AND_ABOVE", status: "COMPLETE", queuePosition: 99n,
+      rowsReturned: 200, uniqueCreatorsAdded: 40, pagesCompleted: 10, originalYield: new Prisma.Decimal(0.20),
+      observedSaturationState: "NOT_OBSERVED_SATURATED" } });
+    await seed.processor.prepareAdaptiveQueue(seed.job.id);
+    const descendants = await prisma.creatorSearchPartition.findMany({ where: { parentPartitionId: strong.id } });
+    expect(descendants).toHaveLength(2);
+    expect(descendants.every((child) => child.status === "EXPERIMENT_ONLY" && child.splitDecisionReason === "G4_EXCEPTIONAL_EVIDENCE")).toBe(true);
+  });
+
   it("a throttled first page keeps the same partition and leaves the next one queued", async () => {
     const seed = await fixture();
     const first = await prisma.creatorSearchPartition.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id } });
@@ -592,7 +639,7 @@ describe.sequential("creator database continuation sync", () => {
     const selected = await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.adaptive.id } });
     expect(job).toMatchObject({ currentPartitionId: seed.adaptive.id, partitionClaimSequence: 1 });
     expect(selected).toMatchObject({ schedulerClass: "HIGH", schedulerClaimSequence: 1, status: "WAITING_RETRY" });
-    expect(selected.priorityReason).toContain("Depth 3 productive branch");
+    expect(selected.priorityReason).toContain("Depth 3 productive Low/Medium branch");
     expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
   });
 
@@ -615,8 +662,31 @@ describe.sequential("creator database continuation sync", () => {
     const selected = await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.v2.id } });
     expect(job).toMatchObject({ currentPartitionId: seed.v2.id, partitionClaimSequence: 7 });
     expect(selected).toMatchObject({ schedulerClass: "EXPLORATION", schedulerClaimSequence: 7, status: "WAITING_RETRY" });
-    expect(selected.priorityReason).toContain("Specific-GMV exploration slot");
+    expect(selected.priorityReason).toContain("Low/Medium exploration slot");
     expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.adaptive.id } })).toMatchObject({ status: "QUEUED" });
+  });
+
+  it("persists one G4 probe at claim 100 and restart continues with normal work without a burst", async () => {
+    const seed = await schedulerFixture(99);
+    const g4 = await prisma.creatorSearchPartition.create({ data: { creatorSyncJobId: seed.job.id,
+      partitionKey: "v2:600001:600001-child:f5000-7499:g4", generation: 3, partitionType: "V2_SEED", categoryId: "600001",
+      categoryName: "Beauty", categoryChildId: "600001-child", categoryChildName: "Skin Care", categoryChildIds: ["600001-child"],
+      followerBucket: "F08", followersMin: 5_000, followersMax: 7_499, gmvBucket: "G4", gmvRange: "GMV_RANGE_10000_AND_ABOVE",
+      status: "EXPERIMENT_ONLY", schedulerClass: "EXPERIMENT_ONLY", queuePosition: 1_000_000n } });
+    const adapter = { searchCreators: vi.fn()
+      .mockResolvedValueOnce({ creators: [], searchKey: "g4", hasMore: false })
+      .mockImplementationOnce(async () => { throw new TikTokApiError("RATE_LIMIT", "SEARCH_CREATORS", 429, 36009002, "r", "throttled"); }) };
+    await seed.processor.processNext(adapter, seed.sheet);
+    const restarted = new CreatorSyncProcessor(prisma as any, {} as any, new CreatorIdentityResolver(prisma as any), {} as any,
+      { now: () => new Date("2026-08-14T06:00:01Z") });
+    await restarted.processNext(adapter, seed.sheet);
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: g4.id } })).toMatchObject({
+      status: "COMPLETE", schedulerClass: "EXPERIMENT_ONLY", schedulerClaimSequence: 100, schedulerIsG4Probe: true
+    });
+    const job = await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } });
+    expect(job.partitionClaimSequence).toBe(101);
+    expect(job.currentPartitionId).not.toBe(g4.id);
+    expect(await prisma.creatorSyncEvent.count({ where: { creatorSyncJobId: seed.job.id, creatorSearchPartitionId: g4.id, stage: "PARTITION_STARTED" } })).toBe(1);
   });
 });
 

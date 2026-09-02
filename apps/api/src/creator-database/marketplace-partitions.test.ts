@@ -87,22 +87,34 @@ describe("Marketplace V2 category isolation", () => {
 describe("Marketplace V3 adaptive follower planning", () => {
   const seed = (overrides: Partial<Parameters<typeof adaptiveExpansion>[0]> = {}) => ({
     partitionType: "V2_SEED" as const, observedSaturationState: "OBSERVED_SATURATED" as const,
-    followersMin: 1_000, followersMax: 1_499, yield: 0.01, followerSplitExplored: false,
+    followersMin: 1_000, followersMax: 1_499, yield: 0.01, rowsReturned: 400, successfulPages: 20,
+    uniqueCreatorsAdded: 4, followerSplitExplored: false,
     followerRecursionTerminal: false, gmvSplitCreated: false, gmvBucket: "G1", gmvRange: "GMV_RANGE_0_100", ...overrides
   });
 
   it("gives a low-yield saturated seed its one exploratory split", () => {
     expect(adaptiveExpansion(seed())).toEqual({ kind: "FOLLOWER", bounds: [
       { min: 1_000, max: 1_249 }, { min: 1_250, max: 1_499 }
-    ] });
+    ], reason: "G1_G2_FIRST_SPLIT_EVIDENCE" });
   });
 
-  it("does not split an unsaturated branch", () => {
-    expect(adaptiveExpansion(seed({ observedSaturationState: "NOT_OBSERVED_SATURATED", yield: 0.50 }))).toEqual({ kind: "NONE" });
+  it("lets productive unsaturated G1 and G2 first-split but rejects weak evidence", () => {
+    expect(adaptiveExpansion(seed({ observedSaturationState: "NOT_OBSERVED_SATURATED", rowsReturned: 300,
+      uniqueCreatorsAdded: 90, successfulPages: 15, yield: 0.30 }))).toMatchObject({ kind: "FOLLOWER" });
+    expect(adaptiveExpansion(seed({ observedSaturationState: "NOT_OBSERVED_SATURATED", rowsReturned: 300,
+      uniqueCreatorsAdded: 90, successfulPages: 15, yield: 0.30, gmvBucket: "G2", gmvRange: "GMV_RANGE_100_1000" })))
+      .toMatchObject({ kind: "FOLLOWER" });
+    expect(adaptiveExpansion(seed({ observedSaturationState: "NOT_OBSERVED_SATURATED", yield: 0.50 })))
+      .toEqual({ kind: "NONE", reason: "FIRST_SPLIT_EVIDENCE_NOT_PRODUCTIVE" });
     expect(observedSaturationState(true, 379)).toBe("NOT_OBSERVED_SATURATED");
     expect(observedSaturationState(true, 380)).toBe("OBSERVED_SATURATED");
     expect(observedSaturationState(true, 405)).toBe("OBSERVED_SATURATED");
     expect(observedSaturationState(true, 406)).toBe("NOT_OBSERVED_SATURATED");
+  });
+
+  it("does not split a low-sample productive-looking branch", () => {
+    expect(adaptiveExpansion(seed({ rowsReturned: 199, uniqueCreatorsAdded: 150, successfulPages: 10 })))
+      .toEqual({ kind: "NONE", reason: "INSUFFICIENT_SAMPLE" });
   });
 
   it("uses inclusive deterministic binary bounds with no gap or overlap and honors the 600 floor", () => {
@@ -116,15 +128,25 @@ describe("Marketplace V3 adaptive follower planning", () => {
 
   it("never invents an upper bound for an open-ended follower range", () => {
     expect(firstExploratoryFollowerSplit(5_000_000, null)).toBeNull();
-    expect(adaptiveExpansion(seed({ followersMin: 5_000_000, followersMax: null, yield: 0.20 }))).toEqual({ kind: "NONE" });
+    expect(adaptiveExpansion(seed({ followersMin: 5_000_000, followersMax: null, yield: 0.20 })))
+      .toEqual({ kind: "NONE", reason: "RANGE_AT_MINIMUM_WIDTH" });
   });
 
   it("requires at least ten percent incremental yield for deeper recursion", () => {
     const adaptive = { ...seed(), partitionType: "ADAPTIVE_FOLLOWER" as const, followersMin: 1_000, followersMax: 1_249 };
-    expect(adaptiveExpansion({ ...adaptive, yield: 0.0999 })).toEqual({ kind: "NONE" });
-    expect(adaptiveExpansion({ ...adaptive, yield: 0.10 })).toEqual({ kind: "FOLLOWER", bounds: [
+    expect(adaptiveExpansion({ ...adaptive, yield: 0.0999, uniqueCreatorsAdded: 100 })).toEqual({ kind: "NONE", reason: "DEEPER_EVIDENCE_NOT_PRODUCTIVE" });
+    expect(adaptiveExpansion({ ...adaptive, yield: 0.10, uniqueCreatorsAdded: 100 })).toEqual({ kind: "FOLLOWER", bounds: [
       { min: 1_000, max: 1_124 }, { min: 1_125, max: 1_249 }
-    ] });
+    ], reason: "G1_G2_DEEP_PRODUCTIVITY" });
+  });
+
+  it("allows G4 recursion only through the conservative exceptional gate", () => {
+    const g4 = seed({ gmvBucket: "G4", gmvRange: "GMV_RANGE_10000_AND_ABOVE", rowsReturned: 200,
+      successfulPages: 10, uniqueCreatorsAdded: 19, yield: 0.095 });
+    expect(adaptiveExpansion(g4)).toEqual({ kind: "NONE", reason: "G4_EVIDENCE_GATE_NOT_MET" });
+    expect(adaptiveExpansion({ ...g4, uniqueCreatorsAdded: 40, yield: 0.20 })).toMatchObject({
+      kind: "FOLLOWER", reason: "G4_EXCEPTIONAL_EVIDENCE"
+    });
   });
 
   it("stops a first-split branch below five percent combined yield", () => {
@@ -138,7 +160,7 @@ describe("Marketplace V3 adaptive follower planning", () => {
     expect(splitFollowerRange(1_000, 1_099)).toBeNull();
     expect(splitFollowerRange(10_000, 11_999)).toEqual([{ min: 10_000, max: 10_999 }, { min: 11_000, max: 11_999 }]);
     expect(adaptiveExpansion({ ...seed(), partitionType: "ADAPTIVE_FOLLOWER", followersMin: 1_000,
-      followersMax: 1_099, yield: 0.10 })).toEqual({ kind: "NONE" });
+      followersMax: 1_099, yield: 0.10 })).toEqual({ kind: "NONE", reason: "RANGE_AT_MINIMUM_WIDTH" });
   });
 
   it("creates deterministic production keys distinct from V2 and experiment keys", () => {

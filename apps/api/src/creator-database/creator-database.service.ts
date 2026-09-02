@@ -7,6 +7,7 @@ import { followerRangeLabel, GMV_BUCKETS, PRODUCTION_PARTITION_TYPES, SPECIFIC_G
   partitionKeyV2, specificGmvCombinationKey, v2BasePartitionRows } from "./marketplace-partitions";
 import { TikTokApiError } from "@affiliate/tiktok-adapter";
 import { DEFAULT_MARKETPLACE_RETRY_DELAY_SECONDS, MIN_MARKETPLACE_RETRY_DELAY_SECONDS, parseMarketplaceRetryDelaySeconds } from "./retry-settings";
+import { designatedFirstG1G2Bucket, g1G2FamilyKey } from "./creator-scheduler";
 
 @Injectable()
 export class CreatorDatabaseService {
@@ -105,15 +106,20 @@ export class CreatorDatabaseService {
     const missing = rows.filter((row) => !existingKeys.has(specificGmvCombinationKey({ categoryId: row.parentCategoryId,
       categoryChildId: row.childCategoryId, followersMin: row.followersMin, followersMax: row.followersMax, gmvBucket: row.gmvBucket })));
     const now = new Date();
-    const created = await tx.creatorSearchPartition.createMany({ skipDuplicates: true, data: missing.map((row) => ({
+    const created = await tx.creatorSearchPartition.createMany({ skipDuplicates: true, data: missing.map((row) => {
+      const familyKey = row.gmvBucket === "G1" || row.gmvBucket === "G2" ? g1G2FamilyKey({ categoryId: row.parentCategoryId,
+        categoryChildId: row.childCategoryId, followersMin: row.followersMin, followersMax: row.followersMax }) : null;
+      return ({
       creatorSyncJobId: jobId, partitionKey: row.partitionKey, generation: V3_ADAPTIVE_GENERATION, partitionType: "V2_SEED", adaptiveDepth: 0,
       categoryId: row.parentCategoryId, categoryName: row.parentCategoryName, categoryChildId: row.childCategoryId,
       categoryChildName: row.childCategoryName, categoryChildIds: [row.childCategoryId], followerBucket: row.followerBucket,
       followersMin: row.followersMin, followersMax: row.followersMax, gmvBucket: row.gmvBucket, gmvRange: row.gmvRange,
       parentPartitionId: rootByKey.get(partitionKeyV2(row.parentCategoryId, row.childCategoryId, row.followersMin, row.followersMax)),
-      status: "QUEUED", queuePosition: row.queuePosition, priorityScore: 100,
-      priorityReason: "Untested specific-GMV seed exploration", priorityUpdatedAt: now
-    })) });
+      status: row.gmvBucket === "G4" ? "EXPERIMENT_ONLY" : "QUEUED", queuePosition: row.queuePosition, priorityScore: row.gmvBucket === "G4" ? -10_000 : 100,
+      priorityReason: row.gmvBucket === "G4" ? "Very High retained for deterministic rare probing" : "Untested specific-GMV seed exploration", priorityUpdatedAt: now,
+      schedulerClass: row.gmvBucket === "G4" ? "EXPERIMENT_ONLY" : undefined,
+      schedulerFamilyKey: familyKey, schedulerG1G2FirstBucket: familyKey ? designatedFirstG1G2Bucket(familyKey) : null
+    }); }) });
     return { generated: rows.length, created: created.count, skippedExisting: rows.length - missing.length };
   }
 
@@ -151,10 +157,13 @@ export class CreatorDatabaseService {
           creatorsAdded: true, duplicates: true, nextAttemptAt: true, occurredAt: true, partitionKey: true, partitionLabel: true } }),
       job.currentPartitionId ? this.prisma.creatorSearchPartition.findUnique({ where: { id: job.currentPartitionId } }) : null,
       this.prisma.creatorSearchPartition.findFirst({ where: { creatorSyncJobId: job.id, partitionType: { in: [...PRODUCTION_PARTITION_TYPES] },
-        gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: "QUEUED" },
+      gmvBucket: { in: ["G1", "G2", "G3"] }, status: "QUEUED" },
         orderBy: [{ priorityScore: "desc" }, { queuePosition: "asc" }, { id: "asc" }] }),
       this.prisma.creatorSearchPartition.count({ where: { creatorSyncJobId: job.id, partitionType: { in: [...PRODUCTION_PARTITION_TYPES] },
-        gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: { in: ["QUEUED", "STARTING", "RUNNING", "WAITING_RETRY", "SATURATED", "PAUSED"] } } }),
+        OR: [
+          { gmvBucket: { in: ["G1", "G2", "G3"] }, status: { in: ["QUEUED", "STARTING", "RUNNING", "WAITING_RETRY", "SATURATED", "PAUSED"] } },
+          { gmvBucket: "G4", status: "EXPERIMENT_ONLY" }
+        ] } }),
       this.prisma.creatorSearchPartition.count({ where: { creatorSyncJobId: job.id, partitionType: { in: [...PRODUCTION_PARTITION_TYPES] },
         gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES } } }),
       this.prisma.creatorMarketplaceCategory.aggregate({ where: { shopId: job.shopId }, _count: { _all: true }, _max: { fetchedAt: true } }),
@@ -168,6 +177,7 @@ export class CreatorDatabaseService {
     return {
       status: job.pauseRequested && job.state === "RUNNING" ? "PAUSING" : (structuredCount > 0 && remaining === 0 && !partition ? "ALL_PARTITIONS_COMPLETE" : job.state),
       marketplaceRetryDelaySeconds: job.marketplaceRetryDelaySeconds,
+      schedulerStrategy: { primaryDiscovery: "Low / Medium", high: "Exploration", veryHigh: "Rare probe" },
       pagesCompleted: job.pagesCompleted, creatorsFetched: job.creatorsFetched, creatorsFetchedThisRun: job.creatorsFetchedThisRun,
       totalCreatorsStored: job.sheetImportedAt ? storedCount : Math.max(storedCount, job.creatorsFetched),
       startedAt: job.startedAt, lastPageAt: job.lastPageAt, lastSuccessAt: job.lastSuccessAt, lastError: job.lastError,
@@ -232,13 +242,19 @@ export class CreatorDatabaseService {
     const pendingPage = await this.prisma.creatorSyncPage.findFirst({ where: { creatorSyncJobId: job.id, state: "RECEIVED",
       creatorSearchPartition: { partitionType: { in: [...PRODUCTION_PARTITION_TYPES] } } }, select: { id: true } });
     const eligible = await this.prisma.creatorSearchPartition.count({ where: { creatorSyncJobId: job.id,
-      partitionType: { in: [...PRODUCTION_PARTITION_TYPES] }, gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES },
-      status: { in: ["QUEUED", "PAUSED", "STARTING", "RUNNING", "WAITING_RETRY"] } } });
+      partitionType: { in: [...PRODUCTION_PARTITION_TYPES] }, OR: [
+        { gmvBucket: { in: ["G1", "G2", "G3"] }, status: { in: ["QUEUED", "PAUSED", "STARTING", "RUNNING", "WAITING_RETRY"] } },
+        { gmvBucket: "G4", status: "EXPERIMENT_ONLY" },
+        { gmvBucket: "G4", schedulerIsG4Probe: true, status: { in: ["PAUSED", "STARTING", "RUNNING", "WAITING_RETRY"] } }
+      ] } });
     if (!eligible && !pendingPage) throw new BadRequestException("No structured Marketplace partitions are queued; refresh category metadata first");
     const now = new Date();
     const updated = await this.prisma.$transaction(async (tx) => {
       const current = job.currentPartitionId ? await tx.creatorSearchPartition.findUnique({ where: { id: job.currentPartitionId } }) : null;
-      const releaseDisabledPointer = !pendingPage && current?.status === "DISABLED_BY_STRATEGY";
+      const releaseDisabledPointer = !pendingPage && (current?.status === "DISABLED_BY_STRATEGY"
+        || current?.gmvBucket === "G4" && !current.schedulerIsG4Probe);
+      if (releaseDisabledPointer && current?.gmvBucket === "G4") await tx.creatorSearchPartition.updateMany({ where: { id: current.id,
+        status: { in: ["PAUSED", "STARTING", "RUNNING", "WAITING_RETRY"] } }, data: { status: "EXPERIMENT_ONLY" } });
       if (job.currentPartitionId && !releaseDisabledPointer) await tx.creatorSearchPartition.updateMany({ where: { id: job.currentPartitionId, gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: { in: ["PAUSED", "ERROR"] } }, data: {
         status: "RUNNING",
         ...(job.currentStage === "TIKTOK_BUSINESS_RETRY_LIMIT" ? { business16032001RetryCount: 0, business16032001RetryPage: null } : {})
@@ -247,8 +263,10 @@ export class CreatorDatabaseService {
         sheetsAttemptCount: 0, nextSheetsAttemptAt: null, lastSheetsHttpStatus: null, lastSheetsApiCode: null, lastSheetsRetryable: null, lastSheetsError: null
       } });
       if (releaseDisabledPointer) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: job.id, creatorSearchPartitionId: current.id,
-        partitionKey: current.partitionKey, partitionLabel: `${current.categoryName} / historical GMV-All`, stage: "GMV_ALL_DISABLED_BY_STRATEGY",
-        safeMessage: "Historical GMV-All partition released from the active pointer; cursor and history preserved", occurredAt: new Date(now.getTime() - 1) } });
+        partitionKey: current.partitionKey, partitionLabel: current.gmvBucket === "G4" ? `${current.categoryName} / Very High` : `${current.categoryName} / historical GMV-All`,
+        stage: current.gmvBucket === "G4" ? "G4_MOVED_TO_EXPERIMENT_ONLY" : "GMV_ALL_DISABLED_BY_STRATEGY",
+        safeMessage: current.gmvBucket === "G4" ? "Very High partition released to rare-probe eligibility; cursor and history preserved"
+          : "Historical GMV-All partition released from the active pointer; cursor and history preserved", occurredAt: new Date(now.getTime() - 1) } });
       const value = await tx.creatorSyncJob.update({ where: { id: job.id }, data: { state: "RUNNING",
         currentStage: pendingPage ? "RECONCILING_SHEET" : releaseDisabledPointer ? "CLAIMING_PARTITION" : job.currentPartitionId ? "RUNNING" : "CLAIMING_PARTITION",
         ...(releaseDisabledPointer ? { currentPartitionId: null, privateSearchKey: null, privateNextPageToken: null } : {}),

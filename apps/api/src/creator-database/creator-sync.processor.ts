@@ -10,11 +10,11 @@ import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.s
 import { GoogleSheetsCreatorGateway, googleSheetsFailure, type CreatorSheet } from "./creator-sheet.gateway";
 import { CREATOR_MARKETPLACE_RETRY_MS, marketplaceRetryDelayMs } from "./retry-settings";
 import { adaptiveExpansion, adaptiveFollowerPartitionKey, classifyIncrementalYield,
-  combinedIncrementalYield, GMV_BUCKETS, isSpecificGmvPartition, observedSaturationState, partitionFilters, partitionLabel,
+  combinedIncrementalYield, isSpecificGmvPartition, observedSaturationState, partitionFilters, partitionLabel,
   PRODUCTION_PARTITION_TYPES, SPECIFIC_GMV_BUCKET_CODES, specificGmvCombinationKey,
   validateMarketplaceCategorySelection, validateV2CategorySelection, V3_ADAPTIVE_GENERATION,
   type FollowerWidthRules, type ProductionPartitionType } from "./marketplace-partitions";
-import { aggregateEvidence, categoryEvidence, followerEvidence, schedulerSelectionMessage, schedulerSlot,
+import { aggregateEvidence, categoryEvidence, designatedFirstG1G2Bucket, followerEvidence, g1G2FamilyKey, schedulerSelectionMessage, schedulerSlot,
   scoreSchedulerPriority, selectSchedulerCandidate, type SchedulerObservation } from "./creator-scheduler";
 
 const LEASE_MS = 2 * 60_000;
@@ -35,6 +35,7 @@ type AdaptivePartition = {
   uniqueCreatorsAdded: number; marketplaceRequests: number; pagesCompleted: number;
   throttleAttempts: number; followerSplitExplored: boolean; followerRecursionTerminal: boolean; gmvSplitCreated: boolean;
   branchClassification: string; status: string; rowsReturned: number;
+  schedulerFamilyKey?: string | null; schedulerG1G2FirstBucket?: string | null; schedulerIsG4Probe?: boolean;
 };
 
 class CreatorPersistenceError extends Error {
@@ -70,6 +71,7 @@ export class CreatorSyncProcessor {
       branchClassification: (parent.partitionType === "V2_SEED" ? "UNCLASSIFIED" : parent.branchClassification) as any,
       expectedYield: this.numericYield(parent),
       expectedNewPerSuccessfulPage: parent.pagesCompleted ? parent.uniqueCreatorsAdded / parent.pagesCompleted : null,
+      evidenceRows: parent.rowsReturned,
       observedSaturated: parent.observedSaturationState === "OBSERVED_SATURATED",
       gmvBucket: parent.gmvBucket,
       categoryEvidence: emptyEvidence, followerEvidence: emptyEvidence, globalEvidence: emptyEvidence });
@@ -93,7 +95,12 @@ export class CreatorSyncProcessor {
       followersMin: bound.min, followersMax: bound.max, parentPartitionId: parent.id,
       queuePosition: parent.queuePosition * 100n + BigInt(bounds.indexOf(bound) + 1), privateSearchKey: null, privateNextPageToken: null,
       gmvBucket: parent.gmvBucket, gmvRange: parent.gmvRange,
-      priorityScore: new Prisma.Decimal(priority.score), priorityReason: priority.reason, priorityUpdatedAt: now
+      status: parent.gmvBucket === "G4" ? "EXPERIMENT_ONLY" : "QUEUED",
+      priorityScore: new Prisma.Decimal(priority.score), priorityReason: priority.reason, priorityUpdatedAt: now,
+      splitDecisionReason: reason, splitParentRows: parent.rowsReturned,
+      splitParentUniqueRate: parent.rowsReturned ? new Prisma.Decimal(parent.uniqueCreatorsAdded).div(parent.rowsReturned) : new Prisma.Decimal(0),
+      splitParentNewPerPage: parent.pagesCompleted ? new Prisma.Decimal(parent.uniqueCreatorsAdded).div(parent.pagesCompleted) : new Prisma.Decimal(0),
+      splitParentObservedSaturated: parent.observedSaturationState === "OBSERVED_SATURATED"
     })) });
     await tx.creatorSearchPartition.update({ where: { id: parent.id }, data: { followerSplitExplored: true } });
     if (created.count) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: parent.creatorSyncJobId,
@@ -103,10 +110,13 @@ export class CreatorSyncProcessor {
     return created.count;
   }
   private expansionFor(partition: AdaptivePartition) {
-    if (partition.followersMin == null || !PRODUCTION_PARTITION_TYPES.includes(partition.partitionType as ProductionPartitionType)) return { kind: "NONE" as const };
+    if (partition.followersMin == null || !PRODUCTION_PARTITION_TYPES.includes(partition.partitionType as ProductionPartitionType)) {
+      return { kind: "NONE" as const, reason: "NOT_PRODUCTION_FOLLOWER_BRANCH" };
+    }
     return adaptiveExpansion({ partitionType: partition.partitionType as ProductionPartitionType,
       observedSaturationState: partition.observedSaturationState as any, followersMin: partition.followersMin,
       followersMax: partition.followersMax, yield: this.numericYield(partition), followerSplitExplored: partition.followerSplitExplored,
+      rowsReturned: partition.rowsReturned, successfulPages: partition.pagesCompleted, uniqueCreatorsAdded: partition.uniqueCreatorsAdded,
       followerRecursionTerminal: partition.followerRecursionTerminal, gmvSplitCreated: partition.gmvSplitCreated,
       gmvBucket: partition.gmvBucket, gmvRange: partition.gmvRange },
       this.followerWidthRules(), config.CREATOR_FIRST_SPLIT_MIN_WIDTH, config.CREATOR_DEEP_SPLIT_MIN_INCREMENTAL_YIELD);
@@ -117,8 +127,10 @@ export class CreatorSyncProcessor {
       followerRecursionTerminal: false, gmvSplitCreated: false } });
     for (const seed of completedSeeds as AdaptivePartition[]) {
       const expansion = this.expansionFor(seed);
-      if (expansion.kind === "FOLLOWER") await this.createFollowerChildren(tx, seed, expansion.bounds, "Specific-GMV branch exploratory split created");
-      else await tx.creatorSearchPartition.update({ where: { id: seed.id }, data: { followerRecursionTerminal: true } });
+      if (expansion.kind === "FOLLOWER") await this.createFollowerChildren(tx, seed, expansion.bounds, expansion.reason);
+      else await tx.creatorSearchPartition.update({ where: { id: seed.id }, data: {
+        followerRecursionTerminal: true, followerRecursionStopReason: expansion.reason
+      } });
     }
 
     const completedFollowerChildren = await tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId,
@@ -130,13 +142,19 @@ export class CreatorSyncProcessor {
       const siblings = await tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId, parentPartitionId: parentId,
         partitionType: "ADAPTIVE_FOLLOWER" }, orderBy: [{ followersMin: "asc" }, { id: "asc" }] });
       if (siblings.length !== 2 || siblings.some((sibling) => !["COMPLETE", "SPLIT", "DEEPLY_SATURATED"].includes(sibling.status))) continue;
-      const combined = combinedIncrementalYield(siblings), classification = classifyIncrementalYield(combined), lowValue = combined < config.CREATOR_LOW_VALUE_COMBINED_YIELD;
+      const combined = combinedIncrementalYield(siblings), classification = classifyIncrementalYield(combined);
+      const meaningfulChildren = siblings.every((sibling) => sibling.rowsReturned >= 200);
+      const bothLocallyLow = siblings.every((sibling) => sibling.rowsReturned > 0
+        && sibling.uniqueCreatorsAdded / sibling.rowsReturned < config.CREATOR_LOW_VALUE_COMBINED_YIELD);
+      const lowValue = meaningfulChildren && bothLocallyLow && combined < config.CREATOR_LOW_VALUE_COMBINED_YIELD;
       const parent = await tx.creatorSearchPartition.update({ where: { id: parentId }, data: {
         combinedChildIncrementalYield: new Prisma.Decimal(combined), branchClassification: classification,
         followerRecursionTerminal: lowValue
       } });
       if (lowValue) {
-        await tx.creatorSearchPartition.updateMany({ where: { id: { in: siblings.map((sibling) => sibling.id) } }, data: { followerRecursionTerminal: true } });
+        await tx.creatorSearchPartition.updateMany({ where: { id: { in: siblings.map((sibling) => sibling.id) } }, data: {
+          followerRecursionTerminal: true, followerRecursionStopReason: "BOTH_CHILDREN_BELOW_FIVE_PERCENT"
+        } });
         await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: jobId, creatorSearchPartitionId: parent.id,
           partitionKey: parent.partitionKey, partitionLabel: partitionLabel(parent), stage: "ADAPTIVE_BRANCH_LOW_VALUE",
           safeMessage: `Branch low-value — follower recursion stopped (${(combined * 100).toFixed(2)}% combined incremental yield)`, occurredAt: this.now() } });
@@ -144,8 +162,10 @@ export class CreatorSyncProcessor {
       }
       for (const sibling of siblings as AdaptivePartition[]) {
         const expansion = this.expansionFor(sibling);
-        if (expansion.kind === "FOLLOWER") await this.createFollowerChildren(tx, sibling, expansion.bounds, "Specific-GMV branch productive — deeper split queued");
-        else await tx.creatorSearchPartition.update({ where: { id: sibling.id }, data: { followerRecursionTerminal: true } });
+        if (expansion.kind === "FOLLOWER") await this.createFollowerChildren(tx, sibling, expansion.bounds, expansion.reason);
+        else await tx.creatorSearchPartition.update({ where: { id: sibling.id }, data: {
+          followerRecursionTerminal: true, followerRecursionStopReason: expansion.reason
+        } });
       }
     }
   }
@@ -229,7 +249,9 @@ export class CreatorSyncProcessor {
     const job = await this.prisma.creatorSyncJob.findFirstOrThrow({ where: { id: jobId, leaseId } });
     if (job.currentPartitionId) {
       const current = await this.prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: job.currentPartitionId } });
-      if (isSpecificGmvPartition(current) && ["STARTING", "RUNNING", "WAITING_RETRY", "PAUSED"].includes(current.status)) return current;
+      const resumable = isSpecificGmvPartition(current) && ["STARTING", "RUNNING", "WAITING_RETRY", "PAUSED"].includes(current.status);
+      if (resumable && current.gmvBucket !== "G4") return current;
+      if (resumable && current.gmvBucket === "G4" && current.schedulerIsG4Probe) return current;
     }
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('creator-marketplace-partition-crawler'))`;
@@ -237,7 +259,9 @@ export class CreatorSyncProcessor {
       const lockedJob = await tx.creatorSyncJob.findFirstOrThrow({ where: { id: jobId, leaseId } });
       if (lockedJob.currentPartitionId) {
         const current = await tx.creatorSearchPartition.findUnique({ where: { id: lockedJob.currentPartitionId } });
-        if (current && isSpecificGmvPartition(current) && ["STARTING", "RUNNING", "WAITING_RETRY", "PAUSED"].includes(current.status)) return current;
+        const resumable = current && isSpecificGmvPartition(current) && ["STARTING", "RUNNING", "WAITING_RETRY", "PAUSED"].includes(current.status);
+        if (resumable && current!.gmvBucket !== "G4") return current;
+        if (resumable && current!.gmvBucket === "G4" && current!.schedulerIsG4Probe) return current;
         // A migrated GMV-All continuation is intentionally retained on its
         // partition, but it must not be resumed or claimed as future work.
         await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId, currentPartitionId: lockedJob.currentPartitionId }, data: {
@@ -245,19 +269,49 @@ export class CreatorSyncProcessor {
         } });
       }
       const nextSequence = lockedJob.partitionClaimSequence + 1, now = this.now();
-      const [seed, adaptiveCandidates, historical] = await Promise.all([
-        tx.creatorSearchPartition.findFirst({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: "QUEUED" },
+      const [primaryFamilyRows, g3Seed, adaptiveCandidates, g4Adaptive, g4Seed, historical] = await Promise.all([
+        tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: { in: ["G1", "G2"] } },
+          orderBy: [{ queuePosition: "asc" }, { id: "asc" }] }),
+        tx.creatorSearchPartition.findFirst({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: "G3", status: "QUEUED" },
           orderBy: [{ queuePosition: "asc" }, { id: "asc" }] }),
         tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId,
-          partitionType: { in: ["ADAPTIVE_FOLLOWER", "ADAPTIVE_GMV"] }, gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: "QUEUED" }, include: { parentPartition: true } }),
+          partitionType: { in: ["ADAPTIVE_FOLLOWER", "ADAPTIVE_GMV"] }, gmvBucket: { in: ["G1", "G2", "G3"] }, status: "QUEUED" }, include: { parentPartition: true } }),
+        tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId, gmvBucket: "G4", status: "EXPERIMENT_ONLY",
+          partitionType: { in: ["ADAPTIVE_FOLLOWER", "ADAPTIVE_GMV"] } }, include: { parentPartition: true },
+          orderBy: [{ queuePosition: "asc" }, { id: "asc" }] }),
+        tx.creatorSearchPartition.findFirst({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: "G4", status: "EXPERIMENT_ONLY" },
+          orderBy: [{ queuePosition: "asc" }, { id: "asc" }] }),
         tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId, partitionType: { in: [...PRODUCTION_PARTITION_TYPES] },
           gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES },
           status: { in: ["COMPLETE", "SPLIT", "DEEPLY_SATURATED"] }, rowsReturned: { gt: 0 } },
           select: { categoryChildId: true, followersMin: true, followersMax: true, rowsReturned: true,
             uniqueCreatorsAdded: true, lastSuccessAt: true, gmvBucket: true } })
       ]);
+      const familyTouched = new Map<string, boolean>();
+      const familyBuckets = new Map<string, Set<string>>();
+      for (const row of primaryFamilyRows) {
+        const key = row.schedulerFamilyKey ?? g1G2FamilyKey(row);
+        if (key) {
+          familyTouched.set(key, Boolean(familyTouched.get(key) || row.startedAt || row.status !== "QUEUED"));
+          const buckets = familyBuckets.get(key) ?? new Set<string>(); buckets.add(row.gmvBucket!); familyBuckets.set(key, buckets);
+        }
+      }
+      const seed = primaryFamilyRows.find((row) => {
+        if (row.status !== "QUEUED") return false;
+        const key = row.schedulerFamilyKey ?? g1G2FamilyKey(row);
+        if (!key || familyTouched.get(key) || familyBuckets.get(key)?.size !== 2) return true;
+        return row.gmvBucket === (row.schedulerG1G2FirstBucket ?? designatedFirstG1G2Bucket(key));
+      }) ?? null;
+      const exceptionalG4 = g4Adaptive.find((candidate) => {
+        const evidence = candidate.parentPartition ?? candidate;
+        const uniqueRate = evidence.rowsReturned ? evidence.uniqueCreatorsAdded / evidence.rowsReturned : 0;
+        const newPerPage = evidence.pagesCompleted ? evidence.uniqueCreatorsAdded / evidence.pagesCompleted : 0;
+        return evidence.rowsReturned >= 200 && uniqueRate >= 0.10 && newPerPage >= 4;
+      }) ?? null;
+      const g4Probe = exceptionalG4 ?? g4Seed;
       const observations = historical as SchedulerObservation[];
-      const scoreCandidate = (candidate: typeof adaptiveCandidates[number] | NonNullable<typeof seed>) => {
+      const scoreCandidate = (candidate: typeof adaptiveCandidates[number] | NonNullable<typeof seed> | NonNullable<typeof g3Seed>
+        | NonNullable<typeof g4Probe>) => {
         const parent = "parentPartition" in candidate ? candidate.parentPartition : null;
         const localYield = candidate.incrementalYield ?? candidate.originalYield;
         const parentYield = parent?.incrementalYield ?? parent?.originalYield ?? parent?.combinedChildIncrementalYield;
@@ -265,6 +319,7 @@ export class CreatorSyncProcessor {
         const expectedNewPerSuccessfulPage = candidate.pagesCompleted > 0
           ? candidate.uniqueCreatorsAdded / candidate.pagesCompleted
           : parent && parent.pagesCompleted > 0 ? parent.uniqueCreatorsAdded / parent.pagesCompleted : null;
+        const evidenceRows = candidate.rowsReturned > 0 ? candidate.rowsReturned : parent?.rowsReturned ?? 0;
         const inheritedClassification = candidate.branchClassification === "UNCLASSIFIED" && parent && parent.partitionType !== "V2_SEED"
           ? parent.branchClassification : candidate.branchClassification;
         const branchObservations = candidate.gmvBucket ? observations.filter((observation) => observation.gmvBucket === candidate.gmvBucket) : [];
@@ -273,7 +328,7 @@ export class CreatorSyncProcessor {
         const follower = followerEvidence(observations, candidate.followersMin, candidate.followersMax, now, candidate.gmvBucket);
         const priority = scoreSchedulerPriority({ partitionType: candidate.partitionType as ProductionPartitionType,
           adaptiveDepth: candidate.adaptiveDepth, branchClassification: inheritedClassification as any,
-          expectedYield, expectedNewPerSuccessfulPage,
+          expectedYield, expectedNewPerSuccessfulPage, evidenceRows,
           gmvBucket: candidate.gmvBucket,
           observedSaturated: (parent?.observedSaturationState ?? candidate.observedSaturationState) === "OBSERVED_SATURATED",
           categoryEvidence: category, followerEvidence: follower, globalEvidence });
@@ -282,15 +337,21 @@ export class CreatorSyncProcessor {
       };
       const scored = adaptiveCandidates.map(scoreCandidate);
       if (seed) scored.push(scoreCandidate(seed) as typeof scored[number]);
-      const slot = schedulerSlot(nextSequence, config.CREATOR_V2_EXPLORATION_INTERVAL);
-      const explorationIndex = Math.floor((nextSequence - 1) / config.CREATOR_V2_EXPLORATION_INTERVAL) % GMV_BUCKETS.length;
-      const selected = selectSchedulerCandidate(scored, slot, slot === "EXPLORATION" ? GMV_BUCKETS[explorationIndex].code : undefined);
+      if (g3Seed) scored.push(scoreCandidate(g3Seed) as typeof scored[number]);
+      if (g4Probe) scored.push(scoreCandidate(g4Probe) as typeof scored[number]);
+      const slot = schedulerSlot(nextSequence, config.CREATOR_G4_PROBE_CADENCE, config.CREATOR_SCHEDULER_PRIMARY_CYCLE);
+      const selected = selectSchedulerCandidate(scored, slot);
       if (!selected) {
         await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId }, data: { state: "EXHAUSTED", currentStage: "ALL_PARTITIONS_COMPLETE", leaseId: null, leaseExpiresAt: null } });
         return null;
       }
       const next = selected.candidate, startedAt = now;
-      const claimed = await tx.creatorSearchPartition.updateMany({ where: { id: next.id, status: "QUEUED" }, data: {
+      const familyKey = next.partitionType === "V2_SEED" && (next.gmvBucket === "G1" || next.gmvBucket === "G2")
+        ? next.schedulerFamilyKey ?? g1G2FamilyKey(next) : null;
+      const firstG1G2 = Boolean(familyKey && !familyTouched.get(familyKey));
+      const isG4Probe = slot === "G4_PROBE" && next.gmvBucket === "G4";
+      const claimableStatus = next.gmvBucket === "G4" ? "EXPERIMENT_ONLY" : "QUEUED";
+      const claimed = await tx.creatorSearchPartition.updateMany({ where: { id: next.id, status: claimableStatus }, data: {
         status: "STARTING", startedAt, priorityScore: new Prisma.Decimal(selected.priority.score),
         priorityReason: selected.priority.reason, priorityUpdatedAt: startedAt, schedulerClass: selected.priority.schedulerClass,
         schedulerClaimSequence: nextSequence, schedulerCategoryRows: new Prisma.Decimal(selected.category.rows),
@@ -300,7 +361,9 @@ export class CreatorSyncProcessor {
         schedulerFollowerYield: selected.follower.yield == null ? null : new Prisma.Decimal(selected.follower.yield),
         schedulerFollowerWeight: new Prisma.Decimal(selected.priority.followerWeight),
         schedulerAncestorYield: selected.expectedYield == null ? null : new Prisma.Decimal(selected.expectedYield),
-        schedulerNewPerSuccessfulPage: selected.expectedNewPerSuccessfulPage == null ? null : new Prisma.Decimal(selected.expectedNewPerSuccessfulPage)
+        schedulerNewPerSuccessfulPage: selected.expectedNewPerSuccessfulPage == null ? null : new Prisma.Decimal(selected.expectedNewPerSuccessfulPage),
+        schedulerFamilyKey: familyKey, schedulerG1G2FirstBucket: familyKey ? designatedFirstG1G2Bucket(familyKey) : null,
+        schedulerWasFirstG1G2Sibling: firstG1G2, schedulerIsG4Probe: isG4Probe
       } });
       if (claimed.count !== 1) throw new Error("Marketplace partition claim raced");
       await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId }, data: { currentPartitionId: next.id,
@@ -309,7 +372,8 @@ export class CreatorSyncProcessor {
         partitionKey: next.partitionKey, partitionLabel: partitionLabel(next), stage: "PARTITION_STARTED", pageNumber: 1,
         safeMessage: schedulerSelectionMessage(selected.priority, next.partitionType as ProductionPartitionType, next.adaptiveDepth), occurredAt: startedAt } });
       return { ...next, status: "STARTING" as const, startedAt, priorityScore: new Prisma.Decimal(selected.priority.score),
-        priorityReason: selected.priority.reason, schedulerClass: selected.priority.schedulerClass };
+        priorityReason: selected.priority.reason, schedulerClass: selected.priority.schedulerClass,
+        schedulerIsG4Probe: isG4Probe, schedulerWasFirstG1G2Sibling: firstG1G2 };
     });
   }
 
@@ -329,6 +393,9 @@ export class CreatorSyncProcessor {
     if (!partition) return;
     job = await this.prisma.creatorSyncJob.findFirstOrThrow({ where: { id: jobId, leaseId } });
     if (job.pauseRequested) return this.pauseClaimed(job, leaseId, partition);
+    if (partition.gmvBucket === "G4" && !partition.schedulerIsG4Probe) {
+      throw new CreatorSyncStageError("PARTITION_CONFIG_ERROR", "Very High Marketplace work requires a persisted rare-probe scheduler claim");
+    }
     const pageNumber = partition.pagesCompleted + 1, attemptedAt = this.now();
     const categoryCatalog = await this.prisma.creatorMarketplaceCategory.findMany({ where: { shopId: job.shopId },
       select: { categoryId: true, parentCategoryId: true, enabledForCreatorCrawl: true, availableForCreatorFilter: true } });
@@ -441,7 +508,11 @@ export class CreatorSyncProcessor {
     await this.recordActivity(jobId, leaseId, partition, { stage: "COMMITTING_PAGE", pageNumber: page.pageNumber, creatorsReturned: creators.length, creatorsAdded, duplicates });
     const now = this.now();
     await this.prisma.$transaction(async (tx) => {
-      const pause = job.pauseRequested;
+      // Re-read the cooperative pause flag after the external Sheets write.
+      // A pause requested while Sheets is in flight must take effect only after
+      // this staged page commits, without allowing a subsequent Marketplace claim.
+      const latestJob = await tx.creatorSyncJob.findFirstOrThrow({ where: { id: jobId, leaseId } });
+      const pause = latestJob.pauseRequested;
       const strategyDisabled = !isSpecificGmvPartition(partition);
       const marketplaceRequests = Math.max(1, partition.marketplaceRequests);
       const rowsReturned = partition.rowsReturned + page.creatorsReturned;
