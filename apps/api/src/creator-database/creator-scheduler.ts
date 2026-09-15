@@ -11,6 +11,7 @@ export const BRANCH_EVIDENCE_MIN_ROWS = 200;
 
 export type SchedulerClass = "HIGH" | "MEDIUM" | "EXPLORATION" | "LOW" | "EXPERIMENT_ONLY";
 export type SchedulerSlot = "PRIMARY_PRODUCTIVE" | "PRIMARY_EXPLORATION" | "G3_EXPLORATION" | "G4_PROBE";
+export type CategoryCoverageMode = "COVERAGE" | "BALANCED";
 export type ProductivityEvidence = { rows: number; newCreators: number; yield: number | null };
 export type SchedulerObservation = {
   categoryChildId: string | null;
@@ -71,15 +72,49 @@ function rounded(value: number, digits = 6) {
   return Math.round(value * factor) / factor;
 }
 
-export function schedulerSlot(claimSequence: number, g4ProbeCadence = G4_PROBE_CADENCE, primaryCycle = PRIMARY_SCHEDULER_CYCLE): SchedulerSlot {
+export function schedulerSlot(claimSequence: number, coverageMode: CategoryCoverageMode = "BALANCED",
+  g4ProbeCadence = G4_PROBE_CADENCE, primaryCycle = PRIMARY_SCHEDULER_CYCLE): SchedulerSlot {
   if (!Number.isInteger(claimSequence) || claimSequence < 1) throw new Error("Scheduler claim sequence must be a positive integer");
   if (!Number.isInteger(g4ProbeCadence) || g4ProbeCadence < 100) throw new Error("G4 probe cadence must be at least 100 claims");
   if (!Number.isInteger(primaryCycle) || primaryCycle < 10) throw new Error("Primary scheduler cycle must be at least ten claims");
   if (claimSequence % g4ProbeCadence === 0) return "G4_PROBE";
   const position = ((claimSequence - 1) % primaryCycle) + 1;
-  if (position <= Math.floor(primaryCycle * 0.6)) return "PRIMARY_PRODUCTIVE";
+  const productiveShare = coverageMode === "COVERAGE" ? 0.4 : 0.6;
+  if (position <= Math.floor(primaryCycle * productiveShare)) return "PRIMARY_PRODUCTIVE";
   if (position <= Math.floor(primaryCycle * 0.9)) return "PRIMARY_EXPLORATION";
   return "G3_EXPLORATION";
+}
+
+export type CategoryExplorationCandidate<T> = {
+  candidate: T;
+  id: string;
+  categoryId: string;
+  categoryChildId: string;
+  queuePosition: bigint;
+  parentSampledChildren: number;
+  parentLastExplorationClaimAt: Date | null;
+  parentSortOrder: number;
+  childFirstSampledAt: Date | null;
+  childLastSampledAt: Date | null;
+  childLastExplorationClaimAt: Date | null;
+  childSortOrder: number;
+};
+
+function nullableDateValue(value: Date | null) { return value?.getTime() ?? Number.NEGATIVE_INFINITY; }
+
+/** Deterministic two-level fairness: least-covered/least-recent parent, then least-recent child. */
+export function selectCategoryExplorationCandidate<T>(candidates: readonly CategoryExplorationCandidate<T>[], mode: CategoryCoverageMode) {
+  const untouched = candidates.filter((value) => value.childFirstSampledAt == null);
+  const pool = mode === "COVERAGE" && untouched.length ? untouched : candidates;
+  return [...pool].sort((left, right) =>
+    left.parentSampledChildren - right.parentSampledChildren
+    || nullableDateValue(left.parentLastExplorationClaimAt) - nullableDateValue(right.parentLastExplorationClaimAt)
+    || left.parentSortOrder - right.parentSortOrder
+    || nullableDateValue(left.childLastSampledAt) - nullableDateValue(right.childLastSampledAt)
+    || nullableDateValue(left.childLastExplorationClaimAt) - nullableDateValue(right.childLastExplorationClaimAt)
+    || left.childSortOrder - right.childSortOrder
+    || (left.queuePosition < right.queuePosition ? -1 : left.queuePosition > right.queuePosition ? 1 : left.id.localeCompare(right.id))
+  )[0] ?? null;
 }
 
 function decayFactor(lastSuccessAt: Date | null, now: Date) {

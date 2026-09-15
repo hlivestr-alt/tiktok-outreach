@@ -26,23 +26,26 @@ describe("Google Sheets creator gateway", () => {
     vi.unstubAllGlobals();
   });
 
-  it("deduplicates creator IDs before appending and reconciles a retried append without a duplicate row", async () => {
+  it("re-reads after an ambiguous append failure and does not append a duplicate row", async () => {
     const gateway = new GoogleSheetsCreatorGateway();
     (gateway as any).accessToken = { value: "test-token", expiresAt: Date.now() + 600_000 };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ values: [] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+      // Simulate an append that reached Google before the connection dropped.
+      .mockRejectedValueOnce(new TypeError("connection reset after request body was sent"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ values: [[1, "id", "Creator", "open-1"]] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await gateway.reconcilePage("sheet-test", [creator("open-1", "First"), creator("open-1", "Updated")]);
+    await expect(gateway.reconcilePage("sheet-test", [creator("open-1", "First"), creator("open-1", "Updated")]))
+      .rejects.toMatchObject({ details: { retryable: true } });
     const firstAppend = JSON.parse(fetchMock.mock.calls[1][1].body as string) as { values: unknown[][] };
     expect(firstAppend.values).toHaveLength(1);
 
     await gateway.reconcilePage("sheet-test", [creator("open-1", "Updated")]);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect((JSON.parse(fetchMock.mock.calls[3][1].body as string) as { data: unknown[] }).data).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes(":append"))).toHaveLength(1);
     vi.unstubAllGlobals();
   });
 });

@@ -3,8 +3,6 @@ import { api } from "./api";
 type Requester = <T>(path: string, init?: RequestInit) => Promise<T>;
 
 export type CampaignCreatePayload = {
-  name: string;
-  productName: string;
   targetCount: number;
   candidateLimit: number;
   cooldownDays: number;

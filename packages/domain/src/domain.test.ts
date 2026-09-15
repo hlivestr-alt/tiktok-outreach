@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCampaignWithinLimit, buildPreview, matchesFilters, rankingValue, reconcileUnknownDelivery, renderMessage, type CreatorCandidate } from "./index";
+import { assertCampaignWithinLimit, assertContactCooldownDays, buildPreview, DEFAULT_OUTREACH_MESSAGE_TEMPLATE, MAX_CONTACT_COOLDOWN_DAYS, matchesFilters, rankingValue, reconcileUnknownDelivery, renderMessage, type CreatorCandidate } from "./index";
 
 const creator = (id: string, ordinal: number, gmv = 100): CreatorCandidate => ({
   creatorOpenId: id,
@@ -45,6 +45,48 @@ describe("campaign preview", () => {
     });
     expect(result.summary.selected).toBe(1);
   });
+
+  it("uses fixed UTC timestamps for 30, 90, 180, and 360-day cooldown boundaries", () => {
+    const now = new Date("2026-09-15T00:00:00.000Z");
+    const ages = [0, 29, 30, 31, 89, 90, 91, 179, 180, 181, 359, 360, 361];
+    const creators = ages.map((age, index) => creator(`age-${age}`, index + 1));
+    const contacts = new Map(ages.map((age) => [`age-${age}`, {
+      contactCount: 1,
+      lastContactedAt: new Date(now.getTime() - age * 86_400_000)
+    }]));
+    const eligible = (cooldownDays: number) => buildPreview({
+      creators, filters: {}, contacts, activeReservations: new Set(), requested: creators.length,
+      cooldownDays, rankingMetric: "FOLLOWERS", now
+    }).creators.filter((item) => item.eligibility === "ELIGIBLE").map((item) => Number(item.creatorOpenId.slice(4))).sort((a, b) => a - b);
+
+    expect(eligible(30)).toEqual([30, 31, 89, 90, 91, 179, 180, 181, 359, 360, 361]);
+    expect(eligible(90)).toEqual([90, 91, 179, 180, 181, 359, 360, 361]);
+    expect(eligible(180)).toEqual([180, 181, 359, 360, 361]);
+    expect(eligible(360)).toEqual([360, 361]);
+  });
+
+  it("never increases eligibility when the cooldown grows", () => {
+    const now = new Date("2026-09-15T00:00:00.000Z");
+    const ages = [0, 29, 30, 31, 89, 90, 91, 179, 180, 181, 359, 360, 361];
+    const creators = ages.map((age, index) => creator(`monotonic-${age}`, index + 1));
+    const contacts = new Map(ages.map((age) => [`monotonic-${age}`, {
+      contactCount: 1, lastContactedAt: new Date(now.getTime() - age * 86_400_000)
+    }]));
+    const counts = [30, 90, 180, 360].map((cooldownDays) => buildPreview({
+      creators, filters: {}, contacts, activeReservations: new Set(), requested: creators.length,
+      cooldownDays, rankingMetric: "FOLLOWERS", now
+    }).summary.eligible);
+    expect(counts).toEqual([11, 8, 5, 2]);
+  });
+
+  it("accepts editable whole-day cooldowns and rejects invalid or overflowing values", () => {
+    for (const days of [0, 1, 30, 90, 180, 360, 365, 730, MAX_CONTACT_COOLDOWN_DAYS]) {
+      expect(() => assertContactCooldownDays(days)).not.toThrow();
+    }
+    for (const days of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_CONTACT_COOLDOWN_DAYS + 1]) {
+      expect(() => assertContactCooldownDays(days)).toThrow("Contact cooldown must be a whole number");
+    }
+  });
 });
 
 describe("currency-aware GMV", () => {
@@ -70,6 +112,32 @@ describe("currency-aware GMV", () => {
 });
 
 describe("messages and reconciliation", () => {
+  it("keeps the canonical PROYA template exact and renders creator names including Unicode", () => {
+    const expected = `Halo kak {{creator_display_name}}
+
+Aku dari tim PROYA, mau mengajak Kakak untuk bekerja sama sebagai affiliate.
+
+Syarat:
+Akun TikTok Kakak sudah bisa menggunakan keranjang kuning.
+
+Alur kerja sama:
+Kami akan mengirimkan video cuplikan dari live PROYA yang sudah siap di-upload. Kakak tinggal upload videonya ke akun TikTok dan memasukkan keranjang kuning produk PROYA.
+
+Benefit:
+Kakak tidak perlu membuat video dari awal dan bisa mendapatkan komisi 10% dari setiap penjualan melalui video tersebut.
+
+Kalau tertarik, silakan langsung hubungi WhatsApp tim PROYA di:
++62 811-2026-2826
+
+Kami tunggu pesan WhatsApp dari Kakak ya 🙌
+Terima kasih!`;
+    expect(DEFAULT_OUTREACH_MESSAGE_TEMPLATE).toBe(expected);
+    expect(DEFAULT_OUTREACH_MESSAGE_TEMPLATE).toContain("{{creator_display_name}}");
+    expect(renderMessage(DEFAULT_OUTREACH_MESSAGE_TEMPLATE, {
+      creatorDisplayName: "Ayu Cántik 🇮🇩", productName: "", campaignName: "20260902_001"
+    })).toBe(expected.replace("{{creator_display_name}}", "Ayu Cántik 🇮🇩"));
+  });
+
   it("renders only approved placeholders", () => {
     expect(renderMessage("Hi {{creator_display_name}} — try {{product_name}}", {
       creatorDisplayName: "Ayu", productName: "Glow Serum", campaignName: "Launch"

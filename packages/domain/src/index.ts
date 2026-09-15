@@ -1,6 +1,6 @@
 export type Money = { amount: string; currency: string };
 
-/** Canonical creator segments shared by crawler partitioning and campaign input UI. */
+/** Canonical granular Creator Database crawler partitions. Campaign UI ranges are intentionally separate. */
 export const CREATOR_FOLLOWER_BUCKETS = [
   { code: "F01", min: 600, max: 799 }, { code: "F02", min: 800, max: 999 },
   { code: "F03", min: 1_000, max: 1_499 }, { code: "F04", min: 1_500, max: 1_999 },
@@ -23,6 +23,18 @@ export const CREATOR_GMV_BUCKETS = [
   { code: "G3", label: "High", range: "GMV_RANGE_1000_10000", min: 1_000, max: 10_000 },
   { code: "G4", label: "Very High", range: "GMV_RANGE_10000_AND_ABOVE", min: 10_000, max: null }
 ] as const;
+
+/** Outreach compares GMV only in this stored Marketplace currency; no FX conversion is performed. */
+export const OUTREACH_GMV_CURRENCY = "USD";
+
+/** Prisma stores an Int and JavaScript Date arithmetic remains valid through this bound. */
+export const MAX_CONTACT_COOLDOWN_DAYS = 100_000_000;
+
+export function assertContactCooldownDays(value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_CONTACT_COOLDOWN_DAYS) {
+    throw new Error(`Contact cooldown must be a whole number from 0 to ${MAX_CONTACT_COOLDOWN_DAYS} days`);
+  }
+}
 
 export type CreatorCandidate = {
   creatorOpenId: string;
@@ -73,6 +85,25 @@ export type RankingMetric =
   | "AVG_LIVE_VIEWERS"
   | "ENGAGEMENT_RATE"
   | "TIKTOK_RELEVANCE";
+
+export const DEFAULT_OUTREACH_MESSAGE_TEMPLATE = `Halo kak {{creator_display_name}}
+
+Aku dari tim PROYA, mau mengajak Kakak untuk bekerja sama sebagai affiliate.
+
+Syarat:
+Akun TikTok Kakak sudah bisa menggunakan keranjang kuning.
+
+Alur kerja sama:
+Kami akan mengirimkan video cuplikan dari live PROYA yang sudah siap di-upload. Kakak tinggal upload videonya ke akun TikTok dan memasukkan keranjang kuning produk PROYA.
+
+Benefit:
+Kakak tidak perlu membuat video dari awal dan bisa mendapatkan komisi 10% dari setiap penjualan melalui video tersebut.
+
+Kalau tertarik, silakan langsung hubungi WhatsApp tim PROYA di:
++62 811-2026-2826
+
+Kami tunggu pesan WhatsApp dari Kakak ya 🙌
+Terima kasih!`;
 
 export type ContactState = {
   lastContactedAt?: Date;
@@ -179,6 +210,7 @@ export function buildPreview(input: {
   now: Date;
   truncated?: boolean;
 }): PreviewResult {
+  assertContactCooldownDays(input.cooldownDays);
   const gmvCurrencyCounts: Record<string, number> = {};
   for (const creator of input.creators) if (creator.gmv?.currency) {
     const currency = creator.gmv.currency.toUpperCase();

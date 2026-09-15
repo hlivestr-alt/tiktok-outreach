@@ -4,7 +4,7 @@ import { cloneCampaignFromPreview, LOCAL_CLONE_EXPLANATION } from "./campaign-cl
 describe("clone campaign from preview", () => {
   it("calls only the local clone endpoint with a stable idempotency key", async () => {
     const request = vi.fn().mockResolvedValue({ id: "clone-1", state: "PREVIEW_READY", fetched: 20, eligible: 20, selected: 1, warnings: [] });
-    const payload = { name: "Clone", productName: "Sheet Mask", targetCount: 1, messageTemplate: "Hi {{creator_display_name}}" };
+    const payload = { targetCount: 1, messageTemplate: "Hi {{creator_display_name}}" };
     await expect(cloneCampaignFromPreview("source-1", payload, "submission-1", request)).resolves.toMatchObject({ id: "clone-1", state: "PREVIEW_READY" });
     expect(request).toHaveBeenCalledOnce();
     expect(request).toHaveBeenCalledWith("/outreach/campaigns/source-1/clone-from-preview", {

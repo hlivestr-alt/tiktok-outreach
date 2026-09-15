@@ -5,8 +5,6 @@ type Requester = <T>(path: string, init?: RequestInit) => Promise<T>;
 export const LOCAL_CLONE_EXPLANATION = "Uses already-fetched creator candidates. No new TikTok discovery request will be made.";
 
 export type CampaignClonePayload = {
-  name: string;
-  productName: string;
   targetCount: number;
   messageTemplate: string;
 };

@@ -1,5 +1,5 @@
 export * from "@prisma/client";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -20,7 +20,15 @@ export async function lockCreatorEligibility(
   shopId: string,
   creatorIds: Iterable<string>
 ): Promise<void> {
-  for (const creatorId of [...new Set(creatorIds)].sort()) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`eligibility-shop:${shopId}`}), hashtext(${`creator:${creatorId}`}))`;
-  }
+  const orderedCreatorIds = [...new Set(creatorIds)].sort();
+  if (!orderedCreatorIds.length) return;
+  const rows = orderedCreatorIds.map((creatorId) => Prisma.sql`(${creatorId})`);
+  await tx.$executeRaw(Prisma.sql`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${`eligibility-shop:${shopId}`}),
+      hashtext(${"creator:"} || ordered."creatorId")
+    )
+    FROM (VALUES ${Prisma.join(rows)}) AS ordered("creatorId")
+    ORDER BY ordered."creatorId"
+  `);
 }

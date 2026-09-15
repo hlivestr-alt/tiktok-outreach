@@ -5,7 +5,7 @@ ENV APP_VERSION=$APP_VERSION BUILD_TIMESTAMP=$BUILD_TIMESTAMP
 WORKDIR /app
 RUN corepack enable
 COPY . .
-RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store && pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store && pnpm install --filter @affiliate/api... --frozen-lockfile --trust-lockfile --prefer-offline
 RUN pnpm --filter @affiliate/api... build
 EXPOSE 4000
 CMD ["sh", "-c", "pnpm db:migrate && pnpm --filter @affiliate/api start"]

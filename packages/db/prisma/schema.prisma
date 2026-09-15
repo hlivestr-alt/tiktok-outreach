@@ -200,36 +200,36 @@ enum TokenRefreshState {
 }
 
 model Shop {
-  id                             String                       @id @default(uuid())
-  name                           String
-  externalShopId                 String?                      @unique
-  shopCipher                     String?
-  shopCode                       String?
-  sellerType                     String?
-  selectedForReadOnly            Boolean                      @default(false)
-  region                         String                       @default("ID")
-  currency                       String                       @default("IDR")
-  timezone                       String                       @default("Asia/Jakarta")
-  connectionMode                 ConnectionMode               @default(MOCK)
-  maxRecipientsPerCampaign       Int                          @default(500)
-  createdAt                      DateTime                     @default(now())
-  updatedAt                      DateTime                     @updatedAt
-  campaigns                      Campaign[]
-  contacts                       CreatorShopContactState[]
-  conversations                  Conversation[]
-  reservations                   OutreachReservation[]
-  syncRuns                       ContactHistorySyncRun[]
-  imports                        HistoricalContactImport[]
-  dailyUsage                     ShopOutboundDailyUsage[]
-  dispatchEvents                 OutboundDispatchEvent[]
-  discoveryRuns                  DiscoveryRun[]
-  historySyncJob                 HistorySyncJob?
-  historicalFacts                HistoricalContactFact[]
-  safetySettingsChanges          SafetySettingsAudit[]
-  providerOutboundLimiters       ProviderOutboundLimiter[]
-  creatorSyncJob                 CreatorSyncJob?
-  creatorSnapshots               CreatorMetricSnapshot[]
-  creatorMarketplaceCategories   CreatorMarketplaceCategory[]
+  id                           String                       @id @default(uuid())
+  name                         String
+  externalShopId               String?                      @unique
+  shopCipher                   String?
+  shopCode                     String?
+  sellerType                   String?
+  selectedForReadOnly          Boolean                      @default(false)
+  region                       String                       @default("ID")
+  currency                     String                       @default("IDR")
+  timezone                     String                       @default("Asia/Jakarta")
+  connectionMode               ConnectionMode               @default(MOCK)
+  maxRecipientsPerCampaign     Int                          @default(500)
+  createdAt                    DateTime                     @default(now())
+  updatedAt                    DateTime                     @updatedAt
+  campaigns                    Campaign[]
+  contacts                     CreatorShopContactState[]
+  conversations                Conversation[]
+  reservations                 OutreachReservation[]
+  syncRuns                     ContactHistorySyncRun[]
+  imports                      HistoricalContactImport[]
+  dailyUsage                   ShopOutboundDailyUsage[]
+  dispatchEvents               OutboundDispatchEvent[]
+  discoveryRuns                DiscoveryRun[]
+  historySyncJob               HistorySyncJob?
+  historicalFacts              HistoricalContactFact[]
+  safetySettingsChanges        SafetySettingsAudit[]
+  providerOutboundLimiters     ProviderOutboundLimiter[]
+  creatorSyncJob               CreatorSyncJob?
+  creatorSnapshots             CreatorMetricSnapshot[]
+  creatorMarketplaceCategories CreatorMarketplaceCategory[]
 }
 
 model IntegrationConnection {
@@ -522,46 +522,47 @@ model CreatorMetricSnapshot {
 /// One durable continuation stream per shop. Provider cursors are private and
 /// never returned by the public API projection.
 model CreatorSyncJob {
-  id                     String                   @id @default(uuid())
-  shopId                 String                   @unique
-  state                  CreatorSyncState         @default(PAUSED)
-  privateSearchKey       String?
-  privateNextPageToken   String?
-  pagesCompleted         Int                      @default(10)
-  creatorsFetched        Int                      @default(200)
-  creatorsFetchedThisRun Int                      @default(0)
-  pauseRequested         Boolean                  @default(false)
-  marketplaceRetryDelaySeconds Int                  @default(3)
-  nextAttemptAt          DateTime?
-  startedAt              DateTime?
-  lastPageAt             DateTime?
-  lastSuccessAt          DateTime?
-  lastError              String?
-  lastProviderCode       String?
-  currentStage           String                   @default("PAUSED")
-  lastAttemptAt          DateTime?
-  lastResponseAt         DateTime?
-  lastAttemptPage        Int?
-  lastHttpStatus         Int?
-  lastTikTokCode         String?
-  lastSafeError          String?
-  lastCreatorsReturned   Int?
-  lastCreatorsAdded      Int?
-  lastDuplicates         Int?
-  spreadsheetId          String
-  sheetImportedAt        DateTime?
-  leaseId                String?
-  leaseExpiresAt         DateTime?
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @updatedAt
-  shop                   Shop                     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  pages                  CreatorSyncPage[]
-  events                 CreatorSyncEvent[]
-  partitions             CreatorSearchPartition[]
-  currentPartitionId     String?                  @unique
-  currentPartition       CreatorSearchPartition?  @relation("CurrentCreatorPartition", fields: [currentPartitionId], references: [id], onDelete: SetNull)
-  crawlerGeneration      Int                      @default(1)
-  partitionClaimSequence Int                      @default(0)
+  id                           String                   @id @default(uuid())
+  shopId                       String                   @unique
+  state                        CreatorSyncState         @default(PAUSED)
+  privateSearchKey             String?
+  privateNextPageToken         String?
+  pagesCompleted               Int                      @default(10)
+  creatorsFetched              Int                      @default(200)
+  creatorsFetchedThisRun       Int                      @default(0)
+  pauseRequested               Boolean                  @default(false)
+  marketplaceRetryDelaySeconds Int                      @default(3)
+  nextAttemptAt                DateTime?
+  startedAt                    DateTime?
+  lastPageAt                   DateTime?
+  lastSuccessAt                DateTime?
+  lastError                    String?
+  lastProviderCode             String?
+  currentStage                 String                   @default("PAUSED")
+  lastAttemptAt                DateTime?
+  lastResponseAt               DateTime?
+  lastAttemptPage              Int?
+  lastHttpStatus               Int?
+  lastTikTokCode               String?
+  lastSafeError                String?
+  lastCreatorsReturned         Int?
+  lastCreatorsAdded            Int?
+  lastDuplicates               Int?
+  spreadsheetId                String
+  sheetImportedAt              DateTime?
+  leaseId                      String?
+  leaseExpiresAt               DateTime?
+  createdAt                    DateTime                 @default(now())
+  updatedAt                    DateTime                 @updatedAt
+  shop                         Shop                     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  pages                        CreatorSyncPage[]
+  events                       CreatorSyncEvent[]
+  partitions                   CreatorSearchPartition[]
+  currentPartitionId           String?                  @unique
+  currentPartition             CreatorSearchPartition?  @relation("CurrentCreatorPartition", fields: [currentPartitionId], references: [id], onDelete: SetNull)
+  crawlerGeneration            Int                      @default(1)
+  partitionClaimSequence       Int                      @default(0)
+  categoryCoverageCompletedAt  DateTime?
 
   @@index([state, nextAttemptAt])
   @@index([leaseExpiresAt])
@@ -610,8 +611,11 @@ model CreatorSyncPage {
   duplicateRows            Int?
   newCreatorOpenIds        String[]                @default([])
   payload                  Json
+  databasePersistedAt      DateTime?
   sheetsAttemptCount       Int                     @default(0)
   nextSheetsAttemptAt      DateTime?
+  sheetsFirstFailureAt     DateTime?
+  sheetsLastAttemptAt      DateTime?
   lastSheetsHttpStatus     Int?
   lastSheetsApiCode        String?
   lastSheetsRetryable      Boolean?
@@ -629,103 +633,110 @@ model CreatorSyncPage {
 /// Cached TikTok Shop category metadata. V1 creator crawling enables the
 /// documented parent categories (root nodes) and keeps the full fetched tree.
 model CreatorMarketplaceCategory {
-  id                        String   @id @default(uuid())
-  shopId                    String
-  categoryId                String
-  categoryName              String
-  parentCategoryId          String?
-  level                     Int
-  enabledForCreatorCrawl    Boolean  @default(false)
-  availableForCreatorFilter Boolean  @default(true)
-  sortOrder                 Int
-  isLeaf                    Boolean  @default(false)
-  fetchedAt                 DateTime
-  createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @updatedAt
-  shop                      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  id                            String    @id @default(uuid())
+  shopId                        String
+  categoryId                    String
+  categoryName                  String
+  parentCategoryId              String?
+  level                         Int
+  enabledForCreatorCrawl        Boolean   @default(false)
+  availableForCreatorFilter     Boolean   @default(true)
+  sortOrder                     Int
+  isLeaf                        Boolean   @default(false)
+  creatorFirstSampledAt         DateTime?
+  creatorLastSampledAt          DateTime?
+  creatorExplorationClaimCount  Int       @default(0)
+  creatorLastExplorationClaimAt DateTime?
+  fetchedAt                     DateTime
+  createdAt                     DateTime  @default(now())
+  updatedAt                     DateTime  @updatedAt
+  shop                          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
   @@unique([shopId, categoryId])
   @@index([shopId, enabledForCreatorCrawl, sortOrder])
+  @@index([shopId, parentCategoryId, availableForCreatorFilter, creatorFirstSampledAt, sortOrder])
 }
 
 /// Durable Marketplace search sequence. Opaque cursors remain backend-only.
 model CreatorSearchPartition {
-  id                            String                         @id @default(uuid())
-  creatorSyncJobId              String
-  partitionKey                  String
-  generation                    Int                            @default(1)
-  partitionType                 CreatorSearchPartitionType     @default(LEGACY)
-  adaptiveDepth                 Int                            @default(0)
-  categoryId                    String?
-  categoryName                  String
-  categoryChildId               String?
-  categoryChildName             String?
-  followerBucket                String?
-  followersMin                  Int?
-  followersMax                  Int?
-  gmvBucket                     String?
-  gmvRange                      String?
-  parentPartitionId             String?
-  status                        CreatorSearchPartitionStatus   @default(QUEUED)
-  queuePosition                 BigInt
-  privateSearchKey              String?
-  privateNextPageToken          String?
-  pagesCompleted                Int                            @default(0)
-  rowsReturned                  Int                            @default(0)
-  uniqueCreatorsAdded           Int                            @default(0)
-  duplicates                    Int                            @default(0)
-  marketplaceRequests           Int                            @default(0)
-  throttleAttempts              Int                            @default(0)
-  newCreatorsPerRequest         Decimal?                       @db.Decimal(14, 6)
-  duplicateRate                 Decimal?                       @db.Decimal(10, 8)
-  originalYield                 Decimal?                       @db.Decimal(10, 8)
-  incrementalYield              Decimal?                       @db.Decimal(10, 8)
-  combinedChildIncrementalYield Decimal?                       @db.Decimal(10, 8)
-  observedSaturationState       CreatorObservedSaturationState @default(UNKNOWN)
-  branchClassification          CreatorBranchClassification    @default(UNCLASSIFIED)
-  followerSplitExplored         Boolean                        @default(false)
-  followerRecursionTerminal     Boolean                        @default(false)
-  gmvSplitCreated               Boolean                        @default(false)
-  priorityScore                 Decimal                        @default(0) @db.Decimal(18, 6)
-  priorityReason                String?
-  priorityUpdatedAt             DateTime?
-  schedulerClass                CreatorSchedulerClass?
-  schedulerClaimSequence        Int?
-  schedulerCategoryRows         Decimal?                       @db.Decimal(18, 3)
-  schedulerCategoryYield        Decimal?                       @db.Decimal(10, 8)
-  schedulerCategoryWeight       Decimal?                       @db.Decimal(12, 6)
-  schedulerFollowerRows         Decimal?                       @db.Decimal(18, 3)
-  schedulerFollowerYield        Decimal?                       @db.Decimal(10, 8)
-  schedulerFollowerWeight       Decimal?                       @db.Decimal(12, 6)
-  schedulerAncestorYield        Decimal?                       @db.Decimal(10, 8)
-  schedulerNewPerSuccessfulPage Decimal?                       @db.Decimal(14, 6)
-  schedulerFamilyKey            String?
-  schedulerG1G2FirstBucket      String?
-  schedulerWasFirstG1G2Sibling  Boolean                        @default(false)
-  schedulerIsG4Probe            Boolean                        @default(false)
-  splitDecisionReason           String?
-  splitParentRows               Int?
-  splitParentUniqueRate         Decimal?                       @db.Decimal(10, 8)
-  splitParentNewPerPage         Decimal?                       @db.Decimal(14, 6)
-  splitParentObservedSaturated  Boolean?
-  followerRecursionStopReason   String?
-  mayStillBeDense               Boolean                        @default(false)
-  categoryChildIds              String[]                       @default([])
-  business16032001RetryCount    Int                            @default(0)
-  business16032001RetryPage     Int?
-  createdAt                     DateTime                       @default(now())
-  startedAt                     DateTime?
-  completedAt                   DateTime?
-  lastRequestAt                 DateTime?
-  lastSuccessAt                 DateTime?
-  lastError                     String?
-  updatedAt                     DateTime                       @updatedAt
-  creatorSyncJob                CreatorSyncJob                 @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
-  activeForJob                  CreatorSyncJob?                @relation("CurrentCreatorPartition")
-  parentPartition               CreatorSearchPartition?        @relation("PartitionChildren", fields: [parentPartitionId], references: [id], onDelete: SetNull)
-  children                      CreatorSearchPartition[]       @relation("PartitionChildren")
-  pages                         CreatorSyncPage[]
-  events                        CreatorSyncEvent[]
+  id                              String                         @id @default(uuid())
+  creatorSyncJobId                String
+  partitionKey                    String
+  generation                      Int                            @default(1)
+  partitionType                   CreatorSearchPartitionType     @default(LEGACY)
+  adaptiveDepth                   Int                            @default(0)
+  categoryId                      String?
+  categoryName                    String
+  categoryChildId                 String?
+  categoryChildName               String?
+  followerBucket                  String?
+  followersMin                    Int?
+  followersMax                    Int?
+  gmvBucket                       String?
+  gmvRange                        String?
+  parentPartitionId               String?
+  status                          CreatorSearchPartitionStatus   @default(QUEUED)
+  queuePosition                   BigInt
+  privateSearchKey                String?
+  privateNextPageToken            String?
+  pagesCompleted                  Int                            @default(0)
+  rowsReturned                    Int                            @default(0)
+  uniqueCreatorsAdded             Int                            @default(0)
+  duplicates                      Int                            @default(0)
+  marketplaceRequests             Int                            @default(0)
+  throttleAttempts                Int                            @default(0)
+  newCreatorsPerRequest           Decimal?                       @db.Decimal(14, 6)
+  duplicateRate                   Decimal?                       @db.Decimal(10, 8)
+  originalYield                   Decimal?                       @db.Decimal(10, 8)
+  incrementalYield                Decimal?                       @db.Decimal(10, 8)
+  combinedChildIncrementalYield   Decimal?                       @db.Decimal(10, 8)
+  observedSaturationState         CreatorObservedSaturationState @default(UNKNOWN)
+  branchClassification            CreatorBranchClassification    @default(UNCLASSIFIED)
+  followerSplitExplored           Boolean                        @default(false)
+  followerRecursionTerminal       Boolean                        @default(false)
+  gmvSplitCreated                 Boolean                        @default(false)
+  priorityScore                   Decimal                        @default(0) @db.Decimal(18, 6)
+  priorityReason                  String?
+  priorityUpdatedAt               DateTime?
+  schedulerClass                  CreatorSchedulerClass?
+  schedulerClaimSequence          Int?
+  schedulerCategoryRows           Decimal?                       @db.Decimal(18, 3)
+  schedulerCategoryYield          Decimal?                       @db.Decimal(10, 8)
+  schedulerCategoryWeight         Decimal?                       @db.Decimal(12, 6)
+  schedulerFollowerRows           Decimal?                       @db.Decimal(18, 3)
+  schedulerFollowerYield          Decimal?                       @db.Decimal(10, 8)
+  schedulerFollowerWeight         Decimal?                       @db.Decimal(12, 6)
+  schedulerAncestorYield          Decimal?                       @db.Decimal(10, 8)
+  schedulerNewPerSuccessfulPage   Decimal?                       @db.Decimal(14, 6)
+  schedulerFamilyKey              String?
+  schedulerG1G2FirstBucket        String?
+  schedulerWasFirstG1G2Sibling    Boolean                        @default(false)
+  schedulerIsG4Probe              Boolean                        @default(false)
+  schedulerWasCategoryExploration Boolean                        @default(false)
+  schedulerCoverageMode           Boolean                        @default(false)
+  splitDecisionReason             String?
+  splitParentRows                 Int?
+  splitParentUniqueRate           Decimal?                       @db.Decimal(10, 8)
+  splitParentNewPerPage           Decimal?                       @db.Decimal(14, 6)
+  splitParentObservedSaturated    Boolean?
+  followerRecursionStopReason     String?
+  mayStillBeDense                 Boolean                        @default(false)
+  categoryChildIds                String[]                       @default([])
+  business16032001RetryCount      Int                            @default(0)
+  business16032001RetryPage       Int?
+  createdAt                       DateTime                       @default(now())
+  startedAt                       DateTime?
+  completedAt                     DateTime?
+  lastRequestAt                   DateTime?
+  lastSuccessAt                   DateTime?
+  lastError                       String?
+  updatedAt                       DateTime                       @updatedAt
+  creatorSyncJob                  CreatorSyncJob                 @relation(fields: [creatorSyncJobId], references: [id], onDelete: Cascade)
+  activeForJob                    CreatorSyncJob?                @relation("CurrentCreatorPartition")
+  parentPartition                 CreatorSearchPartition?        @relation("PartitionChildren", fields: [parentPartitionId], references: [id], onDelete: SetNull)
+  children                        CreatorSearchPartition[]       @relation("PartitionChildren")
+  pages                           CreatorSyncPage[]
+  events                          CreatorSyncEvent[]
 
   @@unique([creatorSyncJobId, partitionKey])
   @@index([creatorSyncJobId, status, queuePosition])

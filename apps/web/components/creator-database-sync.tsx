@@ -21,12 +21,15 @@ type SyncStatus = {
   business16032001RetryCount: number;
   sheetsRetryCount: number; sheetsRetryPage?: number | null; sheetsNextAttemptAt?: string | null;
   sheetsHttpStatus?: number | null; sheetsApiCode?: string | null; sheetsRetryable?: boolean | null; sheetsError?: string | null;
+  sheetsDatabasePersistedAt?: string | null; sheetsFirstFailureAt?: string | null; sheetsLastAttemptAt?: string | null;
   currentPage: number; databaseStillPopulating: boolean;
   partitionsRemaining: number;
   categoryMetadataReady: boolean;
   categoryCatalog: { loaded: boolean; count: number; lastRefreshedAt?: string | null };
   crawlerGeneration: number;
   schedulerStrategy?: { primaryDiscovery: string; high: string; veryHigh: string };
+  categoryCoverage?: { sampled: number; total: number; untouched: number; parentsSampled: number; totalParents: number;
+    mode: "COVERAGE" | "BALANCED"; categoryExplorationPercent: 50 | 30 };
   currentPartition?: { key: string; category: string; childCategory?: string | null; followers: string; gmv: string; page: number; status: string;
     type: "Base" | "Adaptive"; partitionType: string; depth: number; observedSaturated: boolean; observedSaturationState: string;
     branchClassification: string; schedulerClass?: "HIGH" | "MEDIUM" | "EXPLORATION" | "LOW" | "EXPERIMENT_ONLY" | null;
@@ -45,6 +48,15 @@ export const DEFAULT_MARKETPLACE_RETRY_SECONDS = 3;
 
 function time(value?: string | null) {
   return value ? new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+}
+
+export function elapsedTime(value: string | null | undefined, nowMs: number) {
+  if (!value) return "—";
+  const totalSeconds = Math.max(0, Math.floor((nowMs - new Date(value).getTime()) / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600), minutes = Math.floor(totalSeconds % 3_600 / 60), seconds = totalSeconds % 60;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 export function currentActivity(data: SyncStatus, retrySeconds: number) {
@@ -66,8 +78,8 @@ export function currentActivity(data: SyncStatus, retrySeconds: number) {
     case "WAITING_RETRY": return `TikTok throttled — 36009002 — retrying in ${retrySeconds}s`;
     case "WAITING_BUSINESS_RETRY": return `TikTok business error — 16032001 — transient retry ${data.business16032001RetryCount}/10 in ${retrySeconds}s`;
     case "TIKTOK_BUSINESS_RETRY_LIMIT": return `TikTok business error — 16032001 — retry limit reached (${data.business16032001RetryCount}/10). Manual Continue required.`;
-    case "WAITING_SHEET_RETRY": return `Google Sheets save failed — retry ${Math.min(10, data.sheetsRetryCount + 1)}/10 in ${retrySeconds}s`;
-    case "SHEET_RETRY_LIMIT": return `Google Sheets save failed — retry limit reached (${data.sheetsRetryCount}/10). Manual Continue required.`;
+    case "WAITING_SHEET_RETRY": return `Google Sheets unavailable — attempt ${data.sheetsRetryCount + 1} in ${retrySeconds}s`;
+    case "SHEETS_BLOCKED_RETRYING": return `Google Sheets access blocked — attempt ${data.sheetsRetryCount + 1} in ${retrySeconds}s`;
     case "PAUSING": return "Finishing the in-flight page, then pausing…";
     case "PAUSED": return `Paused at page ${data.currentPage} — no retry is scheduled.`;
     case "GMV_ALL_DISABLED_BY_STRATEGY": return "Paused — the historical GMV-All continuation is disabled by the new search strategy.";
@@ -107,8 +119,8 @@ export function eventText(event: SyncEvent, marketplaceRetrySeconds = DEFAULT_MA
     case "PAGE_COMMITTED": return `${page}committed — ${formatNumber(event.creatorsReturned ?? 0)} returned, ${formatNumber(event.creatorsAdded ?? 0)} new, ${formatNumber(event.duplicates ?? 0)} duplicate`;
     case "CURSOR_ADVANCED": return event.safeMessage ?? `Continuing to page ${event.pageNumber}`;
     case "DATABASE_ERROR": return `${page}${event.safeMessage ?? "PostgreSQL save failed; Page remains uncommitted"}`;
-    case "SHEET_RETRY": case "SHEET_ERROR": case "SHEET_RETRY_LIMIT": return event.safeMessage ?? `${page}Google Sheets save failed`;
-    case "SHEET_RECOVERED": return `${page}Google Sheets save recovered`;
+    case "SHEET_RETRY": case "SHEET_ERROR": case "SHEETS_RETRY_STARTED": case "SHEETS_RETRY_FAILED": return event.safeMessage ?? `${page}Google Sheets save failed`;
+    case "SHEET_RECOVERED": return `${page}${event.safeMessage ?? "Google Sheets save recovered"}`;
     case "CURSOR_ERROR": return `${page}cursor did not advance`;
     case "PAUSE_REQUESTED": return "Pause requested";
     case "PAUSED": return `${page}sync paused`;
@@ -166,9 +178,11 @@ export function CreatorDatabaseSync({ compact = false }: { compact?: boolean }) 
   const retrySeconds = data.nextAttemptAt ? Math.max(0, Math.ceil((new Date(data.nextAttemptAt).getTime() - nowMs) / 1000)) : CREATOR_RETRY_SECONDS;
   const retryDelayValue = Number(retryDelayInput ?? data.marketplaceRetryDelaySeconds);
   const sheetsStage = data.currentStage?.includes("SHEET") || data.currentStage === "WAITING_SHEET_RETRY" || data.sheetsRetryPage != null;
-  if (compact) return <div className="creator-db-compact"><Database/><div><strong>Creator database: {formatNumber(data.totalCreatorsStored)} creators</strong><span>Last updated: {data.lastSuccessAt ? new Date(data.lastSuccessAt).toLocaleString() : "existing Sheet import pending"} · Sync: {label[data.status]}{data.databaseStillPopulating ? " · still being populated" : ""}</span></div></div>;
+  const sheetsWaiting = data.currentStage === "WAITING_SHEET_RETRY" || data.currentStage === "SHEETS_BLOCKED_RETRYING";
+  const sheetsUnavailableFor = elapsedTime(data.sheetsFirstFailureAt, nowMs);
+  if (compact) return <div className="creator-db-compact"><Database/><div><strong>Creator database: {formatNumber(data.totalCreatorsStored)} creators</strong><span>Last updated: {data.lastSuccessAt ? new Date(data.lastSuccessAt).toLocaleString() : "existing Sheet import pending"} · Sync: {label[data.status]}{data.categoryCoverage ? ` · Categories: ${data.categoryCoverage.sampled}/${data.categoryCoverage.total}` : ""}{data.databaseStillPopulating ? " · still being populated" : ""}</span></div></div>;
   const lastOutcome = data.lastSafeError
-    ? sheetsStage ? `Google Sheets ${data.sheetsRetryable === false ? "non-retryable failure" : "failure"}`
+    ? sheetsStage ? `Google Sheets ${data.sheetsRetryable === false ? "blocked; retrying automatically" : "unavailable"}`
       : data.lastTikTokCode === "36009002" ? "Throttled by TikTok (36009002)"
       : data.lastTikTokCode === "16032001" && data.status === "WAITING" ? `Transient business error (16032001), retry ${data.business16032001RetryCount}/10`
       : "Failed"
@@ -178,6 +192,7 @@ export function CreatorDatabaseSync({ compact = false }: { compact?: boolean }) 
     <div className="creator-db-metrics"><div><span>Unique creators stored</span><strong>{formatNumber(data.totalCreatorsStored)}</strong></div><div><span>Pages completed</span><strong>{formatNumber(data.pagesCompleted)}</strong></div><div><span>Fetched this run</span><strong>{formatNumber(data.creatorsFetchedThisRun)}</strong></div><div><span>Partition page</span><strong>{formatNumber(data.currentPage)}</strong></div><div><span>Partitions remaining</span><strong>{formatNumber(data.partitionsRemaining)}</strong></div><div><span>Last successful fetch</span><strong>{data.lastSuccessAt ? new Date(data.lastSuccessAt).toLocaleString() : "—"}</strong></div></div>
     <div className="creator-db-retry-setting"><label htmlFor="marketplace-retry-delay">Marketplace retry delay:<span className="creator-db-retry-controls"><input id="marketplace-retry-delay" type="number" min={1} step={1} inputMode="numeric" value={retryDelayInput ?? data.marketplaceRetryDelaySeconds} onChange={(event) => setRetryDelayInput(event.target.value)} /><span>seconds</span><button type="button" className="button secondary" disabled={busy || !Number.isInteger(retryDelayValue) || retryDelayValue < 1} onClick={saveRetryDelay}>Save</button></span></label></div>
     {data.schedulerStrategy && <div className="creator-db-attempt-grid"><div><span>Primary discovery</span><strong>{data.schedulerStrategy.primaryDiscovery}</strong></div><div><span>High</span><strong>{data.schedulerStrategy.high}</strong></div><div><span>Very High</span><strong>{data.schedulerStrategy.veryHigh}</strong></div></div>}
+    {data.categoryCoverage && <div className="creator-db-attempt-grid"><div><span>Category coverage</span><strong>{formatNumber(data.categoryCoverage.sampled)} / {formatNumber(data.categoryCoverage.total)} sampled</strong></div><div><span>Parent coverage</span><strong>{formatNumber(data.categoryCoverage.parentsSampled)} / {formatNumber(data.categoryCoverage.totalParents)} sampled</strong></div><div><span>{data.categoryCoverage.mode === "COVERAGE" ? "Category coverage mode" : "Balanced discovery"}</span><strong>{data.categoryCoverage.categoryExplorationPercent}% of claims explore {data.categoryCoverage.mode === "COVERAGE" ? "untouched categories" : "categories"}</strong></div></div>}
     <div className="creator-db-attempt-grid"><div><span>Category catalog</span><strong>{data.categoryCatalog.loaded ? "Loaded" : "Not loaded"}</strong></div><div><span>Categories</span><strong>{formatNumber(data.categoryCatalog.count)}</strong></div><div><span>Last refreshed</span><strong>{data.categoryCatalog.lastRefreshedAt ? new Date(data.categoryCatalog.lastRefreshedAt).toLocaleString() : "—"}</strong></div></div>
     {data.currentPartition && <div className="creator-db-attempt-grid"><div><span>Category</span><strong>{data.currentPartition.category}{data.currentPartition.childCategory ? ` → ${data.currentPartition.childCategory}` : ""}</strong></div><div><span>Followers</span><strong>{data.currentPartition.followers}</strong></div><div><span>GMV</span><strong>{data.currentPartition.gmv}</strong></div><div><span>Partition</span><strong>{data.currentPartition.type} · depth {data.currentPartition.depth}</strong></div><div><span>Page</span><strong>{data.currentPartition.page}</strong></div><div><span>Observed saturated</span><strong>{data.currentPartition.observedSaturationState === "UNKNOWN" ? "—" : data.currentPartition.observedSaturated ? "Yes" : "No"}</strong></div><div><span>Incremental yield</span><strong>{data.currentPartition.incrementalYield == null ? "—" : `${(data.currentPartition.incrementalYield * 100).toFixed(1)}%`}</strong></div><div><span>New / actual attempt</span><strong>{data.currentPartition.newCreatorsPerRequest == null ? "—" : data.currentPartition.newCreatorsPerRequest.toFixed(2)}</strong></div><div><span>Scheduler</span><strong>{data.currentPartition.schedulerClass ?? "Legacy claim"}</strong></div><div><span>Priority</span><strong>{data.currentPartition.priority.toFixed(1)}</strong></div><div><span>Reason</span><strong>{data.currentPartition.priorityReason ?? "—"}</strong></div><div><span>Branch</span><strong>{data.currentPartition.branchClassification.replaceAll("_", " ")}</strong></div></div>}
     <div className="creator-db-observability">
@@ -192,18 +207,16 @@ export function CreatorDatabaseSync({ compact = false }: { compact?: boolean }) 
           <div><span>Next attempt</span><strong>{data.nextAttemptAt ? `${time(data.nextAttemptAt)} (${retrySeconds}s)` : "Not scheduled"}</strong></div>
           <div><span>Last page result</span><strong>{data.lastCreatorsReturned == null ? "—" : `${data.lastCreatorsReturned} returned / ${data.lastCreatorsAdded ?? 0} added / ${data.lastDuplicates ?? 0} duplicate`}</strong></div>
         </div>
-        {data.lastSafeError && <div className="creator-db-error"><strong>{sheetsStage ? "Google Sheets save failed" : "TikTok Marketplace request failed"}</strong><span>Page: {data.sheetsRetryPage ?? data.lastAttemptPage ?? data.currentPage}</span>{sheetsStage ? <><span>HTTP: {data.sheetsHttpStatus ?? "—"}</span><span>Google API code: {data.sheetsApiCode ?? "—"}</span><span>Classification: {data.sheetsRetryable == null ? "—" : data.sheetsRetryable ? "retryable" : "non-retryable"}</span></> : <><span>HTTP: {data.lastHttpStatus ?? "—"}</span><span>TikTok code: {data.lastTikTokCode ?? "—"}</span></>}<span>Message: {data.lastSafeError}</span><span>Attempt: {time(data.lastAttemptAt)}</span>{data.nextAttemptAt && <span>Retrying in: {retrySeconds}s</span>}</div>}
+        {data.lastSafeError && <div className="creator-db-error"><strong>{sheetsStage ? "Google Sheets unavailable" : "TikTok Marketplace request failed"}</strong><span>Page: {data.sheetsRetryPage ?? data.lastAttemptPage ?? data.currentPage}</span>{sheetsStage ? <><span>Failed attempts: {formatNumber(data.sheetsRetryCount)}</span><span>Unavailable for: {sheetsUnavailableFor}</span><span>HTTP: {data.sheetsHttpStatus ?? "—"}</span><span>Google API code: {data.sheetsApiCode ?? "—"}</span><span>Classification: {data.sheetsRetryable == null ? "—" : data.sheetsRetryable ? "transient" : "blocked; slow retry"}</span></> : <><span>HTTP: {data.lastHttpStatus ?? "—"}</span><span>TikTok code: {data.lastTikTokCode ?? "—"}</span></>}<span>Message: {data.lastSafeError}</span><span>Attempt: {time(sheetsStage ? data.sheetsLastAttemptAt : data.lastAttemptAt)}</span>{data.nextAttemptAt && <span>Retrying in: {retrySeconds}s</span>}</div>}
       </div>
       <div className="creator-db-activity">
         <span className="eyebrow">Recent activity</span>
         {data.recentActivity.length ? <ol>{data.recentActivity.map((event, index) => <li key={`${event.occurredAt}-${index}`}><time>{time(event.occurredAt)}</time><span>{eventText(event, data.marketplaceRetryDelaySeconds)}</span></li>)}</ol> : <p>No durable activity events recorded yet.</p>}
       </div>
     </div>
-    {data.status === "WAITING" && data.currentStage === "WAITING_SHEET_RETRY" && <div className="alert warning"><Clock/><div><strong>Google Sheets save failed — retry {Math.min(10, data.sheetsRetryCount + 1)}/10 in {retrySeconds}s</strong><span>The successful TikTok page remains durably staged. No new TikTok request will be made until Google Sheets succeeds.</span></div></div>}
-    {data.status === "WAITING" && data.currentStage !== "WAITING_SHEET_RETRY" && <div className="alert warning"><Clock/><div><strong>{data.lastTikTokCode === "16032001" ? `TikTok business error — 16032001 — transient retry ${data.business16032001RetryCount}/10 in ${retrySeconds}s` : `TikTok throttled — 36009002 — retrying in ${retrySeconds}s`}</strong><span>The partition filters and continuation cursor are preserved. The exact same page will retry automatically while sync remains active.</span></div></div>}
+    {data.status === "WAITING" && sheetsWaiting && <div className="alert warning"><Clock/><div><strong>{data.currentStage === "SHEETS_BLOCKED_RETRYING" ? "Google Sheets access blocked" : "Google Sheets unavailable"} — attempt {formatNumber(data.sheetsRetryCount + 1)} in {retrySeconds}s</strong><span>{formatNumber(data.sheetsRetryCount)} failed attempts · unavailable for {sheetsUnavailableFor}. The page is durably staged in PostgreSQL; no TikTok refetch or cursor advance will occur. The crawler will continue automatically when Sheets recovers.</span></div></div>}
+    {data.status === "WAITING" && !sheetsWaiting && <div className="alert warning"><Clock/><div><strong>{data.lastTikTokCode === "16032001" ? `TikTok business error — 16032001 — transient retry ${data.business16032001RetryCount}/10 in ${retrySeconds}s` : `TikTok throttled — 36009002 — retrying in ${retrySeconds}s`}</strong><span>The partition filters and continuation cursor are preserved. The exact same page will retry automatically while sync remains active.</span></div></div>}
     {data.currentStage === "TIKTOK_BUSINESS_RETRY_LIMIT" && <div className="alert error"><AlertTriangle/><div><strong>TikTok business error retry limit reached (10/10)</strong><span>The crawler is paused with its partition, filters, and cursor preserved. Manual Continue starts a new retry window for this same page.</span></div></div>}
-    {data.currentStage === "SHEET_RETRY_LIMIT" && <div className="alert error"><AlertTriangle/><div><strong>Google Sheets retry limit reached ({data.sheetsRetryCount}/10)</strong><span>The crawler is paused with the staged page and cursor preserved. Manual Continue retries Sheets from that staged page; TikTok will not be requested first.</span></div></div>}
-    {data.currentStage === "SHEET_ERROR" && data.status === "PAUSED" && <div className="alert error"><AlertTriangle/><div><strong>Google Sheets failure paused the crawler</strong><span>The staged page is preserved. Fix the spreadsheet configuration or permission, then use Continue to retry Sheets only.</span></div></div>}
     {!data.categoryMetadataReady && <div className="alert warning"><AlertTriangle/><div><strong>Marketplace category metadata is required</strong><span>Configure the separate category-metadata TikTok credentials, then refresh categories. Creator searches will continue using the Outreach app.</span></div></div>}
     {["EXHAUSTED", "ALL_PARTITIONS_COMPLETE"].includes(data.status) && <div className="alert neutral"><Database/><div><strong>All Marketplace partitions complete</strong><span>No queued or active partition remains.</span></div></div>}
     {data.status === "ERROR" && <div className="alert error"><AlertTriangle/><div><strong>Creator sync needs attention</strong><span>{data.lastError ?? "Unknown safe error"}</span></div></div>}

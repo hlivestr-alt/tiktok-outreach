@@ -1,20 +1,27 @@
 import type { CreatorCandidate, CreatorFilters, RankingMetric } from "@affiliate/domain";
 
+export type OutreachCampaignFilters = Omit<CreatorFilters, "gmvCurrency">;
+
 export type CampaignCreateInput = {
-  name: string;
-  productName: string;
+  /** Ignored for normal creation; the API allocates the campaign name. */
+  name?: string;
+  /** Optional legacy metadata and {{product_name}} rendering context. */
+  productName?: string;
   targetCount: number;
   candidateLimit?: number;
   cooldownDays: number;
-  messageTemplate: string;
-  filters: CreatorFilters;
+  messageTemplate?: string;
+  /** GMV currency is server-owned for Outreach and cannot be selected by clients. */
+  filters: OutreachCampaignFilters;
   rankingMetric: RankingMetric;
   rankingDirection?: "ASC" | "DESC";
 };
 
 export type CampaignCloneFromPreviewInput = {
-  name: string;
-  productName: string;
+  /** Ignored; clone names use the same automatic allocator as normal creation. */
+  name?: string;
+  /** Optional legacy metadata and {{product_name}} rendering context. */
+  productName?: string;
   messageTemplate: string;
   targetCount: number;
 };

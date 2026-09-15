@@ -58,8 +58,7 @@ async function fixture(options: { state?: string; complete?: boolean; count?: nu
 }
 
 const cloneInput: CampaignCloneFromPreviewInput = {
-  name: "PROYA Sheet Mask Creator Collaboration - One Recipient Validation",
-  productName: "Sheet Mask", targetCount: 1,
+  targetCount: 1,
   messageTemplate: "Hi {{creator_display_name}}, we'd love to invite you to collaborate on {{product_name}} for our {{campaign_name}} campaign."
 };
 
@@ -85,7 +84,7 @@ describe.sequential("clone from PREVIEW_READY", () => {
     await prisma.creatorShopContactState.create({ data: { shopId: seed.shop.id, creatorId: byOpenId.get(ranked[0].creatorOpenId)!.id, doNotContact: true } });
     await prisma.creatorShopContactState.create({ data: {
       shopId: seed.shop.id, creatorId: byOpenId.get(ranked[1].creatorOpenId)!.id, contactCount: 1,
-      firstContactedAt: now, lastContactedAt: now, lastCampaignId: seed.campaign.id
+      firstContactedAt: now, lastContactedAt: new Date("2099-01-01T00:00:00.000Z"), lastCampaignId: seed.campaign.id
     } });
     await prisma.creatorShopContactState.create({ data: {
       shopId: seed.shop.id, creatorId: byOpenId.get(ranked[2].creatorOpenId)!.id, unresolvedDelivery: true
@@ -119,6 +118,8 @@ describe.sequential("clone from PREVIEW_READY", () => {
       deliveries: true, outboxEntries: true
     } });
     expect(clone).toMatchObject({ state: "PREVIEW_READY", targetCount: 1, frozenAt: null, freezeExpiresAt: null });
+    expect(clone.name).toMatch(/^\d{8}_\d{3,}$/);
+    expect(clone.productName).toBe("");
     expect(clone.discoveryRun).toMatchObject({ state: "COMPLETE", totalProviderRequests: 0, pagesFetched: 0, providerSearchKey: null, providerNextPageToken: null });
     expect(clone.discoveryRun!.candidates).toHaveLength(20);
     expect(clone.discoveryRun!.candidates.map((item) => item.creatorOpenId)).toEqual(sourceBefore.discoveryRun!.candidates.sort((a, b) => a.discoveryOrdinal - b.discoveryOrdinal).map((item) => item.creatorOpenId));

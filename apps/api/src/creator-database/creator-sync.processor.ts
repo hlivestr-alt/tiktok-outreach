@@ -15,12 +15,15 @@ import { adaptiveExpansion, adaptiveFollowerPartitionKey, classifyIncrementalYie
   validateMarketplaceCategorySelection, validateV2CategorySelection, V3_ADAPTIVE_GENERATION,
   type FollowerWidthRules, type ProductionPartitionType } from "./marketplace-partitions";
 import { aggregateEvidence, categoryEvidence, designatedFirstG1G2Bucket, followerEvidence, g1G2FamilyKey, schedulerSelectionMessage, schedulerSlot,
-  scoreSchedulerPriority, selectSchedulerCandidate, type SchedulerObservation } from "./creator-scheduler";
+  scoreSchedulerPriority, selectCategoryExplorationCandidate, selectSchedulerCandidate,
+  type CategoryCoverageMode, type SchedulerObservation } from "./creator-scheduler";
 
 const LEASE_MS = 2 * 60_000;
 const BUSINESS_16032001_MAX_ATTEMPTS = 10;
-const SHEETS_MAX_ATTEMPTS = 10;
-const SHEETS_RETRY_MS = 5_000;
+export const SHEETS_RETRY_BASE_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 60_000, 120_000, 300_000] as const;
+export const SHEETS_BLOCKED_RETRY_MS = 300_000;
+const SHEETS_RETRY_JITTER_RATIO = 0.10;
+const SHEETS_EVENT_MILESTONES = new Set([1, 2, 3, 5, 10, 20, 50, 100]);
 type Options = { now?: () => Date; leaseMs?: number; random?: () => number };
 type MarketplaceSearch = Pick<TikTokReadAdapter, "searchCreators">;
 type Activity = { stage: string; pageNumber?: number; httpStatus?: number; tiktokCode?: string; safeMessage?: string;
@@ -45,7 +48,20 @@ class CreatorPersistenceError extends Error {
 }
 
 class CreatorSyncStageError extends Error {
-  constructor(readonly stage: "CURSOR_ERROR" | "PARTITION_CONFIG_ERROR" | "SHEET_RETRY_LIMIT", message: string) { super(message); }
+  constructor(readonly stage: "CURSOR_ERROR" | "PARTITION_CONFIG_ERROR", message: string) { super(message); }
+}
+
+export function sheetsRetryDelayMs(attempt: number, retryable: boolean, random = Math.random) {
+  if (!retryable) return SHEETS_BLOCKED_RETRY_MS;
+  const ordinal = Math.max(1, Math.trunc(attempt));
+  const base = SHEETS_RETRY_BASE_DELAYS_MS[Math.min(ordinal - 1, SHEETS_RETRY_BASE_DELAYS_MS.length - 1)];
+  const jitterRoom = Math.max(0, SHEETS_BLOCKED_RETRY_MS - base);
+  const jitter = Math.floor(Math.min(base * SHEETS_RETRY_JITTER_RATIO, jitterRoom) * Math.min(1, Math.max(0, random())));
+  return base + jitter;
+}
+
+function shouldCheckpointSheetsFailure(attempt: number) {
+  return SHEETS_EVENT_MILESTONES.has(attempt) || attempt > 100 && attempt % 100 === 0;
 }
 
 @Injectable()
@@ -269,7 +285,7 @@ export class CreatorSyncProcessor {
         } });
       }
       const nextSequence = lockedJob.partitionClaimSequence + 1, now = this.now();
-      const [primaryFamilyRows, g3Seed, adaptiveCandidates, g4Adaptive, g4Seed, historical] = await Promise.all([
+      const [primaryFamilyRows, g3Seed, adaptiveCandidates, g4Adaptive, g4Seed, historical, coverageCatalog] = await Promise.all([
         tx.creatorSearchPartition.findMany({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: { in: ["G1", "G2"] } },
           orderBy: [{ queuePosition: "asc" }, { id: "asc" }] }),
         tx.creatorSearchPartition.findFirst({ where: { creatorSyncJobId: jobId, partitionType: "V2_SEED", gmvBucket: "G3", status: "QUEUED" },
@@ -285,7 +301,12 @@ export class CreatorSyncProcessor {
           gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES },
           status: { in: ["COMPLETE", "SPLIT", "DEEPLY_SATURATED"] }, rowsReturned: { gt: 0 } },
           select: { categoryChildId: true, followersMin: true, followersMax: true, rowsReturned: true,
-            uniqueCreatorsAdded: true, lastSuccessAt: true, gmvBucket: true } })
+            uniqueCreatorsAdded: true, lastSuccessAt: true, gmvBucket: true } }),
+        tx.creatorMarketplaceCategory.findMany({ where: { shopId: lockedJob.shopId }, select: {
+          categoryId: true, parentCategoryId: true, enabledForCreatorCrawl: true, availableForCreatorFilter: true,
+          sortOrder: true, creatorFirstSampledAt: true, creatorLastSampledAt: true,
+          creatorLastExplorationClaimAt: true
+        } })
       ]);
       const familyTouched = new Map<string, boolean>();
       const familyBuckets = new Map<string, Set<string>>();
@@ -296,12 +317,41 @@ export class CreatorSyncProcessor {
           const buckets = familyBuckets.get(key) ?? new Set<string>(); buckets.add(row.gmvBucket!); familyBuckets.set(key, buckets);
         }
       }
-      const seed = primaryFamilyRows.find((row) => {
+      const validParents = new Map(coverageCatalog.filter((category) => category.parentCategoryId == null
+        && category.enabledForCreatorCrawl && category.availableForCreatorFilter).map((category) => [category.categoryId, category]));
+      const validChildren = new Map(coverageCatalog.filter((category) => category.parentCategoryId != null
+        && category.availableForCreatorFilter && validParents.has(category.parentCategoryId)).map((category) => [category.categoryId, category]));
+      const validSeedSnapshot = (row: typeof primaryFamilyRows[number]) => Boolean(row.categoryId && row.categoryChildId
+        && validParents.has(row.categoryId) && validChildren.get(row.categoryChildId)?.parentCategoryId === row.categoryId
+        && row.categoryChildIds.length === 1 && row.categoryChildIds[0] === row.categoryChildId
+        && row.followersMin != null && (row.followersMax == null || row.followersMax >= row.followersMin));
+      const eligibleSeeds = primaryFamilyRows.filter((row) => {
         if (row.status !== "QUEUED") return false;
+        if (!validSeedSnapshot(row)) return false;
         const key = row.schedulerFamilyKey ?? g1G2FamilyKey(row);
         if (!key || familyTouched.get(key) || familyBuckets.get(key)?.size !== 2) return true;
         return row.gmvBucket === (row.schedulerG1G2FirstBucket ?? designatedFirstG1G2Bucket(key));
-      }) ?? null;
+      });
+      const seed = eligibleSeeds[0] ?? null;
+      const malformedSeedIds = primaryFamilyRows.filter((row) => row.status === "QUEUED" && !validSeedSnapshot(row)).map((row) => row.id);
+      if (malformedSeedIds.length) await tx.creatorSearchPartition.updateMany({ where: { id: { in: malformedSeedIds },
+        priorityReason: { not: "Category coverage skipped: invalid or stale category snapshot" } }, data: {
+        priorityReason: "Category coverage skipped: invalid or stale category snapshot", priorityUpdatedAt: now
+      } });
+      const sampledByParent = new Map<string, number>();
+      for (const child of validChildren.values()) if (child.creatorFirstSampledAt && child.parentCategoryId) {
+        sampledByParent.set(child.parentCategoryId, (sampledByParent.get(child.parentCategoryId) ?? 0) + 1);
+      }
+      const coverageCandidates = eligibleSeeds.map((candidate) => {
+        const child = validChildren.get(candidate.categoryChildId!)!, parent = validParents.get(candidate.categoryId!)!;
+        return { candidate, id: candidate.id, categoryId: candidate.categoryId!, categoryChildId: candidate.categoryChildId!,
+          queuePosition: candidate.queuePosition, parentSampledChildren: sampledByParent.get(candidate.categoryId!) ?? 0,
+          parentLastExplorationClaimAt: parent.creatorLastExplorationClaimAt, parentSortOrder: parent.sortOrder,
+          childFirstSampledAt: child.creatorFirstSampledAt, childLastSampledAt: child.creatorLastSampledAt,
+          childLastExplorationClaimAt: child.creatorLastExplorationClaimAt, childSortOrder: child.sortOrder };
+      });
+      const coverageMode: CategoryCoverageMode = coverageCandidates.some((value) => value.childFirstSampledAt == null) ? "COVERAGE" : "BALANCED";
+      const coverageSeed = selectCategoryExplorationCandidate(coverageCandidates, coverageMode)?.candidate ?? null;
       const exceptionalG4 = g4Adaptive.find((candidate) => {
         const evidence = candidate.parentPartition ?? candidate;
         const uniqueRate = evidence.rowsReturned ? evidence.uniqueCreatorsAdded / evidence.rowsReturned : 0;
@@ -337,10 +387,13 @@ export class CreatorSyncProcessor {
       };
       const scored = adaptiveCandidates.map(scoreCandidate);
       if (seed) scored.push(scoreCandidate(seed) as typeof scored[number]);
+      if (coverageSeed && coverageSeed.id !== seed?.id) scored.push(scoreCandidate(coverageSeed) as typeof scored[number]);
       if (g3Seed) scored.push(scoreCandidate(g3Seed) as typeof scored[number]);
       if (g4Probe) scored.push(scoreCandidate(g4Probe) as typeof scored[number]);
-      const slot = schedulerSlot(nextSequence, config.CREATOR_G4_PROBE_CADENCE, config.CREATOR_SCHEDULER_PRIMARY_CYCLE);
-      const selected = selectSchedulerCandidate(scored, slot);
+      const slot = schedulerSlot(nextSequence, coverageMode, config.CREATOR_G4_PROBE_CADENCE, config.CREATOR_SCHEDULER_PRIMARY_CYCLE);
+      const coverageSelected = slot === "PRIMARY_EXPLORATION" && coverageSeed
+        ? scored.find((candidate) => candidate.id === coverageSeed.id) ?? null : null;
+      const selected = coverageSelected ?? selectSchedulerCandidate(scored, slot);
       if (!selected) {
         await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId }, data: { state: "EXHAUSTED", currentStage: "ALL_PARTITIONS_COMPLETE", leaseId: null, leaseExpiresAt: null } });
         return null;
@@ -350,6 +403,7 @@ export class CreatorSyncProcessor {
         ? next.schedulerFamilyKey ?? g1G2FamilyKey(next) : null;
       const firstG1G2 = Boolean(familyKey && !familyTouched.get(familyKey));
       const isG4Probe = slot === "G4_PROBE" && next.gmvBucket === "G4";
+      const isCategoryExploration = Boolean(coverageSelected && next.id === coverageSelected.id);
       const claimableStatus = next.gmvBucket === "G4" ? "EXPERIMENT_ONLY" : "QUEUED";
       const claimed = await tx.creatorSearchPartition.updateMany({ where: { id: next.id, status: claimableStatus }, data: {
         status: "STARTING", startedAt, priorityScore: new Prisma.Decimal(selected.priority.score),
@@ -363,17 +417,30 @@ export class CreatorSyncProcessor {
         schedulerAncestorYield: selected.expectedYield == null ? null : new Prisma.Decimal(selected.expectedYield),
         schedulerNewPerSuccessfulPage: selected.expectedNewPerSuccessfulPage == null ? null : new Prisma.Decimal(selected.expectedNewPerSuccessfulPage),
         schedulerFamilyKey: familyKey, schedulerG1G2FirstBucket: familyKey ? designatedFirstG1G2Bucket(familyKey) : null,
-        schedulerWasFirstG1G2Sibling: firstG1G2, schedulerIsG4Probe: isG4Probe
+        schedulerWasFirstG1G2Sibling: firstG1G2, schedulerIsG4Probe: isG4Probe,
+        schedulerWasCategoryExploration: isCategoryExploration, schedulerCoverageMode: coverageMode === "COVERAGE"
       } });
       if (claimed.count !== 1) throw new Error("Marketplace partition claim raced");
       await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId }, data: { currentPartitionId: next.id,
-        privateSearchKey: null, privateNextPageToken: null, partitionClaimSequence: nextSequence, currentStage: "STARTING_PARTITION" } });
+        privateSearchKey: null, privateNextPageToken: null, partitionClaimSequence: nextSequence, currentStage: "STARTING_PARTITION",
+        categoryCoverageCompletedAt: coverageMode === "COVERAGE" ? null : lockedJob.categoryCoverageCompletedAt ?? startedAt } });
+      if (isCategoryExploration && next.categoryId && next.categoryChildId) {
+        await tx.creatorMarketplaceCategory.updateMany({ where: { shopId: lockedJob.shopId,
+          categoryId: { in: [next.categoryId, next.categoryChildId] } }, data: {
+          creatorExplorationClaimCount: { increment: 1 }, creatorLastExplorationClaimAt: startedAt
+        } });
+      }
+      const selectionMessage = isCategoryExploration
+        ? coverageMode === "COVERAGE" ? "Selected untouched category — category coverage exploration"
+          : "Selected least-recently sampled category — balanced exploration"
+        : schedulerSelectionMessage(selected.priority, next.partitionType as ProductionPartitionType, next.adaptiveDepth);
       await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: jobId, creatorSearchPartitionId: next.id,
         partitionKey: next.partitionKey, partitionLabel: partitionLabel(next), stage: "PARTITION_STARTED", pageNumber: 1,
-        safeMessage: schedulerSelectionMessage(selected.priority, next.partitionType as ProductionPartitionType, next.adaptiveDepth), occurredAt: startedAt } });
+        safeMessage: selectionMessage, occurredAt: startedAt } });
       return { ...next, status: "STARTING" as const, startedAt, priorityScore: new Prisma.Decimal(selected.priority.score),
         priorityReason: selected.priority.reason, schedulerClass: selected.priority.schedulerClass,
-        schedulerIsG4Probe: isG4Probe, schedulerWasFirstG1G2Sibling: firstG1G2 };
+        schedulerIsG4Probe: isG4Probe, schedulerWasFirstG1G2Sibling: firstG1G2,
+        schedulerWasCategoryExploration: isCategoryExploration, schedulerCoverageMode: coverageMode === "COVERAGE" };
     });
   }
 
@@ -435,12 +502,21 @@ export class CreatorSyncProcessor {
     const existingOpenIds = uniqueOpenIds.length ? await this.prisma.creator.findMany({ where: { creatorOpenId: { in: uniqueOpenIds } }, select: { creatorOpenId: true } }) : [];
     const existingSet = new Set(existingOpenIds.flatMap((creator) => creator.creatorOpenId ? [creator.creatorOpenId] : []));
     const newCreatorOpenIds = uniqueOpenIds.filter((creatorOpenId) => !existingSet.has(creatorOpenId));
-    const staged = await this.prisma.creatorSyncPage.upsert({ where: { creatorSyncJobId_privateRequestToken: { creatorSyncJobId: jobId, privateRequestToken: requestToken } }, update: {},
-      create: { creatorSyncJobId: jobId, creatorSearchPartitionId: partition.id, pageNumber, privateRequestToken: requestToken,
-        privateNextToken: page.nextPageToken, privateSearchKey: searchKey, providerHasMore: page.hasMore,
-        creatorsReturned: page.creators.length, newUniqueCreators: newCreatorOpenIds.length,
-        duplicateRows: Math.max(0, page.creators.length - newCreatorOpenIds.length), newCreatorOpenIds,
-        payload: page.creators as unknown as Prisma.InputJsonValue } });
+    const staged = await this.prisma.$transaction(async (tx) => {
+      const receipt = await tx.creatorSyncPage.upsert({ where: { creatorSyncJobId_privateRequestToken: { creatorSyncJobId: jobId, privateRequestToken: requestToken } }, update: {},
+        create: { creatorSyncJobId: jobId, creatorSearchPartitionId: partition.id, pageNumber, privateRequestToken: requestToken,
+          privateNextToken: page.nextPageToken, privateSearchKey: searchKey, providerHasMore: page.hasMore,
+          creatorsReturned: page.creators.length, newUniqueCreators: newCreatorOpenIds.length,
+          duplicateRows: Math.max(0, page.creators.length - newCreatorOpenIds.length), newCreatorOpenIds,
+          payload: page.creators as unknown as Prisma.InputJsonValue } });
+      if (partition.categoryChildId) {
+        await tx.creatorMarketplaceCategory.updateMany({ where: { shopId: job.shopId, categoryId: partition.categoryChildId,
+          creatorFirstSampledAt: null }, data: { creatorFirstSampledAt: respondedAt } });
+        await tx.creatorMarketplaceCategory.updateMany({ where: { shopId: job.shopId, categoryId: partition.categoryChildId },
+          data: { creatorLastSampledAt: respondedAt } });
+      }
+      return receipt;
+    });
     return this.commitPage(jobId, leaseId, staged.id, sheets);
   }
 
@@ -487,9 +563,6 @@ export class CreatorSyncProcessor {
   private async commitPage(jobId: string, leaseId: string, pageId: string, sheets: CreatorSheet) {
     const page = await this.prisma.creatorSyncPage.findFirstOrThrow({ where: { id: pageId, creatorSyncJobId: jobId, state: "RECEIVED" } });
     if (!page.creatorSearchPartitionId) throw new Error("Pending structured page has no partition");
-    if (page.sheetsAttemptCount >= SHEETS_MAX_ATTEMPTS) {
-      throw new CreatorSyncStageError("SHEET_RETRY_LIMIT", `Google Sheets retry limit reached (${SHEETS_MAX_ATTEMPTS}/${SHEETS_MAX_ATTEMPTS})`);
-    }
     const [job, partition] = await Promise.all([
       this.prisma.creatorSyncJob.findFirstOrThrow({ where: { id: jobId, leaseId } }),
       this.prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: page.creatorSearchPartitionId } })
@@ -497,13 +570,26 @@ export class CreatorSyncProcessor {
     const creators = page.payload as unknown as CreatorCandidate[], ids = [...new Set(creators.map((creator) => creator.creatorOpenId))];
     const fallbackStoredBefore = page.newUniqueCreators == null && ids.length
       ? await this.prisma.creator.count({ where: { creatorOpenId: { in: ids } } }) : 0;
-    await this.recordActivity(jobId, leaseId, partition, { stage: "SAVING_DATABASE", pageNumber: page.pageNumber, creatorsReturned: creators.length });
-    await this.persistCreators(creators, job.shopId, `creator-sync-page:${page.id}`);
+    if (!page.databasePersistedAt) {
+      await this.recordActivity(jobId, leaseId, partition, { stage: "SAVING_DATABASE", pageNumber: page.pageNumber, creatorsReturned: creators.length });
+      await this.persistCreators(creators, job.shopId, `creator-sync-page:${page.id}`);
+      await this.prisma.creatorSyncPage.update({ where: { id: page.id }, data: { databasePersistedAt: this.now() } });
+    }
     const creatorsAdded = page.newUniqueCreators ?? Math.min(creators.length, Math.max(0, ids.length - fallbackStoredBefore));
     const duplicates = page.duplicateRows ?? Math.max(0, creators.length - creatorsAdded);
-    await this.recordActivity(jobId, leaseId, partition, { stage: "SAVING_SHEET", pageNumber: page.pageNumber, creatorsReturned: creators.length, creatorsAdded, duplicates });
     const sheetAttempt = page.sheetsAttemptCount + 1;
-    await this.prisma.creatorSyncPage.update({ where: { id: page.id }, data: { sheetsAttemptCount: sheetAttempt, nextSheetsAttemptAt: null } });
+    const sheetAttemptAt = this.now(), sheetStage = sheetAttempt === 1 ? "SAVING_SHEET" : "RECONCILING_SHEET";
+    await this.prisma.$transaction(async (tx) => {
+      await tx.creatorSyncPage.update({ where: { id: page.id }, data: {
+        sheetsAttemptCount: sheetAttempt, sheetsLastAttemptAt: sheetAttemptAt, nextSheetsAttemptAt: null
+      } });
+      const updated = await tx.creatorSyncJob.updateMany({ where: { id: jobId, leaseId }, data: { currentStage: sheetStage } });
+      if (updated.count !== 1) throw new Error("Creator sync lease changed before the Sheets attempt was recorded");
+      if (sheetAttempt === 1) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: jobId,
+        creatorSearchPartitionId: partition.id, partitionKey: partition.partitionKey, partitionLabel: partitionLabel(partition),
+        stage: "SAVING_SHEET", pageNumber: page.pageNumber, creatorsReturned: creators.length, creatorsAdded, duplicates,
+        occurredAt: sheetAttemptAt } });
+    });
     await sheets.reconcilePage(job.spreadsheetId, creators);
     await this.recordActivity(jobId, leaseId, partition, { stage: "COMMITTING_PAGE", pageNumber: page.pageNumber, creatorsReturned: creators.length, creatorsAdded, duplicates });
     const now = this.now();
@@ -524,11 +610,12 @@ export class CreatorSyncProcessor {
       const originalYield = partition.partitionType === "V2_SEED" ? new Prisma.Decimal(yieldValue) : partition.originalYield;
       const incrementalYield = ["ADAPTIVE_FOLLOWER", "ADAPTIVE_GMV"].includes(partition.partitionType)
         ? new Prisma.Decimal(yieldValue) : partition.incrementalYield;
-      await tx.creatorSyncPage.update({ where: { id: page.id }, data: { state: "COMMITTED", committedAt: now, sheetsAttemptCount: 0,
-        nextSheetsAttemptAt: null, lastSheetsHttpStatus: null, lastSheetsApiCode: null, lastSheetsRetryable: null, lastSheetsError: null } });
+      await tx.creatorSyncPage.update({ where: { id: page.id }, data: { state: "COMMITTED", committedAt: now,
+        nextSheetsAttemptAt: null } });
       if (sheetAttempt > 1) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: jobId, creatorSearchPartitionId: partition.id,
         partitionKey: partition.partitionKey, partitionLabel: partitionLabel(partition), stage: "SHEET_RECOVERED", pageNumber: page.pageNumber,
-        safeMessage: "Google Sheets save recovered", creatorsReturned: creators.length, creatorsAdded, duplicates, occurredAt: new Date(now.getTime() - 2) } });
+        safeMessage: `Google Sheets save recovered automatically after ${sheetAttempt - 1} failed ${sheetAttempt - 1 === 1 ? "attempt" : "attempts"}`,
+        creatorsReturned: creators.length, creatorsAdded, duplicates, occurredAt: new Date(now.getTime() - 2) } });
       if (page.providerHasMore) {
         await tx.creatorSearchPartition.update({ where: { id: partition.id }, data: { status: strategyDisabled ? "DISABLED_BY_STRATEGY" : pause ? "PAUSED" : "RUNNING", privateSearchKey: page.privateSearchKey,
           privateNextPageToken: page.privateNextToken, pagesCompleted: { increment: 1 }, rowsReturned: { increment: page.creatorsReturned },
@@ -580,27 +667,24 @@ export class CreatorSyncProcessor {
     const targetPartition = partition ?? page.creatorSearchPartition;
     const strategyDisabled = !targetPartition || !isSpecificGmvPartition(targetPartition);
     const details = googleSheetsFailure(error);
-    const limitReached = error instanceof CreatorSyncStageError && error.stage === "SHEET_RETRY_LIMIT"
-      ? true : details.retryable && page.sheetsAttemptCount >= SHEETS_MAX_ATTEMPTS;
-    const pause = strategyDisabled || job.pauseRequested || !details.retryable || limitReached;
-    const nextAttemptAt = new Date(this.now().getTime() + SHEETS_RETRY_MS);
+    const pause = job.pauseRequested;
     const attempt = Math.max(1, page.sheetsAttemptCount);
+    const delayMs = sheetsRetryDelayMs(attempt, details.retryable, this.options.random);
+    const now = this.now(), nextAttemptAt = new Date(now.getTime() + delayMs);
     const detail = this.safeSheetsFailureMessage(details);
-    const safe = !details.retryable
-      ? `Google Sheets save failed — ${detail}; crawler paused`
-      : strategyDisabled
-        ? `Google Sheets save failed — staged GMV-All page retained; crawler paused by strategy; ${detail}`
-      : limitReached
-        ? `Google Sheets save failed — retry limit reached (${SHEETS_MAX_ATTEMPTS}/${SHEETS_MAX_ATTEMPTS}); ${detail}; crawler paused`
-        : job.pauseRequested
-          ? `Google Sheets save failed — retry ${attempt + 1}/${SHEETS_MAX_ATTEMPTS} canceled because the crawler is paused; ${detail}`
-          : `Google Sheets save failed — retry ${attempt + 1}/${SHEETS_MAX_ATTEMPTS} in 5s; ${detail}`;
-    const currentStage = strategyDisabled ? "GMV_ALL_DISABLED_BY_STRATEGY" : limitReached ? "SHEET_RETRY_LIMIT" : pause ? "SHEET_ERROR" : "WAITING_SHEET_RETRY";
-    const eventStage = strategyDisabled ? "GMV_ALL_DISABLED_BY_STRATEGY" : limitReached ? "SHEET_RETRY_LIMIT" : !details.retryable || job.pauseRequested ? "SHEET_ERROR" : "SHEET_RETRY";
-    const now = this.now();
+    const delaySeconds = Math.ceil(delayMs / 1_000);
+    const safe = pause
+      ? `Google Sheets unavailable — attempt ${attempt}; retry paused by operator; ${detail}`
+      : details.retryable
+        ? `Google Sheets unavailable — attempt ${attempt}; next retry in ${delaySeconds}s; ${detail}`
+        : `Google Sheets blocked — attempt ${attempt}; next automatic retry in ${delaySeconds}s; ${detail}`;
+    const currentStage = pause ? "PAUSED" : details.retryable ? "WAITING_SHEET_RETRY" : "SHEETS_BLOCKED_RETRYING";
+    const checkpoint = pause || shouldCheckpointSheetsFailure(attempt);
+    const eventStage = pause ? "SHEET_ERROR" : attempt === 1 ? "SHEETS_RETRY_STARTED" : "SHEETS_RETRY_FAILED";
     await this.prisma.$transaction(async (tx) => {
       await tx.creatorSyncPage.update({ where: { id: page.id }, data: {
         sheetsAttemptCount: attempt, nextSheetsAttemptAt: pause ? null : nextAttemptAt,
+        sheetsFirstFailureAt: page.sheetsFirstFailureAt ?? now, sheetsLastAttemptAt: page.sheetsLastAttemptAt ?? now,
         lastSheetsHttpStatus: details.httpStatus ?? null, lastSheetsApiCode: details.googleApiCode ?? null,
         lastSheetsRetryable: details.retryable, lastSheetsError: safe
       } });
@@ -612,7 +696,7 @@ export class CreatorSyncProcessor {
       if (targetPartition) await tx.creatorSearchPartition.update({ where: { id: targetPartition.id }, data: {
         status: strategyDisabled ? "DISABLED_BY_STRATEGY" : pause ? "PAUSED" : "WAITING_RETRY", lastError: safe
       } });
-      await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: job.id, creatorSearchPartitionId: targetPartition?.id,
+      if (checkpoint) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: job.id, creatorSearchPartitionId: targetPartition?.id,
         partitionKey: targetPartition?.partitionKey, partitionLabel: targetPartition ? partitionLabel(targetPartition) : undefined,
         stage: eventStage, pageNumber: page.pageNumber, httpStatus: details.httpStatus, googleApiCode: details.googleApiCode,
         retryable: details.retryable, safeMessage: safe, creatorsReturned: page.creatorsReturned,
@@ -627,8 +711,7 @@ export class CreatorSyncProcessor {
     const partition = job.currentPartitionId ? await this.prisma.creatorSearchPartition.findUnique({ where: { id: job.currentPartitionId } }) : null;
     const now = this.now();
     const pendingSheet = await this.prisma.creatorSyncPage.findFirst({ where: { creatorSyncJobId: jobId, state: "RECEIVED" }, select: { id: true } });
-    if (pendingSheet && (job.currentStage === "SAVING_SHEET" || job.currentStage === "WAITING_SHEET_RETRY"
-      || (error instanceof CreatorSyncStageError && error.stage === "SHEET_RETRY_LIMIT"))) {
+    if (pendingSheet && ["SAVING_SHEET", "RECONCILING_SHEET", "WAITING_SHEET_RETRY", "SHEETS_BLOCKED_RETRYING"].includes(job.currentStage)) {
       if (await this.handleSheetsFailure(job, partition, error)) return;
     }
     if (error instanceof TikTokApiError && error.operation === "SEARCH_CREATORS" && error.providerCode === 16032001 && partition) {

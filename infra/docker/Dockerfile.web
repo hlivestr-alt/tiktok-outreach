@@ -1,11 +1,13 @@
 FROM node:24-alpine AS build
 ARG APP_VERSION=local
 ARG BUILD_TIMESTAMP=unknown
-ENV APP_VERSION=$APP_VERSION BUILD_TIMESTAMP=$BUILD_TIMESTAMP
+ARG OUTREACH_QA_PROXY_TARGET=http://api:4000
+ARG NEXT_PUBLIC_API_URL=/api/v1
+ENV APP_VERSION=$APP_VERSION BUILD_TIMESTAMP=$BUILD_TIMESTAMP OUTREACH_QA_PROXY_TARGET=$OUTREACH_QA_PROXY_TARGET NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 WORKDIR /app
 RUN corepack enable
 COPY . .
-RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store && pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=affiliate-pnpm-store,target=/pnpm/store pnpm config set store-dir /pnpm/store && pnpm install --filter @affiliate/web... --frozen-lockfile --trust-lockfile --prefer-offline
 RUN pnpm --filter @affiliate/web... build
 EXPOSE 3000
 CMD ["pnpm", "--filter", "@affiliate/web", "start"]

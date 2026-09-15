@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { categoryEvidence, designatedFirstG1G2Bucket, followerEvidence, G4_PROBE_CADENCE, g1G2FamilyKey,
-  schedulerSlot, scoreSchedulerPriority, selectSchedulerCandidate, softProductivityWeight,
+  schedulerSlot, scoreSchedulerPriority, selectCategoryExplorationCandidate, selectSchedulerCandidate, softProductivityWeight,
   type ProductivityEvidence, type SchedulerClass, type SchedulerPriorityInput } from "./creator-scheduler";
 
 const globalEvidence: ProductivityEvidence = { rows: 100_000, newCreators: 25_000, yield: 0.25 };
@@ -18,6 +18,29 @@ function candidate(id: string, schedulerClass: SchedulerClass, score: number, qu
 }
 
 describe("deterministic Creator Database scheduler", () => {
+  function mockCoverageCandidates(count: number, parentCount: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      candidate: index, id: `seed-${index}`, categoryId: `parent-${index % parentCount}`, categoryChildId: `child-${index}`,
+      queuePosition: BigInt(index), parentSampledChildren: 0, parentLastExplorationClaimAt: null as Date | null,
+      parentSortOrder: index % parentCount, childFirstSampledAt: null as Date | null, childLastSampledAt: null as Date | null,
+      childLastExplorationClaimAt: null as Date | null, childSortOrder: index
+    }));
+  }
+
+  function selectAndPersistSample(candidates: ReturnType<typeof mockCoverageCandidates>, ordinal: number) {
+    const parentCounts = new Map<string, number>();
+    for (const value of candidates) if (value.childFirstSampledAt) {
+      parentCounts.set(value.categoryId, (parentCounts.get(value.categoryId) ?? 0) + 1);
+    }
+    for (const value of candidates) value.parentSampledChildren = parentCounts.get(value.categoryId) ?? 0;
+    const mode = candidates.some((value) => value.childFirstSampledAt == null) ? "COVERAGE" : "BALANCED";
+    const selected = selectCategoryExplorationCandidate(candidates, mode)!;
+    const at = new Date(Date.UTC(2026, 8, 1, 0, ordinal));
+    selected.childFirstSampledAt ??= at; selected.childLastSampledAt = at; selected.childLastExplorationClaimAt = at;
+    for (const value of candidates) if (value.categoryId === selected.categoryId) value.parentLastExplorationClaimAt = at;
+    return selected;
+  }
+
   it("uses a persisted 60/30/9/1 claim cadence with one G4 probe per 100 claims", () => {
     const slots = Array.from({ length: 1_000 }, (_, index) => schedulerSlot(index + 1));
     expect(slots.filter((value) => value === "PRIMARY_PRODUCTIVE")).toHaveLength(600);
@@ -27,6 +50,72 @@ describe("deterministic Creator Database scheduler", () => {
     expect(G4_PROBE_CADENCE).toBe(100);
     expect(schedulerSlot(100)).toBe("G4_PROBE");
     expect(schedulerSlot(101)).toBe("PRIMARY_PRODUCTIVE");
+  });
+
+  it("uses 40/50/9/1 while untouched claimable categories remain", () => {
+    const slots = Array.from({ length: 100 }, (_, index) => schedulerSlot(index + 1, "COVERAGE"));
+    expect(slots.filter((value) => value === "PRIMARY_PRODUCTIVE")).toHaveLength(40);
+    expect(slots.filter((value) => value === "PRIMARY_EXPLORATION")).toHaveLength(50);
+    expect(slots.filter((value) => value === "G3_EXPLORATION")).toHaveLength(9);
+    expect(slots.filter((value) => value === "G4_PROBE")).toHaveLength(1);
+  });
+
+  it("selects untouched categories before touched ones and rotates parents deterministically", () => {
+    const base = { queuePosition: 1n, parentSampledChildren: 0, parentLastExplorationClaimAt: null,
+      parentSortOrder: 0, childFirstSampledAt: null, childLastSampledAt: null,
+      childLastExplorationClaimAt: null, childSortOrder: 0 };
+    const candidates = [
+      { ...base, id: "touched", candidate: "touched", categoryId: "p0", categoryChildId: "c0",
+        childFirstSampledAt: new Date("2026-09-01T00:00:00Z") },
+      { ...base, id: "later-parent", candidate: "later-parent", categoryId: "p1", categoryChildId: "c1",
+        parentSampledChildren: 1, parentSortOrder: 1 },
+      { ...base, id: "fresh-parent", candidate: "fresh-parent", categoryId: "p2", categoryChildId: "c2",
+        parentSortOrder: 2 }
+    ];
+    expect(selectCategoryExplorationCandidate(candidates, "COVERAGE")?.candidate).toBe("fresh-parent");
+  });
+
+  it("uses least-recently-sampled category after complete coverage", () => {
+    const recent = new Date("2026-09-02T00:00:00Z"), old = new Date("2026-08-01T00:00:00Z");
+    const base = { queuePosition: 1n, parentSampledChildren: 1, parentLastExplorationClaimAt: null,
+      parentSortOrder: 0, childFirstSampledAt: old, childLastExplorationClaimAt: null, childSortOrder: 0 };
+    expect(selectCategoryExplorationCandidate([
+      { ...base, id: "recent", candidate: "recent", categoryId: "p", categoryChildId: "c1", childLastSampledAt: recent },
+      { ...base, id: "old", candidate: "old", categoryId: "p", categoryChildId: "c2", childLastSampledAt: old }
+    ], "BALANCED")?.candidate).toBe("old");
+  });
+
+  it("backtests claims 992-1047 as 28 distinct category explorations", () => {
+    const candidates = mockCoverageCandidates(210, 30), selected: number[] = [];
+    for (let sequence = 992; sequence <= 1047; sequence++) if (schedulerSlot(sequence, "COVERAGE") === "PRIMARY_EXPLORATION") {
+      selected.push(selectAndPersistSample(candidates, sequence).candidate);
+    }
+    expect(selected).toHaveLength(28);
+    expect(new Set(selected)).toHaveLength(28);
+    expect(new Set(selected.map((id) => candidates[id].categoryId)).size).toBe(28);
+  });
+
+  it("selects 50 distinct untouched categories in a 100-claim coverage cycle", () => {
+    const candidates = mockCoverageCandidates(218, 17), selected: number[] = [];
+    for (let sequence = 1; sequence <= 100; sequence++) if (schedulerSlot(sequence, "COVERAGE") === "PRIMARY_EXPLORATION") {
+      selected.push(selectAndPersistSample(candidates, sequence).candidate);
+    }
+    expect(selected).toHaveLength(50);
+    expect(new Set(selected)).toHaveLength(50);
+  });
+
+  it("persists progress through restart, covers all 218 before repeats, then returns to balanced cadence", () => {
+    let candidates = mockCoverageCandidates(218, 17), selected: number[] = [];
+    for (let ordinal = 1; ordinal <= 218; ordinal++) {
+      selected.push(selectAndPersistSample(candidates, ordinal).candidate);
+      if (ordinal === 109) candidates = structuredClone(candidates); // durable restart reconstruction
+    }
+    expect(new Set(selected)).toHaveLength(218);
+    expect(candidates.every((value) => value.childFirstSampledAt != null)).toBe(true);
+    expect(selectCategoryExplorationCandidate(candidates, "BALANCED")).not.toBeNull();
+    const balanced = Array.from({ length: 100 }, (_, index) => schedulerSlot(index + 1, "BALANCED"));
+    expect(balanced.filter((value) => value === "PRIMARY_PRODUCTIVE")).toHaveLength(60);
+    expect(balanced.filter((value) => value === "PRIMARY_EXPLORATION")).toHaveLength(30);
   });
 
   it("keeps G4 out of normal HIGH and MEDIUM pools and selects it only in the probe slot", () => {

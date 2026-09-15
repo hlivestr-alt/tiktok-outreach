@@ -150,7 +150,7 @@ export class CreatorDatabaseService {
   }
 
   private async project(job: Awaited<ReturnType<CreatorDatabaseService["ensureJob"]>>) {
-    const [storedCount, recentActivity, active, next, remaining, structuredCount, categoryCatalog, pendingPage] = await Promise.all([
+    const [storedCount, recentActivity, active, next, remaining, structuredCount, categoryCatalog, coverageSeedGroups, pendingPage] = await Promise.all([
       this.prisma.creator.count({ where: { creatorOpenId: { not: null }, snapshots: { some: { shopId: job.shopId } } } }),
       this.prisma.creatorSyncEvent.findMany({ where: { creatorSyncJobId: job.id }, orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 10,
         select: { stage: true, pageNumber: true, httpStatus: true, tiktokCode: true, googleApiCode: true, retryable: true, safeMessage: true, creatorsReturned: true,
@@ -166,18 +166,37 @@ export class CreatorDatabaseService {
         ] } }),
       this.prisma.creatorSearchPartition.count({ where: { creatorSyncJobId: job.id, partitionType: { in: [...PRODUCTION_PARTITION_TYPES] },
         gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES } } }),
-      this.prisma.creatorMarketplaceCategory.aggregate({ where: { shopId: job.shopId }, _count: { _all: true }, _max: { fetchedAt: true } }),
+      this.prisma.creatorMarketplaceCategory.findMany({ where: { shopId: job.shopId }, select: {
+        categoryId: true, parentCategoryId: true, enabledForCreatorCrawl: true, availableForCreatorFilter: true,
+        creatorFirstSampledAt: true, fetchedAt: true
+      } }),
+      this.prisma.creatorSearchPartition.groupBy({ by: ["categoryChildId"], where: { creatorSyncJobId: job.id,
+        partitionType: "V2_SEED", gmvBucket: { in: ["G1", "G2"] }, status: "QUEUED", categoryChildId: { not: null } } }),
       this.prisma.creatorSyncPage.findFirst({ where: { creatorSyncJobId: job.id, state: "RECEIVED",
         creatorSearchPartition: { partitionType: { in: [...PRODUCTION_PARTITION_TYPES] } } },
         orderBy: { receivedAt: "asc" }, select: { pageNumber: true, sheetsAttemptCount: true, nextSheetsAttemptAt: true,
+          databasePersistedAt: true, sheetsFirstFailureAt: true, sheetsLastAttemptAt: true,
           lastSheetsHttpStatus: true, lastSheetsApiCode: true, lastSheetsRetryable: true, lastSheetsError: true } })
     ]);
     const partition = active ?? next;
     const gmv = GMV_BUCKETS.find((bucket) => bucket.code === partition?.gmvBucket);
+    const validParents = new Set(categoryCatalog.filter((category) => category.parentCategoryId == null
+      && category.enabledForCreatorCrawl && category.availableForCreatorFilter).map((category) => category.categoryId));
+    const validChildren = categoryCatalog.filter((category) => category.parentCategoryId != null
+      && category.availableForCreatorFilter && validParents.has(category.parentCategoryId));
+    const sampledChildren = validChildren.filter((category) => category.creatorFirstSampledAt != null);
+    const claimableChildIds = new Set(coverageSeedGroups.flatMap((group) => group.categoryChildId ? [group.categoryChildId] : []));
+    const claimableUntouched = validChildren.filter((category) => category.creatorFirstSampledAt == null && claimableChildIds.has(category.categoryId)).length;
+    const sampledParentIds = new Set(sampledChildren.flatMap((category) => category.parentCategoryId ? [category.parentCategoryId] : []));
+    const coverageMode = claimableUntouched > 0;
+    const lastCategoryRefresh = categoryCatalog.reduce<Date | null>((latest, category) => !latest || category.fetchedAt > latest ? category.fetchedAt : latest, null);
     return {
       status: job.pauseRequested && job.state === "RUNNING" ? "PAUSING" : (structuredCount > 0 && remaining === 0 && !partition ? "ALL_PARTITIONS_COMPLETE" : job.state),
       marketplaceRetryDelaySeconds: job.marketplaceRetryDelaySeconds,
       schedulerStrategy: { primaryDiscovery: "Low / Medium", high: "Exploration", veryHigh: "Rare probe" },
+      categoryCoverage: { sampled: sampledChildren.length, total: validChildren.length,
+        untouched: validChildren.length - sampledChildren.length, parentsSampled: sampledParentIds.size, totalParents: validParents.size,
+        mode: coverageMode ? "COVERAGE" : "BALANCED", categoryExplorationPercent: coverageMode ? 50 : 30 },
       pagesCompleted: job.pagesCompleted, creatorsFetched: job.creatorsFetched, creatorsFetchedThisRun: job.creatorsFetchedThisRun,
       totalCreatorsStored: job.sheetImportedAt ? storedCount : Math.max(storedCount, job.creatorsFetched),
       startedAt: job.startedAt, lastPageAt: job.lastPageAt, lastSuccessAt: job.lastSuccessAt, lastError: job.lastError,
@@ -190,10 +209,11 @@ export class CreatorDatabaseService {
       sheetsRetryCount: pendingPage?.sheetsAttemptCount ?? 0, sheetsRetryPage: pendingPage?.pageNumber ?? null,
       sheetsNextAttemptAt: pendingPage?.nextSheetsAttemptAt ?? null, sheetsHttpStatus: pendingPage?.lastSheetsHttpStatus ?? null,
       sheetsApiCode: pendingPage?.lastSheetsApiCode ?? null, sheetsRetryable: pendingPage?.lastSheetsRetryable ?? null,
-      sheetsError: pendingPage?.lastSheetsError ?? null,
+      sheetsError: pendingPage?.lastSheetsError ?? null, sheetsDatabasePersistedAt: pendingPage?.databasePersistedAt ?? null,
+      sheetsFirstFailureAt: pendingPage?.sheetsFirstFailureAt ?? null, sheetsLastAttemptAt: pendingPage?.sheetsLastAttemptAt ?? null,
       databaseStillPopulating: ["RUNNING", "WAITING"].includes(job.state), partitionsRemaining: remaining,
-      crawlerGeneration: job.crawlerGeneration, categoryMetadataReady: categoryCatalog._count._all > 0 && structuredCount > 0,
-      categoryCatalog: { loaded: categoryCatalog._count._all > 0, count: categoryCatalog._count._all, lastRefreshedAt: categoryCatalog._max.fetchedAt },
+      crawlerGeneration: job.crawlerGeneration, categoryMetadataReady: categoryCatalog.length > 0 && structuredCount > 0,
+      categoryCatalog: { loaded: categoryCatalog.length > 0, count: categoryCatalog.length, lastRefreshedAt: lastCategoryRefresh },
       currentPartition: partition ? { key: partition.partitionKey, category: partition.categoryName, childCategory: partition.categoryChildName,
         followers: followerRangeLabel(partition.followersMin, partition.followersMax), gmv: gmv?.label ?? "All", page: partition.pagesCompleted + 1,
         status: partition.status, type: partition.partitionType === "V2_SEED" ? "Base" : "Adaptive", partitionType: partition.partitionType,
@@ -258,9 +278,6 @@ export class CreatorDatabaseService {
       if (job.currentPartitionId && !releaseDisabledPointer) await tx.creatorSearchPartition.updateMany({ where: { id: job.currentPartitionId, gmvBucket: { in: SPECIFIC_GMV_BUCKET_CODES }, status: { in: ["PAUSED", "ERROR"] } }, data: {
         status: "RUNNING",
         ...(job.currentStage === "TIKTOK_BUSINESS_RETRY_LIMIT" ? { business16032001RetryCount: 0, business16032001RetryPage: null } : {})
-      } });
-      if (pendingPage && job.currentStage === "SHEET_RETRY_LIMIT") await tx.creatorSyncPage.updateMany({ where: { id: pendingPage.id, state: "RECEIVED" }, data: {
-        sheetsAttemptCount: 0, nextSheetsAttemptAt: null, lastSheetsHttpStatus: null, lastSheetsApiCode: null, lastSheetsRetryable: null, lastSheetsError: null
       } });
       if (releaseDisabledPointer) await tx.creatorSyncEvent.create({ data: { creatorSyncJobId: job.id, creatorSearchPartitionId: current.id,
         partitionKey: current.partitionKey, partitionLabel: current.gmvBucket === "G4" ? `${current.categoryName} / Very High` : `${current.categoryName} / historical GMV-All`,

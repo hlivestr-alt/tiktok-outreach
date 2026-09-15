@@ -9,8 +9,7 @@ describe("one-click campaign send UI", () => {
     expect(page).toContain('campaign.state === "PREVIEW_READY"');
     expect(page).toContain('`/outreach/campaigns/${id}/send`');
     expect(page).toContain('`Send to ${formatNumber(selectedCount)} affiliates`');
-    expect(page).toContain("eligibleCount <= 0");
-    expect(page).toContain("selectedCount <= 0");
+    expect(page).toContain("campaignSendAvailability");
     expect(page).toContain("campaign.outboundCapability?.reason");
   });
 

@@ -8,6 +8,12 @@ function successfulFetch() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web API helper headers", () => {
+  it("uses the same-origin API proxy by default", async () => {
+    const fetcher = successfulFetch(); vi.stubGlobal("fetch", fetcher);
+    await api("/health-probe");
+    expect(fetcher.mock.calls[0][0]).toBe("/api/v1/health-probe");
+  });
+
   it("does not add JSON content type to a bodyless GET", async () => {
     const fetcher = successfulFetch(); vi.stubGlobal("fetch", fetcher);
     await api("/bodyless");
@@ -32,5 +38,42 @@ describe("web API helper headers", () => {
     const headers = new Headers(fetcher.mock.calls[0][1]?.headers);
     expect(headers.get("Content-Type")).toBe("application/x-www-form-urlencoded");
     expect(headers.get("X-Test")).toBe("preserved");
+  });
+
+  it("shows a safe server-provided Send error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      statusCode: 503,
+      message: "Unable to start campaign. No deliveries were queued or sent. Retrying Send is safe."
+    }), { status: 503, headers: { "Content-Type": "application/json" } })));
+    await expect(api("/outreach/campaigns/campaign-1/send", { method: "POST" }))
+      .rejects.toThrow("Unable to start campaign. No deliveries were queued or sent. Retrying Send is safe.");
+  });
+
+  it("shows a safe proxy failure with a client-visible error ID", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Internal Server Error", { status: 500 })));
+    await expect(api("/outreach/campaigns/campaign-1/send", { method: "POST" }))
+      .rejects.toThrow(/The application backend could not be reached\. Please retry\.\nError ID: WEB-/);
+  });
+
+  it("does not expose an unknown non-JSON 5xx response body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("database password: secret", { status: 500 })));
+    await expect(api("/outreach/campaigns/campaign-1/send", { method: "POST" }))
+      .rejects.toThrow("The server could not complete the request. No error details were returned.");
+  });
+
+  it("shows the same safe message when fetch cannot reach Next", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed: internal host"); }));
+    await expect(api("/outreach/campaigns", { method: "POST" }))
+      .rejects.toThrow(/The application backend could not be reached\. Please retry\.\nError ID: WEB-/);
+  });
+
+  it("shows a safe unexpected-error correlation ID", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      statusCode: 500,
+      message: "Unable to complete the request.",
+      errorId: "abc123"
+    }), { status: 500, headers: { "Content-Type": "application/json" } })));
+    await expect(api("/outreach/campaigns/campaign-1/send", { method: "POST" }))
+      .rejects.toThrow("Unable to complete the request.\nError ID: abc123");
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { campaignDetailUrl, createCampaignAndDiscover, retryCampaignDiscovery, type CampaignCreatePayload } from "./campaign-discovery";
 
 const payload: CampaignCreatePayload = {
-  name: "Validation", productName: "Product", targetCount: 10, candidateLimit: 20, cooldownDays: 30,
+  targetCount: 10, candidateLimit: 20, cooldownDays: 30,
   messageTemplate: "Hi {{creator_display_name}}", filters: {}, rankingMetric: "FOLLOWERS", rankingDirection: "DESC"
 };
 

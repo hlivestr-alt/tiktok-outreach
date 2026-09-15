@@ -74,7 +74,8 @@ services:
       <<: *build
       dockerfile: infra/docker/Dockerfile.web
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
+      NEXT_PUBLIC_API_URL: /api/v1
+      OUTREACH_QA_PROXY_TARGET: http://api:4000
       APP_VERSION: ${APP_VERSION:-local}
       BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
     ports: ["127.0.0.1:3000:3000"]

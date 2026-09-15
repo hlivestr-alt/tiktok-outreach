@@ -6,6 +6,7 @@ import { CreatorIdentityResolver } from "../identity/creator-identity-resolver.s
 import { CreatorDatabaseService } from "../creator-database/creator-database.service";
 import { CreatorSyncProcessor } from "../creator-database/creator-sync.processor";
 import { GoogleSheetsError } from "../creator-database/creator-sheet.gateway";
+import { designatedFirstG1G2Bucket, g1G2FamilyKey } from "../creator-database/creator-scheduler";
 import { OutreachService } from "./outreach.service";
 
 const prisma = new PrismaClient();
@@ -66,6 +67,8 @@ describe.sequential("creator database continuation sync", () => {
       pagesCompleted: 11, creatorsFetched: 201, lastCreatorsReturned: 1, lastCreatorsAdded: 1, lastDuplicates: 0
     });
     expect(seed.sheet.reconcilePage).toHaveBeenCalledTimes(1);
+    expect(await prisma.creatorMarketplaceCategory.findFirstOrThrow({ where: { shopId: seed.shop.id, categoryId: "600001-child" } }))
+      .toMatchObject({ creatorFirstSampledAt: new Date("2026-08-14T06:00:00Z"), creatorLastSampledAt: new Date("2026-08-14T06:00:00Z") });
     expect((await prisma.creatorSyncEvent.findMany({ where: { creatorSyncJobId: seed.job.id }, orderBy: { occurredAt: "asc" } })).map((event) => event.stage))
       .toEqual(expect.arrayContaining(["REQUESTING_TIKTOK", "TIKTOK_SUCCESS", "SAVING_DATABASE", "SAVING_SHEET", "COMMITTING_PAGE", "PAGE_COMMITTED", "CURSOR_ADVANCED"]));
   });
@@ -284,12 +287,12 @@ describe.sequential("creator database continuation sync", () => {
     expect(successfulPage.searchCreators).toHaveBeenCalledTimes(1);
     expect(reconcilePage).toHaveBeenCalledTimes(1);
     expect(recoverySheet.reconcilePage).toHaveBeenCalledTimes(1);
-    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: sheetFailure.job.id, pageNumber: 11 } })).toMatchObject({ state: "COMMITTED", sheetsAttemptCount: 0 });
+    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: sheetFailure.job.id, pageNumber: 11 } })).toMatchObject({ state: "COMMITTED", sheetsAttemptCount: 2 });
     expect(await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: sheetFailure.job.id } })).toMatchObject({ state: "RUNNING", currentStage: "PAGE_COMMITTED", pagesCompleted: 11 });
     expect(await prisma.creatorSearchPartition.findFirstOrThrow({ where: { creatorSyncJobId: sheetFailure.job.id } }))
       .toMatchObject({ uniqueCreatorsAdded: 1, duplicates: 0 });
     expect((await prisma.creatorSyncEvent.findMany({ where: { creatorSyncJobId: sheetFailure.job.id }, orderBy: { occurredAt: "asc" } })).map((event) => event.stage))
-      .toEqual(expect.arrayContaining(["SHEET_RETRY", "SHEET_RECOVERED", "PAGE_COMMITTED", "CURSOR_ADVANCED"]));
+      .toEqual(expect.arrayContaining(["SHEETS_RETRY_STARTED", "SHEET_RECOVERED", "PAGE_COMMITTED", "CURSOR_ADVANCED"]));
 
     const cursorFailure = await fixture();
     await cursorFailure.processor.processNext({ searchCreators: vi.fn(async () => ({ creators: [], searchKey: "abc", nextPageToken: "token200", hasMore: true })) }, cursorFailure.sheet);
@@ -311,41 +314,109 @@ describe.sequential("creator database continuation sync", () => {
     });
   });
 
-  it("pauses after ten Sheets attempts and Continue resets only the Sheets retry window", async () => {
+  it("keeps retrying the same staged page beyond 10, 50, and 100 failures and recovers without Continue", async () => {
     const seed = await fixture();
-    const adapter = { searchCreators: vi.fn(async () => ({ creators: [creator("sheets-limit")], searchKey: "abc", nextPageToken: "token220", hasMore: true })) };
+    let marketplaceCalls = 0;
+    const adapter = { searchCreators: vi.fn(async (_filters, cursor) => {
+      marketplaceCalls += 1;
+      if (marketplaceCalls === 1) {
+        expect(cursor).toEqual({ pageSize: 20, pageToken: "token200", searchKey: "abc" });
+        return { creators: [creator("sheets-unbounded")], searchKey: "abc", nextPageToken: "token220", hasMore: true };
+      }
+      expect(cursor).toEqual({ pageSize: 20, pageToken: "token220", searchKey: "abc" });
+      return { creators: [], searchKey: "abc", hasMore: false };
+    }) };
     const failure = new GoogleSheetsError({ httpStatus: 503, googleApiCode: "UNAVAILABLE (503)", retryable: true, safeReason: "backend unavailable" });
     let now = new Date("2026-08-14T06:00:00Z");
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const processor = attempt === 0 ? seed.processor : new CreatorSyncProcessor(prisma as any, {} as any, new CreatorIdentityResolver(prisma as any), {} as any,
-        { now: () => now, random: () => 0 });
-      await processor.processNext(adapter, { ...seed.sheet, reconcilePage: vi.fn(async () => { throw failure; }) });
-      now = new Date(now.getTime() + 5_000);
-    }
-    expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
-    expect(await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } })).toMatchObject({ state: "PAUSED", currentStage: "SHEET_RETRY_LIMIT", pagesCompleted: 10, nextAttemptAt: null });
-    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } })).toMatchObject({ sheetsAttemptCount: 10, nextSheetsAttemptAt: null });
+    const failingSheet = { ...seed.sheet, reconcilePage: vi.fn(async () => { throw failure; }) };
+    await seed.processor.processNext(adapter, failingSheet);
+    const initialPage = await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } });
+    const stagedPayload = JSON.stringify(initialPage.payload);
+    expect(initialPage).toMatchObject({ sheetsAttemptCount: 1, databasePersistedAt: expect.any(Date),
+      sheetsFirstFailureAt: now, sheetsLastAttemptAt: now, privateSearchKey: "abc", privateNextToken: "token220" });
 
-    await seed.service.resume();
-    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } })).toMatchObject({ sheetsAttemptCount: 0 });
+    for (const targetAttempt of [10, 11, 50, 100]) {
+      now = new Date(now.getTime() + 10 * 60_000);
+      await prisma.creatorSyncPage.update({ where: { id: initialPage.id }, data: {
+        sheetsAttemptCount: targetAttempt - 1, nextSheetsAttemptAt: now
+      } });
+      await prisma.creatorSyncJob.update({ where: { id: seed.job.id }, data: {
+        state: "WAITING", currentStage: "WAITING_SHEET_RETRY", nextAttemptAt: now, leaseId: null, leaseExpiresAt: null
+      } });
+      const restarted = new CreatorSyncProcessor(prisma as any, {} as any, new CreatorIdentityResolver(prisma as any), {} as any,
+        { now: () => now, random: () => 0 });
+      await restarted.processNext(adapter, failingSheet);
+      const [job, page] = await Promise.all([
+        prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } }),
+        prisma.creatorSyncPage.findUniqueOrThrow({ where: { id: initialPage.id } })
+      ]);
+      expect(job).toMatchObject({ state: "WAITING", currentStage: "WAITING_SHEET_RETRY", pagesCompleted: 10,
+        privateSearchKey: "abc", privateNextPageToken: "token200" });
+      expect(page).toMatchObject({ state: "RECEIVED", sheetsAttemptCount: targetAttempt, privateSearchKey: "abc",
+        privateNextToken: "token220", databasePersistedAt: initialPage.databasePersistedAt });
+      expect(page.nextSheetsAttemptAt).not.toBeNull();
+      expect(JSON.stringify(page.payload)).toBe(stagedPayload);
+      expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
+    }
+
+    expect(await seed.service.status()).toMatchObject({ status: "WAITING", currentStage: "WAITING_SHEET_RETRY",
+      sheetsRetryCount: 100, sheetsFirstFailureAt: new Date("2026-08-14T06:00:00Z"), sheetsDatabasePersistedAt: expect.any(Date) });
+    const waiting = await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } });
+    now = waiting.nextAttemptAt!;
     const recovered = new CreatorSyncProcessor(prisma as any, {} as any, new CreatorIdentityResolver(prisma as any), {} as any,
       { now: () => now, random: () => 0 });
     await recovered.processNext(adapter, { ...seed.sheet, reconcilePage: vi.fn(async () => undefined) });
     expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
-    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, pageNumber: 11 } })).toMatchObject({ state: "COMMITTED" });
+    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, pageNumber: 11 } })).toMatchObject({ state: "COMMITTED", sheetsAttemptCount: 101 });
+    const recoveredJob = await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } });
+    expect(recoveredJob).toMatchObject({ state: "RUNNING", currentStage: "PAGE_COMMITTED", pagesCompleted: 11,
+      privateSearchKey: "abc", privateNextPageToken: "token220" });
+    expect(recoveredJob.nextAttemptAt).not.toBeNull();
+    now = recoveredJob.nextAttemptAt!;
+    const continued = new CreatorSyncProcessor(prisma as any, {} as any, new CreatorIdentityResolver(prisma as any), {} as any,
+      { now: () => now, random: () => 0 });
+    await continued.processNext(adapter, seed.sheet);
+    expect(adapter.searchCreators).toHaveBeenCalledTimes(2);
+    expect(await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } })).toMatchObject({ pagesCompleted: 12 });
+
+    const retryEvents = await prisma.creatorSyncEvent.findMany({ where: { creatorSyncJobId: seed.job.id,
+      stage: { in: ["SHEETS_RETRY_STARTED", "SHEETS_RETRY_FAILED"] } } });
+    expect(retryEvents).toHaveLength(4);
   });
 
-  it("pauses immediately for a non-retryable Sheets error with safe provider details", async () => {
+  it("keeps a permission-blocked staged page on slow automatic retry", async () => {
     const seed = await fixture();
     const adapter = { searchCreators: vi.fn(async () => ({ creators: [creator("sheets-permission")], searchKey: "abc", nextPageToken: "token220", hasMore: true })) };
     await seed.processor.processNext(adapter, { ...seed.sheet, reconcilePage: vi.fn(async () => {
       throw new GoogleSheetsError({ httpStatus: 403, googleApiCode: "PERMISSION_DENIED (403)", retryable: false, safeReason: "permission denied" });
     }) });
     const job = await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } });
-    expect(job).toMatchObject({ state: "PAUSED", currentStage: "SHEET_ERROR", nextAttemptAt: null, lastHttpStatus: 403 });
+    expect(job).toMatchObject({ state: "WAITING", currentStage: "SHEETS_BLOCKED_RETRYING",
+      nextAttemptAt: new Date("2026-08-14T06:05:00Z"), lastHttpStatus: 403 });
     expect(job.lastSafeError).toContain("PERMISSION_DENIED (403)");
     expect(job.lastSafeError).toContain("non-retryable");
-    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } })).toMatchObject({ sheetsAttemptCount: 1, nextSheetsAttemptAt: null });
+    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } })).toMatchObject({
+      sheetsAttemptCount: 1, nextSheetsAttemptAt: new Date("2026-08-14T06:05:00Z"), lastSheetsRetryable: false,
+      databasePersistedAt: expect.any(Date), sheetsFirstFailureAt: new Date("2026-08-14T06:00:00Z")
+    });
+    expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["HTTP 429", new GoogleSheetsError({ httpStatus: 429, googleApiCode: "RESOURCE_EXHAUSTED (429)", retryable: true, safeReason: "quota exceeded" })],
+    ["network reset", new TypeError("connection reset")]
+  ])("keeps retrying staged data after a %s Sheets failure", async (_label, failure) => {
+    const seed = await fixture();
+    const adapter = { searchCreators: vi.fn(async () => ({ creators: [creator(`sheets-${_label}`)], searchKey: "abc", nextPageToken: "token220", hasMore: true })) };
+    await seed.processor.processNext(adapter, { ...seed.sheet, reconcilePage: vi.fn(async () => { throw failure; }) });
+
+    expect(await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } })).toMatchObject({
+      state: "WAITING", currentStage: "WAITING_SHEET_RETRY", nextAttemptAt: new Date("2026-08-14T06:00:05Z"),
+      pagesCompleted: 10, privateNextPageToken: "token200"
+    });
+    expect(await prisma.creatorSyncPage.findFirstOrThrow({ where: { creatorSyncJobId: seed.job.id, state: "RECEIVED" } })).toMatchObject({
+      sheetsAttemptCount: 1, databasePersistedAt: expect.any(Date), privateNextToken: "token220"
+    });
     expect(adapter.searchCreators).toHaveBeenCalledTimes(1);
   });
 
@@ -661,9 +732,36 @@ describe.sequential("creator database continuation sync", () => {
     const job = await prisma.creatorSyncJob.findUniqueOrThrow({ where: { id: seed.job.id } });
     const selected = await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.v2.id } });
     expect(job).toMatchObject({ currentPartitionId: seed.v2.id, partitionClaimSequence: 7 });
-    expect(selected).toMatchObject({ schedulerClass: "EXPLORATION", schedulerClaimSequence: 7, status: "WAITING_RETRY" });
+    expect(selected).toMatchObject({ schedulerClass: "EXPLORATION", schedulerClaimSequence: 7, status: "WAITING_RETRY",
+      schedulerWasCategoryExploration: true, schedulerCoverageMode: true });
     expect(selected.priorityReason).toContain("Low/Medium exploration slot");
     expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.adaptive.id } })).toMatchObject({ status: "QUEUED" });
+  });
+
+  it("never lets a touched category consume coverage exploration while an untouched child is claimable", async () => {
+    const seed = await schedulerFixture(4);
+    await prisma.creatorMarketplaceCategory.update({ where: { shopId_categoryId: { shopId: seed.shop.id, categoryId: "600001-child" } },
+      data: { creatorFirstSampledAt: new Date("2026-08-01T00:00:00Z"), creatorLastSampledAt: new Date("2026-08-01T00:00:00Z") } });
+    await prisma.creatorMarketplaceCategory.createMany({ data: [
+      { shopId: seed.shop.id, categoryId: "700001", categoryName: "Fashion", parentCategoryId: null, level: 1,
+        enabledForCreatorCrawl: true, sortOrder: 2, fetchedAt: new Date() },
+      { shopId: seed.shop.id, categoryId: "700001-child", categoryName: "Shoes", parentCategoryId: "700001", level: 2,
+        sortOrder: 3, fetchedAt: new Date() }
+    ] });
+    const familyKey = g1G2FamilyKey({ categoryId: "700001", categoryChildId: "700001-child", followersMin: 600, followersMax: 799 })!;
+    const firstBucket = designatedFirstG1G2Bucket(familyKey);
+    const untouched = await prisma.creatorSearchPartition.create({ data: { creatorSyncJobId: seed.job.id,
+      partitionKey: `v2:700001:700001-child:f600-799:${firstBucket.toLowerCase()}`, generation: 3, partitionType: "V2_SEED",
+      categoryId: "700001", categoryName: "Fashion", categoryChildId: "700001-child", categoryChildName: "Shoes",
+      categoryChildIds: ["700001-child"], followerBucket: "F01", followersMin: 600, followersMax: 799,
+      gmvBucket: firstBucket, gmvRange: firstBucket === "G1" ? "GMV_RANGE_0_100" : "GMV_RANGE_100_1000",
+      schedulerFamilyKey: familyKey, schedulerG1G2FirstBucket: firstBucket, status: "QUEUED", queuePosition: 2_000_000n } });
+    const adapter = { searchCreators: vi.fn(async () => { throw new TikTokApiError("RATE_LIMIT", "SEARCH_CREATORS", 429, 36009002, "r", "throttled"); }) };
+    await seed.processor.processNext(adapter, seed.sheet);
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: untouched.id } })).toMatchObject({
+      schedulerClaimSequence: 5, schedulerWasCategoryExploration: true, schedulerCoverageMode: true, status: "WAITING_RETRY"
+    });
+    expect(await prisma.creatorSearchPartition.findUniqueOrThrow({ where: { id: seed.v2.id } })).toMatchObject({ status: "QUEUED" });
   });
 
   it("persists one G4 probe at claim 100 and restart continues with normal work without a burst", async () => {

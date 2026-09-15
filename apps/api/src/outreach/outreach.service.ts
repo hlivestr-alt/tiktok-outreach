@@ -1,15 +1,17 @@
-import { BadRequestException, HttpException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ConflictException, HttpException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnprocessableEntityException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { lockCreatorEligibility, Prisma } from "@affiliate/db";
 import type { CampaignCloneFromPreviewInput, CampaignCreateInput } from "@affiliate/contracts";
 import {
-  assertCampaignWithinLimit, buildPreview, renderMessage,
+  assertCampaignWithinLimit, assertContactCooldownDays, buildPreview, DEFAULT_OUTREACH_MESSAGE_TEMPLATE,
+  OUTREACH_GMV_CURRENCY, renderMessage,
   type ContactState, type CreatorCandidate, type CreatorFilters, type EvaluatedCreator, type RankingMetric
 } from "@affiliate/domain";
 import { config, expireFrozenCampaigns, PrismaService, QueueService } from "../shared";
 import { TikTokIntegrationService } from "../integrations/tiktok.service";
 import { publicDiscoveryRun } from "./discovery-processor";
 import { rebuildLocalPreview } from "./local-preview";
+import { allocateCampaignName } from "./campaign-naming";
 
 @Injectable()
 export class OutreachService {
@@ -28,6 +30,8 @@ export class OutreachService {
 
   async create(input: CampaignCreateInput) {
     const shop = await this.tiktok.activeShop();
+    const messageTemplate = input.messageTemplate?.trim() ? input.messageTemplate : DEFAULT_OUTREACH_MESSAGE_TEMPLATE;
+    const productName = input.productName?.trim() ?? "";
     const rankingMetrics = new Set(["GMV", "UNITS_SOLD", "FOLLOWERS", "AVG_VIDEO_VIEWS", "AVG_LIVE_VIEWERS", "ENGAGEMENT_RATE", "TIKTOK_RELEVANCE"]);
     try {
       assertCampaignWithinLimit(input.targetCount, {
@@ -36,9 +40,13 @@ export class OutreachService {
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
     }
-    if (!input.name?.trim() || !input.productName?.trim() || !input.messageTemplate?.trim()) throw new BadRequestException("Name, product, and message template are required");
-    if (!Number.isInteger(input.cooldownDays) || input.cooldownDays < 0) throw new BadRequestException("Cooldown must be zero or more days");
-    if (input.messageTemplate.length > 2000) throw new BadRequestException("Message template exceeds the mock provider limit of 2,000 characters");
+    if (!messageTemplate.trim()) throw new BadRequestException("Message template is required");
+    try {
+      assertContactCooldownDays(input.cooldownDays);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : "Invalid contact cooldown");
+    }
+    if (messageTemplate.length > 2000) throw new BadRequestException("Message template exceeds the mock provider limit of 2,000 characters");
     if (input.candidateLimit != null && (!Number.isInteger(input.candidateLimit) || input.candidateLimit < input.targetCount)) {
       throw new BadRequestException("Candidate limit must be an integer at least as large as the target");
     }
@@ -52,23 +60,23 @@ export class OutreachService {
     }
     const usesGmv = input.rankingMetric === "GMV" || input.filters?.minGmv != null || input.filters?.maxGmv != null;
     const filters: CreatorFilters = { ...(input.filters ?? {}) };
+    delete filters.gmvCurrency;
     if (config.APP_MODE === "mock" && usesGmv) filters.gmvCurrency = "IDR";
-    if (config.APP_MODE === "read_only" && usesGmv && !filters.gmvCurrency?.trim()) {
-      throw new BadRequestException("An explicit expected GMV currency is required for real Marketplace filtering or ranking");
-    }
-    if (filters.gmvCurrency && !/^[A-Za-z]{3}$/.test(filters.gmvCurrency)) throw new BadRequestException("GMV currency must be a three-letter provider currency code");
-    if (filters.gmvCurrency) filters.gmvCurrency = filters.gmvCurrency.toUpperCase();
+    if (config.APP_MODE === "read_only" && usesGmv) filters.gmvCurrency = OUTREACH_GMV_CURRENCY;
     try {
-      renderMessage(input.messageTemplate, { creatorDisplayName: "Creator", productName: input.productName, campaignName: input.name });
+      renderMessage(messageTemplate, { creatorDisplayName: "Creator", productName, campaignName: "YYYYMMDD_001" });
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid message template");
     }
-    return this.prisma.campaign.create({ data: {
-      shopId: shop.id, name: input.name.trim(), productName: input.productName.trim(), targetCount: input.targetCount,
-      candidateLimit: Math.min(10_000, input.candidateLimit ?? Math.max(input.targetCount * 2, input.targetCount + 500)),
-      cooldownDays: input.cooldownDays, messageTemplate: input.messageTemplate, filters: filters as Prisma.InputJsonValue,
-      rankingMetric: input.rankingMetric, rankingDirection: input.rankingDirection ?? "DESC"
-    }});
+    return this.prisma.$transaction(async (tx) => {
+      const name = await allocateCampaignName(tx);
+      return tx.campaign.create({ data: {
+        shopId: shop.id, name, productName, targetCount: input.targetCount,
+        candidateLimit: Math.min(10_000, input.candidateLimit ?? Math.max(input.targetCount * 2, input.targetCount + 500)),
+        cooldownDays: input.cooldownDays, messageTemplate, filters: filters as Prisma.InputJsonValue,
+        rankingMetric: input.rankingMetric, rankingDirection: input.rankingDirection ?? "DESC"
+      }});
+    });
   }
 
   private async requiredCampaign(id: string) {
@@ -253,13 +261,11 @@ export class OutreachService {
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid campaign target");
     }
-    if (!input.name?.trim() || !input.productName?.trim() || !input.messageTemplate?.trim()) {
-      throw new BadRequestException("Name, product, and message template are required");
-    }
+    if (!input.messageTemplate?.trim()) throw new BadRequestException("Message template is required");
     if (input.messageTemplate.length > 2000) throw new BadRequestException("Message template exceeds the provider limit of 2,000 characters");
     try {
       renderMessage(input.messageTemplate, {
-        creatorDisplayName: "Creator", productName: input.productName, campaignName: input.name
+        creatorDisplayName: "Creator", productName: input.productName?.trim() ?? "", campaignName: "YYYYMMDD_001"
       });
     } catch (error) {
       throw new BadRequestException(error instanceof Error ? error.message : "Invalid message template");
@@ -278,7 +284,7 @@ export class OutreachService {
     if (!source.discoveryRun.candidates.length) throw new BadRequestException("Source campaign must contain persisted discovery candidates");
     this.validateCloneInput(input, source.shop);
     const normalized = {
-      name: input.name.trim(), productName: input.productName.trim(),
+      productName: input.productName?.trim() ?? "",
       messageTemplate: input.messageTemplate, targetCount: input.targetCount
     };
     const idempotencyDigest = createHash("sha256").update(JSON.stringify({
@@ -293,8 +299,9 @@ export class OutreachService {
       });
       if (duplicate?.campaignId) return duplicate.campaignId;
 
+      const name = await allocateCampaignName(tx);
       const campaign = await tx.campaign.create({ data: {
-        shopId: source.shopId, name: normalized.name, productName: normalized.productName,
+        shopId: source.shopId, name, productName: normalized.productName,
         targetCount: normalized.targetCount, candidateLimit: source.candidateLimit,
         cooldownDays: source.cooldownDays, messageTemplate: normalized.messageTemplate,
         filters: source.filters as Prisma.InputJsonValue, rankingMetric: source.rankingMetric,
@@ -330,7 +337,7 @@ export class OutreachService {
       } });
       await rebuildLocalPreview(tx, run.id, now);
       return campaign.id;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 20_000 });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 120_000 });
 
     const clone = await this.prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, include: { discoveryRun: true } });
     const summary = clone.summary as Record<string, unknown>;
@@ -437,14 +444,21 @@ export class OutreachService {
         }, orderBy: { rankingValue: current.rankingDirection === "ASC" ? "asc" : "desc" }
       });
       if (!selected.length) throw new BadRequestException("No eligible recipients to freeze");
-      const cutoff = new Date(Date.now() - current.cooldownDays * 86_400_000);
+      const eligibilityCheckedAt = new Date();
+      const activeReservations = await tx.outreachReservation.findMany({
+        where: {
+          shopId: current.shopId,
+          creatorId: { in: selected.map((recipient) => recipient.creatorId) },
+          expiresAt: { gt: eligibilityCheckedAt }
+        },
+        select: { creatorId: true }
+      });
+      const activelyReservedCreatorIds = new Set(activeReservations.map((reservation) => reservation.creatorId));
+      const cutoff = new Date(eligibilityCheckedAt.getTime() - current.cooldownDays * 86_400_000);
       const exclusionCounts: Record<string, number> = {};
       let finalSelected = 0;
       for (const [frozenIndex, recipient] of selected.entries()) {
         const contact = recipient.creator.contacts[0];
-        const activeReservation = await tx.outreachReservation.findFirst({
-          where: { shopId: current.shopId, creatorId: recipient.creatorId, expiresAt: { gt: new Date() } }
-        });
         let skipReason: "DO_NOT_CONTACT" | "DELIVERY_UNKNOWN" | "COOLDOWN" | "CONTACTED_BY_APP_WITHIN_COOLDOWN" | "ACTIVE_RESERVATION" | undefined;
         let skipDetail: string | undefined;
         if (contact?.doNotContact) skipReason = "DO_NOT_CONTACT";
@@ -452,7 +466,7 @@ export class OutreachService {
         else if (contact?.lastContactedAt && contact.lastContactedAt > cutoff) {
           skipReason = contact.lastCampaignId ? "CONTACTED_BY_APP_WITHIN_COOLDOWN" : "COOLDOWN";
           skipDetail = `Contact appeared after preview at ${contact.lastContactedAt.toISOString()}`;
-        } else if (activeReservation) skipReason = "ACTIVE_RESERVATION";
+        } else if (activelyReservedCreatorIds.has(recipient.creatorId)) skipReason = "ACTIVE_RESERVATION";
         if (skipReason) {
           exclusionCounts[skipReason] = (exclusionCounts[skipReason] ?? 0) + 1;
           await tx.campaignRecipient.update({ where: { id: recipient.id }, data: {
@@ -505,15 +519,19 @@ export class OutreachService {
       } else {
         await tx.campaign.update({ where: { id }, data: {
           state: "FROZEN", frozenAt: new Date(), freezeExpiresAt: expiresAt,
-          frozenFilters: current.filters as Prisma.InputJsonValue, frozenTemplate: current.messageTemplate,
-          frozenContext: { campaignName: current.name, productName: current.productName, rankingMetric: current.rankingMetric, rankingDirection: current.rankingDirection },
+          frozenFilters: { ...(current.filters as Record<string, unknown>), cooldownDays: current.cooldownDays } as Prisma.InputJsonValue,
+          frozenTemplate: current.messageTemplate,
+          frozenContext: {
+            campaignName: current.name, productName: current.productName, cooldownDays: current.cooldownDays,
+            rankingMetric: current.rankingMetric, rankingDirection: current.rankingDirection
+          },
           summary: finalSummary as Prisma.InputJsonValue, version: { increment: 1 }
         } });
         await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_FROZEN", payload: {
           previewSelected: selected.length, finalSelected, exclusions: exclusionCounts, expiresAt: expiresAt.toISOString()
         } } });
       }
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 20_000 });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 120_000 });
     return this.get(id);
   }
 
@@ -556,7 +574,7 @@ export class OutreachService {
         await tx.campaignRecipient.update({ where: { id: recipient.id }, data: { state: "QUEUED" } });
       }
       await tx.auditEvent.create({ data: { shopId: campaign.shopId, campaignId: id, eventType: "CAMPAIGN_QUEUED", payload: { selectedCount: recipients.length } } });
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 120_000 });
     await this.queues.reconcile();
     return this.get(id);
   }
@@ -578,7 +596,7 @@ export class OutreachService {
         await this.freeze(id, version);
       } catch (error) {
         campaign = await this.requiredCampaign(id);
-        if (campaign.state !== "FROZEN") throw error;
+        if (campaign.state !== "FROZEN") throw this.safeSendFailure(error, campaign, "freeze");
       }
       campaign = await this.requiredCampaign(id);
       if (campaign.state !== "FROZEN") return this.get(id);
@@ -587,7 +605,7 @@ export class OutreachService {
       } catch (error) {
         const current = await this.requiredCampaign(id);
         if (["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED", "COMPLETED", "COMPLETED_WITH_ERRORS", "CANCELLED"].includes(current.state)) return this.get(id);
-        throw error;
+        throw this.safeSendFailure(error, current, "materialization");
       }
     }
     if (campaign.state === "FROZEN") {
@@ -596,10 +614,45 @@ export class OutreachService {
       } catch (error) {
         const current = await this.requiredCampaign(id);
         if (["QUEUED", "RUNNING", "PAUSE_REQUESTED", "PAUSED", "SAFETY_PAUSED", "COMPLETED", "COMPLETED_WITH_ERRORS", "CANCELLED"].includes(current.state)) return this.get(id);
-        throw error;
+        throw this.safeSendFailure(error, current, "materialization");
       }
     }
     throw new BadRequestException("Campaign preview is not ready to send");
+  }
+
+  private safeSendFailure(
+    error: unknown,
+    campaign: { id: string; shopId: string; state: string },
+    stage: "freeze" | "materialization"
+  ): HttpException {
+    if (error instanceof HttpException) {
+      const response = error.getResponse();
+      const message = typeof response === "string"
+        ? response
+        : typeof response === "object" && response && "message" in response && typeof response.message === "string"
+          ? response.message
+          : error.message;
+      if (message.includes("stale") || message.includes("already queued")) {
+        return new ConflictException("Campaign is no longer in the expected preview state. Refresh the campaign before retrying.");
+      }
+      if (message.includes("No eligible recipients") || message.includes("No frozen recipients")) {
+        return new UnprocessableEntityException("No eligible recipients could be frozen.");
+      }
+      return error;
+    }
+    const code = typeof error === "object" && error && "code" in error ? String(error.code) : "UNEXPECTED";
+    this.logger.error(
+      `Campaign Send failed campaignId=${campaign.id} shopId=${campaign.shopId} state=${campaign.state} stage=${stage} code=${code}`,
+      error instanceof Error ? error.stack : undefined
+    );
+    if (campaign.state === "FROZEN") {
+      return new ServiceUnavailableException(
+        "Unable to start campaign. Recipients and messages are safely frozen, but deliveries were not queued. Retrying Send is safe."
+      );
+    }
+    return new ServiceUnavailableException(
+      "Unable to start campaign. No deliveries were queued or sent. Retrying Send is safe."
+    );
   }
 
   /** Backwards-compatible server method; it delegates to the one-click Send flow. */
