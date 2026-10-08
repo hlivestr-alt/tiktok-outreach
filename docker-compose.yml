@@ -8,7 +8,7 @@ x-production-env: &production-env
   RUNTIME_ENV: production
   APP_MODE: read_only
   OUTBOUND_MODE: live
-  DATABASE_URL: postgresql://affiliate:affiliate@postgres:5432/affiliate_outreach?schema=public
+  DATABASE_URL: postgresql://affiliate:${NATIVE_POSTGRES_PASSWORD:?Private native database password is required}@postgres:5432/affiliate_outreach?schema=public
   REDIS_URL: redis://redis:6379
   APP_VERSION: ${APP_VERSION:-local}
   BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
@@ -20,7 +20,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: affiliate
-      POSTGRES_PASSWORD: affiliate
+      POSTGRES_PASSWORD: ${NATIVE_POSTGRES_PASSWORD:?Private native database password is required}
       POSTGRES_DB: affiliate_outreach
     ports: ["127.0.0.1:5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
@@ -155,7 +155,7 @@ services:
     environment:
       RUNTIME_ENV: production
       APP_MODE: read_only
-      DATABASE_URL: postgresql://affiliate:affiliate@host.docker.internal:5432/affiliate_outreach?schema=public
+      DATABASE_URL: postgresql://affiliate:${NATIVE_POSTGRES_PASSWORD:?Private native database password is required}@host.docker.internal:5432/affiliate_outreach?schema=public
       TIKTOK_APP_KEY: ${TIKTOK_APP_KEY}
       TIKTOK_APP_SECRET: ${TIKTOK_APP_SECRET}
       TIKTOK_TOKEN_ENCRYPTION_KEY: ${TIKTOK_TOKEN_ENCRYPTION_KEY}
