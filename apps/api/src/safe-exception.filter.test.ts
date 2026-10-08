@@ -1,4 +1,5 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, Logger } from "@nestjs/common";
+import { randomBytes } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { SafeExceptionFilter } from "./safe-exception.filter";
 
@@ -26,6 +27,7 @@ describe("SafeExceptionFilter", () => {
   });
 
   it("hides unexpected details and returns a correlation ID", () => {
+    const log = vi.spyOn(Logger.prototype, "error").mockImplementation(() => {});
     const send = vi.fn();
     const header = vi.fn();
     new SafeExceptionFilter().catch(new Error("postgresql://user:secret@db/internal/path"), host(send, header));
@@ -34,5 +36,21 @@ describe("SafeExceptionFilter", () => {
     expect(body.errorId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("secret");
     expect(header).toHaveBeenCalledWith("x-error-id", body.errorId);
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
+    log.mockRestore();
+  });
+
+  it("never emits callback parameters, arbitrary exception text or stacks", () => {
+    const marker = randomBytes(32).toString("base64url");
+    const log = vi.spyOn(Logger.prototype, "error").mockImplementation(() => {});
+    const send = vi.fn(), header = vi.fn(), response = { header, status: () => ({ send }) };
+    header.mockReturnValue(response);
+    const names = ["code", "state", "access_token", "refresh_token", "token", "authorization", "auth_code", "secret"];
+    const request = { method: "GET", url: "/api/v1/integrations/tiktok/callback?" + names.map(n => `${n}=${marker}`).join("&"), routeOptions: { url: "/api/v1/integrations/tiktok/callback" } };
+    new SafeExceptionFilter().catch(new Error(marker), { switchToHttp: () => ({ getResponse: () => response, getRequest: () => request }) } as any);
+    expect(JSON.stringify([log.mock.calls, send.mock.calls, header.mock.calls]).includes(marker)).toBe(false);
+    expect(log.mock.calls).toHaveLength(1);
+    expect(JSON.parse(String(log.mock.calls[0][0]))).toMatchObject({ method: "GET", pathname: request.routeOptions.url, category: "UNEXPECTED_REQUEST_FAILURE" });
+    log.mockRestore();
   });
 });

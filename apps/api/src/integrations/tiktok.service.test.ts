@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { publicTikTokConnection, validateTikTokCallbackInput } from "./tiktok.service";
+import {opaque} from './oauth-handoff';
 
 describe("TikTok authorization callback shape", () => {
   it("rejects missing state, rejection, and malformed success", () => {
@@ -8,7 +9,8 @@ describe("TikTok authorization callback shape", () => {
     expect(() => validateTikTokCallbackInput({ state: "state" })).toThrowError(/code/i);
   });
   it("accepts a state-bound code for server-side single-use validation", () => {
-    expect(() => validateTikTokCallbackInput({ state: "unguessable", code: "one-time" })).not.toThrow();
+    expect(() => validateTikTokCallbackInput({ state: opaque(), code: "one-time" })).not.toThrow();
+    expect(() => validateTikTokCallbackInput({ state: 'unbound', code: 'one-time' })).toThrow();
   });
 });
 

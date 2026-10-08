@@ -6,7 +6,16 @@ type HttpReply = {
   status(code: number): { send(body: unknown): void };
 };
 
-type HttpRequest = { method?: string; url?: string };
+type HttpRequest = { method?: string; url?: string; routeOptions?: { url?: string } };
+
+export function safeRequestFields(request?: HttpRequest) {
+  const method = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(request?.method ?? "") ? request!.method : "UNKNOWN";
+  // Fastify's registered route template contains no browser-supplied values.
+  // Never log a raw URL, query, exception message, stack or request headers.
+  const template = request?.routeOptions?.url;
+  const pathname = template && /^\/[A-Za-z0-9_/:.*-]{1,200}$/.test(template) ? template : "UNMATCHED_ROUTE";
+  return { method, pathname, category: "UNEXPECTED_REQUEST_FAILURE" };
+}
 
 @Catch()
 export class SafeExceptionFilter implements ExceptionFilter {
@@ -28,9 +37,6 @@ export class SafeExceptionFilter implements ExceptionFilter {
       message: "Unable to complete the request.",
       errorId
     });
-    this.logger.error(
-      `Unexpected API failure errorId=${errorId} method=${request?.method ?? "UNKNOWN"} path=${request?.url ?? "UNKNOWN"}`,
-      error instanceof Error ? error.stack : String(error)
-    );
+    this.logger.error(JSON.stringify({ errorId, ...safeRequestFields(request) }));
   }
 }

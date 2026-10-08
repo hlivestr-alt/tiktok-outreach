@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  distDir: process.env.OUTREACH_QA_DIST_DIR ?? ".next",
+  logging: false,
   // Creator Database eligibility can legitimately exceed Next's 30s external-rewrite default.
   experimental: { proxyTimeout: 180_000 },
   async rewrites() {

@@ -352,8 +352,18 @@ model TikTokAuthorizationState {
   expiresAt  DateTime
   consumedAt DateTime?
   createdAt  DateTime  @default(now())
+  browserHash String?
+  operationId String? @unique
+  routerRegistered Boolean @default(false)
 
   @@index([expiresAt, consumedAt])
+}
+
+model TikTokOAuthHandoffNonce {
+  nonceHash String @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
 }
 
 /// Durable provider pacing and single-flight state. shopScope contains only a

@@ -4,15 +4,34 @@ import { Activity, Ban, Check, Gauge, KeyRound, RefreshCw, Server, ShieldCheck }
 import { api, formatNumber } from "../../lib/api";
 
 export default function SettingsPage() {
-  const [data, setData] = useState<any>(); const [system, setSystem] = useState<any>(); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const [data, setData] = useState<any>(); const [system, setSystem] = useState<any>(); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const [authorizationNotice, setAuthorizationNotice] = useState("");
   const load = () => Promise.all([api("/integrations/tiktok").then(setData), api("/system/status").then(setSystem)]).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
   const readOnly = data?.mode === "READ_ONLY"; const shop = data?.selectedShop ?? data?.shop; const connection = data?.connection; const marketplace = data?.marketplaceRateLimit; const outbound = system?.outbound?.runtime;
-  async function authorize() { setBusy(true); setError(""); try { const result = await api<any>("/integrations/tiktok/authorize", { method: "POST", body: "{}" }); window.location.assign(result.authorizationUrl); } catch (e) { setError(e instanceof Error ? e.message : "Authorization failed"); setBusy(false); } }
+  async function authorize() {
+    setError(""); setAuthorizationNotice("");
+    if (window.outreachDesktop) {
+      // Start in the standard browser before creating any state or binding cookie.
+      // The existing desktop shell deliberately blocks external navigation.
+      setAuthorizationNotice("Open http://127.0.0.1:3000/settings in Chrome or Edge, then select Authorize seller there. Complete authorization in that same browser.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api<any>("/integrations/tiktok/authorize", { method: "POST", body: "{}" });
+      if (result.routerStart) {
+        // Only an initiation ticket crosses the browser; codes and seller tokens never do.
+        const form = document.createElement("form"); form.method = "POST"; form.action = result.routerStart;
+        for (const key of ["state", "ticket"] as const) { const input = document.createElement("input"); input.type = "hidden"; input.name = key; input.value = result[key]; form.appendChild(input); }
+        document.body.appendChild(form); form.submit();
+      } else window.location.assign(result.authorizationUrl);
+    } catch (e) { setError(e instanceof Error ? e.message : "Authorization failed"); setBusy(false); }
+  }
   async function select(externalShopId: string) { setBusy(true); try { await api("/integrations/tiktok/shop-selection", { method: "POST", body: JSON.stringify({ externalShopId }) }); await load(); } catch (e) { setError(e instanceof Error ? e.message : "Selection failed"); } setBusy(false); }
   async function refresh() { setBusy(true); try { await api("/integrations/tiktok/refresh", { method: "POST", body: "{}" }); await load(); } catch (e) { setError(e instanceof Error ? e.message : "Refresh failed"); } setBusy(false); }
   return <div className="page"><header className="page-header"><div><span className="eyebrow">TikTok connection</span><h1>{readOnly ? "Real TikTok connection" : "TikTok mock & safety settings"}</h1><p>{readOnly ? `Seller data is real. Outbound mode is ${(data?.outboundMode ?? "READ_ONLY").toLowerCase()}.` : "Deterministic local provider fixtures remain available for regression testing."}</p></div><span className={`status large ${readOnly ? "read_only" : "mock"}`}>{readOnly ? `REAL TIKTOK — ${data?.outboundMode ?? "READ ONLY"}` : "MOCK ONLY"}</span></header>
     {error && <div className="alert error">{error}</div>}
+    {authorizationNotice && <div className="alert" role="status">{authorizationNotice}</div>}
     <section className="settings-hero"><div className="settings-icon"><ShieldCheck/></div><div><h2>{data?.outboundEnabled ? "Live outbound is available" : "Outbound TikTok mutations are unavailable"}</h2><p>Discovery and history retain narrow read-only capabilities. Only the dedicated outbound worker can receive Create Conversation and Send Message.</p>{!data?.outboundEnabled && data?.outboundCapability?.reason && <p><strong>{data.outboundCapability.reason}</strong></p>}{readOnly && <p><strong>Use a dedicated TikTok developer app for Outreach to isolate its App × Shop API quota.</strong></p>}</div><div className="gate-list"><span><Check/>Production outbound stays LIVE</span><span><Check/>Dedicated mutation-only adapter</span><span><Check/>Tokens remain server-side</span></div></section>
     {readOnly && <div className="settings-grid"><section className="panel"><div className="panel-heading"><div><h2>Authorization health</h2><p>{data?.configurationState ?? "Loading"}</p></div><KeyRound/></div><div className="setting-rows"><div><span>Connection state</span><strong>{connection?.status ?? data?.configurationState}</strong></div><div><span>Seller open identity</span><strong>{connection?.sellerOpenId ?? "—"}</strong></div><div><span>Access token expires</span><strong>{connection?.accessTokenExpiresAt ? new Date(connection.accessTokenExpiresAt).toLocaleString() : "—"}</strong></div><div><span>Refresh token expires</span><strong>{connection?.refreshTokenExpiresAt ? new Date(connection.refreshTokenExpiresAt).toLocaleString() : "—"}</strong></div><div><span>Last refresh</span><strong>{connection?.lastRefreshAt ? new Date(connection.lastRefreshAt).toLocaleString() : "Never"}</strong></div><div><span>Refresh failures</span><strong>{formatNumber(connection?.refreshFailureCount)}</strong></div></div><div className="header-actions panel-actions"><button className="button primary" disabled={busy || data?.configurationState === "READ_ONLY_NOT_CONFIGURED"} onClick={authorize}>Authorize seller</button><button className="button secondary" disabled={busy || !connection} onClick={refresh}><RefreshCw size={15}/>Refresh token</button></div></section>
       <section className="panel"><div className="panel-heading"><div><h2>Selected real shop</h2><p>An authorized Indonesian shop must be selected explicitly.</p></div><Server/></div><div className="setting-rows"><div><span>Shop name</span><strong>{shop?.name ?? "Not selected"}</strong></div><div><span>Region</span><strong>{shop?.region ?? "—"}</strong></div><div><span>Shop identifier</span><strong>{shop?.externalShopId ?? "—"}</strong></div><div><span>Last successful API request</span><strong>{connection?.lastApiRequestAt ? new Date(connection.lastApiRequestAt).toLocaleString() : "Never"}</strong></div><div><span>Last request ID</span><strong>{connection?.lastRequestId ?? "—"}</strong></div></div>{data?.authorizedShops?.filter((item: any) => !item.selected).map((item: any) => <button key={item.id} className="button secondary" disabled={busy || item.region !== "ID"} onClick={() => select(item.externalShopId)}>Select {item.name} ({item.region})</button>)}</section></div>}

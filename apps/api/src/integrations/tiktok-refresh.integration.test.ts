@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash,randomBytes,randomUUID } from "node:crypto";
 import { PrismaClient } from "@affiliate/db";
 import { encryptTikTokToken } from "@affiliate/tiktok-adapter";
 import { config } from "../shared";
@@ -271,9 +271,9 @@ describe.sequential("persisted TikTok refresh lease", () => {
       accessTokenCiphertext: null, refreshTokenCiphertext: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null,
       tokenVersion: 4
     });
-    const state = stamp();
+    const state = randomBytes(32).toString('base64url'),browserHash=createHash('sha256').update(randomBytes(32)).digest('hex');
     await prisma.tikTokAuthorizationState.create({ data: {
-      stateHash: createHash("sha256").update(state).digest("hex"), expiresAt: new Date(Date.now() + 60_000)
+      stateHash: createHash("sha256").update(state).digest("hex"), expiresAt: new Date(Date.now() + 60_000),browserHash,operationId:randomUUID()
     } });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
@@ -290,7 +290,7 @@ describe.sequential("persisted TikTok refresh lease", () => {
       throw new Error(`Unexpected test path ${url.pathname}`);
     }));
     const service = new TikTokIntegrationService(prisma as any);
-    await expect(service.callback({ state, code: "new-authorization-code" })).resolves.toMatchObject({ status: "SHOP_SELECTION_REQUIRED" });
+    await expect(service.callback({ state, code: "new-authorization-code" },{browserHash})).resolves.toMatchObject({ status: "SHOP_SELECTION_REQUIRED" });
     const stored = await prisma.integrationConnection.findUniqueOrThrow({ where: { id: seed.connection.id } });
     expect(stored).toMatchObject({
       refreshState: "IDLE", refreshLeaseId: null, refreshLeaseExpiresAt: null, refreshStartedAt: null, refreshUncertainAt: null,

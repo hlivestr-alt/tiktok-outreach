@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, ServiceUnavailableException } from "@nestjs/common";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { canonicalBody, signHandoff, verifyHandoff, routerOrigin, isOpaque, digest, opaque, REGISTER_PATH, COMPLETE_PATH, NATIVE_START_PATH } from "./oauth-handoff";
 import { configuredOutboundCapability, tiktokCategoryCredentialsConfigured, tiktokCredentialsConfigured } from "@affiliate/config";
 import type { TikTokReadAdapter } from "@affiliate/contracts";
 import {
@@ -42,6 +43,7 @@ export function validateTikTokCallbackInput(input: { state?: string; code?: stri
   if (!input.state) throw new TikTokAuthorizationError("MISSING_STATE", "Authorization callback state is missing");
   if (input.error || input.code === "null") throw new TikTokAuthorizationError("AUTHORIZATION_REJECTED", "Seller rejected TikTok authorization");
   if (!input.code) throw new TikTokAuthorizationError("MALFORMED_CALLBACK", "Authorization callback code is missing");
+  if (!isOpaque(input.state) || typeof input.code !== "string" || input.code.length > 4096 || /[\x00-\x20\x7f]/.test(input.code)) throw new TikTokAuthorizationError("MALFORMED_CALLBACK", "Authorization callback is malformed");
 }
 
 export function publicTikTokConnection(connection: {
@@ -201,22 +203,46 @@ export class TikTokIntegrationService {
     return { ...configured, available: !reason, workerState, reason };
   }
 
-  async initiateAuthorization() {
+  async initiateAuthorization(browser: string) {
+    if (config.TIKTOK_OAUTH_INITIATIONS_ENABLED === "0" || !isOpaque(browser)) throw new BadRequestException("Account connections are temporarily unavailable");
     const { serviceId } = this.credentials();
     const state = randomBytes(32).toString("base64url");
-    await this.prisma.tikTokAuthorizationState.create({ data: { stateHash: stateHash(state), expiresAt: new Date(Date.now() + 10 * 60_000) } });
+    const expiresAt = new Date(Date.now() + 10 * 60_000), operationId = randomUUID();
+    const stored = await this.prisma.tikTokAuthorizationState.create({ data: { stateHash: stateHash(state), expiresAt, browserHash: digest(browser), operationId } });
+    if (config.TIKTOK_OAUTH_ROUTER_ENABLED === "1") {
+      try {
+        const origin = routerOrigin(config.TIKTOK_OAUTH_ROUTER_ORIGIN, config.RUNTIME_ENV === "test"), ticket = opaque();
+        const body = { stateHash: stateHash(state), browserHash: digest(browser), operationId, ticketHash: digest(ticket), expiresAt: expiresAt.toISOString() };
+        const response = await fetch(new URL(REGISTER_PATH, origin), { method: "POST", headers: { "content-type": "application/json", ...signHandoff(config.TIKTOK_OAUTH_HANDOFF_KEY || "", REGISTER_PATH, body) }, body: canonicalBody(body), redirect: "error", signal: AbortSignal.timeout(10000) });
+        if (response.status !== 204) throw new Error("OAUTH_ROUTER_UNAVAILABLE");
+        await this.prisma.tikTokAuthorizationState.update({ where: { id: stored.id }, data: { routerRegistered: true } });
+        return { routerStart: new URL(NATIVE_START_PATH, origin).href, state, ticket, expiresAt: expiresAt.toISOString(), mode: "READ_ONLY" };
+      } catch {
+        await this.prisma.tikTokAuthorizationState.updateMany({ where: { id: stored.id, consumedAt: null }, data: { consumedAt: new Date() } });
+        throw new ServiceUnavailableException("Account authorization is unavailable");
+      }
+    }
     const url = new URL(config.TIKTOK_AUTHORIZATION_BASE_URL);
     url.searchParams.set("service_id", serviceId);
     url.searchParams.set("state", state);
     return { authorizationUrl: url.toString(), expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), mode: "READ_ONLY" };
   }
 
-  async callback(input: { state?: string; code?: string; error?: string }) {
+  async privateCompletion(input: { state?: string; code?: string; operationId?: string; browserHash?: string }, headers: Headers) {
+    if (config.TIKTOK_OAUTH_ROUTER_ENABLED !== "1" || !input || Object.keys(input).sort().join(",") !== "browserHash,code,operationId,state") throw new BadRequestException("Authorization could not be completed");
+    const proof = verifyHandoff(config.TIKTOK_OAUTH_HANDOFF_KEY || "", COMPLETE_PATH, input, headers);
+    await this.prisma.tikTokOAuthHandoffNonce.create({ data: proof });
+    if (!input.operationId || !input.browserHash || !/^[a-f0-9]{64}$/.test(input.browserHash)) throw new BadRequestException("Authorization could not be completed");
+    await this.callback(input, { browserHash: input.browserHash, operationId: input.operationId, privateHandoff: true });
+  }
+
+  async callback(input: { state?: string; code?: string; error?: string }, binding: { browserHash: string; operationId?: string; privateHandoff?: boolean }) {
     try { validateTikTokCallbackInput(input); }
     catch (error) { throw new BadRequestException(error instanceof Error ? error.message : "Invalid TikTok callback"); }
     const hash = stateHash(input.state!);
     const stored = await this.prisma.tikTokAuthorizationState.findUnique({ where: { stateHash: hash } });
     if (!stored) throw new BadRequestException("Authorization state does not match");
+    if (!stored.browserHash || !stored.operationId || stored.browserHash !== binding?.browserHash || binding.privateHandoff && (!stored.routerRegistered || stored.operationId !== binding.operationId)) throw new BadRequestException("Authorization belongs to another browser");
     if (stored.consumedAt) throw new BadRequestException("Authorization state was already used");
     if (stored.expiresAt <= new Date()) throw new BadRequestException("Authorization state expired");
     const consumed = await this.prisma.tikTokAuthorizationState.updateMany({ where: { id: stored.id, consumedAt: null, expiresAt: { gt: new Date() } }, data: { consumedAt: new Date() } });
@@ -226,7 +252,7 @@ export class TikTokIntegrationService {
     const auth = new TikTokSellerAuthClient({ baseUrl: config.TIKTOK_AUTH_BASE_URL, appKey: credentials.appKey, appSecret: credentials.appSecret });
     let tokens: TikTokSellerTokens;
     try { tokens = await auth.exchange(input.code!); }
-    catch (error) { throw new BadRequestException(error instanceof Error ? error.message : "TikTok token exchange failed"); }
+    catch { throw new BadRequestException("TikTok authorization could not be completed"); }
 
     const transient = new RealTikTokReadOnlyAffiliateAdapter({ http: this.http(true), accessToken: async () => tokens.accessToken, shopCipher: async () => { throw new Error("Shop not selected"); }, authorizationScope: this.authorizationScope() });
     const shops = await transient.getAuthorizedShops();
